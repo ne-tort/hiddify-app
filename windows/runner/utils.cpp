@@ -5,7 +5,22 @@
 #include <stdio.h>
 #include <windows.h>
 
+#include <cwchar>
 #include <iostream>
+
+void SetCurrentDirectoryToExecutable() {
+  wchar_t path[MAX_PATH];
+  DWORD n = ::GetModuleFileNameW(nullptr, path, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) {
+    return;
+  }
+  wchar_t* slash = std::wcsrchr(path, L'\\');
+  if (slash == nullptr) {
+    return;
+  }
+  *slash = L'\0';
+  ::SetCurrentDirectoryW(path);
+}
 
 void CreateAndAttachConsole() {
   if (::AllocConsole()) {

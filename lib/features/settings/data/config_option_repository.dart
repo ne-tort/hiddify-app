@@ -73,9 +73,9 @@ abstract class ConfigOptions {
 
   static final remoteDnsDomainStrategy = PreferencesNotifier.create<DomainStrategy, String>(
     "remote-dns-domain-strategy",
-    DomainStrategy.auto,
-    mapFrom: (value) => DomainStrategy.values.firstWhere((e) => e.key == value),
-    mapTo: (value) => value.key,
+    DomainStrategy.adaptive,
+    mapFrom: (value) => _domainStrategyFromPref(value),
+    mapTo: _domainStrategyToPref,
   );
 
   static final directDnsAddress = PreferencesNotifier.create<String, String>(
@@ -98,10 +98,30 @@ abstract class ConfigOptions {
 
   static final directDnsDomainStrategy = PreferencesNotifier.create<DomainStrategy, String>(
     "direct-dns-domain-strategy",
-    DomainStrategy.auto,
-    mapFrom: (value) => DomainStrategy.values.firstWhere((e) => e.key == value),
-    mapTo: (value) => value.key,
+    DomainStrategy.asIs,
+    mapFrom: (value) => _domainStrategyFromPref(value),
+    mapTo: _domainStrategyToPref,
   );
+
+  /// Keep prefs stable with explicit token for "as is".
+  static String _domainStrategyToPref(DomainStrategy value) => switch (value) {
+    DomainStrategy.asIs => "as_is",
+    _ => value.key,
+  };
+
+  /// Prefs may still hold `""` / `as_is` / `auto` / `adaptive` from legacy builds.
+  static DomainStrategy _domainStrategyFromPref(String value) {
+    if (value.isEmpty || value == 'as_is') {
+      return DomainStrategy.asIs;
+    }
+    for (final e in DomainStrategy.values) {
+      if (e.key == value) return e;
+    }
+    if (value == 'adaptive') {
+      return DomainStrategy.adaptive;
+    }
+    return DomainStrategy.asIs;
+  }
 
   static final mixedPort = PreferencesNotifier.create<int, int>(
     "mixed-port",

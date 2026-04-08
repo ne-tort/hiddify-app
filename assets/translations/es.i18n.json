@@ -392,11 +392,13 @@
         "title": "DNS",
         "remoteDns": "DNS remoto",
         "remoteDnsDomainStrategy": "Estrategia de dominio de DNS remoto",
+        "remoteDnsDomainStrategyHint": "Preferir IPv4 no elimina los registros AAAA de las respuestas DNS. Para forzar IPv4 si IPv6 falla, elija Solo IPv4.",
         "directDns": "Resolución del servidor de salida (directo)",
         "directDnsDomainStrategy": "Estrategia de dominio de salida",
         "enableDnsRouting": "Habilitar enrutamiento de DNS",
         "enableFakeDns": "Habilitar DNS falso",
         "domainStrategy": {
+          "asIs": "Tal cual",
           "auto": "Automático",
           "preferIpv6": "Preferir IPv6",
           "preferIpv4": "Preferir IPv4",

@@ -392,11 +392,13 @@
         "title": "DNS",
         "remoteDns": "远程 DNS",
         "remoteDnsDomainStrategy": "远程 DNS 域名策略",
+        "remoteDnsDomainStrategyHint": "「偏好 IPv4」不会从 DNS 应答中移除 AAAA 记录。若需强制使用 IPv4，请选择「仅 IPv4」。",
         "directDns": "出站服务器解析器（直连）",
         "directDnsDomainStrategy": "出站域名策略",
         "enableDnsRouting": "启用 DNS 路由",
         "enableFakeDns": "启用伪造 DNS",
         "domainStrategy": {
+          "asIs": "原样",
           "auto": "自动",
           "preferIpv6": "偏好 IPv6",
           "preferIpv4": "偏好 IPv4",

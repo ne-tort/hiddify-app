@@ -16,4 +16,9 @@ std::string Utf8FromUtf16(const wchar_t* utf16_string);
 // encoded in UTF-8. Returns an empty std::vector<std::string> on failure.
 std::vector<std::string> GetCommandLineArguments();
 
+// Sets the process working directory to the directory of the running .exe so
+// relative paths (e.g. DartProject(L"data")) resolve when not launched from
+// that folder.
+void SetCurrentDirectoryToExecutable();
+
 #endif  // RUNNER_UTILS_H_

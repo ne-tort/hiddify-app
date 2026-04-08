@@ -392,11 +392,13 @@
         "title": "DNS",
         "remoteDns": "Uzak DNS",
         "remoteDnsDomainStrategy": "Uzak DNS alan adı stratejisi",
+        "remoteDnsDomainStrategyHint": "IPv4’ü tercih etmek, DNS yanıtlarından AAAA kayıtlarını kaldırmaz. IPv6 bozuksa IPv4’e zorlamak için Yalnızca IPv4’ü seçin.",
         "directDns": "Giden sunucu çözümleyicisi (doğrudan)",
         "directDnsDomainStrategy": "Giden alan adı stratejisi",
         "enableDnsRouting": "DNS yönlendirmeyi etkinleştir",
         "enableFakeDns": "Sahte DNS'i etkinleştir",
         "domainStrategy": {
+          "asIs": "Olduğu gibi",
           "auto": "Otomatik",
           "preferIpv6": "IPv6 tercih et",
           "preferIpv4": "IPv4 tercih et",

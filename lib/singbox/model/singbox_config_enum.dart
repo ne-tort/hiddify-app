@@ -88,7 +88,8 @@ enum IPv6Mode {
 
 @JsonEnum(valueField: 'key')
 enum DomainStrategy {
-  auto(""),
+  asIs(""),
+  adaptive("auto"),
   preferIpv6("prefer_ipv6"),
   preferIpv4("prefer_ipv4"),
   ipv4Only("ipv4_only"),
@@ -99,7 +100,8 @@ enum DomainStrategy {
   final String key;
 
   String present(TranslationsEn t) => switch (this) {
-    auto => t.pages.settings.dns.domainStrategy.auto,
+    asIs => t.pages.settings.dns.domainStrategy.asIs,
+    adaptive => t.pages.settings.dns.domainStrategy.auto,
     preferIpv6 => t.pages.settings.dns.domainStrategy.preferIpv6,
     preferIpv4 => t.pages.settings.dns.domainStrategy.preferIpv4,
     ipv4Only => t.pages.settings.dns.domainStrategy.ipv4Only,

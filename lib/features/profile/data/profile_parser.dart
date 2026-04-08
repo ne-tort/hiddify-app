@@ -394,7 +394,12 @@ class ProfileParser {
 
   static String protocol(String content) {
     if (content.contains("[Interface]")) {
-      return ProxyType.wireguard.label;
+      final lower = content.toLowerCase();
+      final hasAwgFields = RegExp(
+        r'^\s*(jc|jmin|jmax|s1|s2|s3|s4|h1|h2|h3|h4|i1|i2|i3|i4|i5)\s*=',
+        multiLine: true,
+      ).hasMatch(lower);
+      return hasAwgFields ? ProxyType.awg.label : ProxyType.wireguard.label;
     }
     final lines = content.split('\n');
     String? name;

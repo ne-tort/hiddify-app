@@ -98,7 +98,7 @@ class PreferencesVersion1Migration extends PreferencesMigrationStep with InfraLo
   };
 
   String _domainStrategyMapper(String persisted) => switch (persisted) {
-    "ipv4_only" || "prefer_ipv4" || "prefer_ipv4" || "ipv6_only" => persisted,
+    "ipv4_only" || "prefer_ipv6" || "prefer_ipv4" || "ipv6_only" => persisted,
     "auto" => "",
     "preferIpv6" => "prefer_ipv6",
     "preferIpv4" => "prefer_ipv4",

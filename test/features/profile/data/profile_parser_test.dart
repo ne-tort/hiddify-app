@@ -163,4 +163,36 @@ void main() {
       });
     });
   });
+
+  group("protocol", () {
+    test("Should detect AWG for INI with obfuscation fields", () {
+      const content = """
+[Interface]
+PrivateKey = test
+Address = 10.0.0.2/24
+Jc = 3
+S1 = 15
+
+[Peer]
+PublicKey = test
+AllowedIPs = 0.0.0.0/0
+Endpoint = 1.1.1.1:51820
+""";
+      expect(ProfileParser.protocol(content), equals("AWG"));
+    });
+
+    test("Should detect WireGuard for plain INI", () {
+      const content = """
+[Interface]
+PrivateKey = test
+Address = 10.0.0.2/24
+
+[Peer]
+PublicKey = test
+AllowedIPs = 0.0.0.0/0
+Endpoint = 1.1.1.1:51820
+""";
+      expect(ProfileParser.protocol(content), equals("WireGuard"));
+    });
+  });
 }

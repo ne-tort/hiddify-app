@@ -17,6 +17,7 @@ const DomainStrategy$json = const {
     const {'1': 'prefer_ipv6', '2': 2},
     const {'1': 'ipv4_only', '2': 3},
     const {'1': 'ipv6_only', '2': 4},
+    const {'1': 'auto', '2': 5},
   ],
 };
 

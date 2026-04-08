@@ -398,11 +398,13 @@
         "title": "DNS",
         "remoteDns": "DNS البعيد",
         "remoteDnsDomainStrategy": "استراتيجية نطاق DNS البعيد",
+        "remoteDnsDomainStrategyHint": "Prefer IPv4 does not remove AAAA records from DNS replies. To force IPv4 for browsing when IPv6 is broken, choose IPv4 only.",
         "directDns": "محلل خادم الصادر (مباشر)",
         "directDnsDomainStrategy": "استراتيجية النطاق الصادر",
         "enableDnsRouting": "تمكين توجيه DNS",
         "enableFakeDns": "تمكين DNS الوهمي",
         "domainStrategy": {
+          "asIs": "As is",
           "auto": "تلقائي",
           "preferIpv6": "تفضيل IPv6",
           "preferIpv4": "تفضيل IPv4",

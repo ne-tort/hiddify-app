@@ -392,11 +392,13 @@
         "title": "DNS",
         "remoteDns": "DNS اصلی (ریموت)",
         "remoteDnsDomainStrategy": "استراتژی دامنه DNS",
+        "remoteDnsDomainStrategyHint": "Prefer IPv4 does not remove AAAA records from DNS replies. To force IPv4 for browsing when IPv6 is broken, choose IPv4 only.",
         "directDns": "DNS پروکسی‌ها (مستقیم)",
         "directDnsDomainStrategy": "استراتژی دامنه DNS مستقیم",
         "enableDnsRouting": "فعال‌سازی مسیریابی DNS",
         "enableFakeDns": "فعال‌سازی DNS جعلی",
         "domainStrategy": {
+          "asIs": "As is",
           "auto": "خودکار",
           "preferIpv6": "ترجیح IPv6",
           "preferIpv4": "ترجیح IPv4",

@@ -59,7 +59,25 @@ class SingboxConfigOption with _$SingboxConfigOption {
     return encoder.convert(toJson());
   }
 
-  factory SingboxConfigOption.fromJson(Map<String, dynamic> json) => _$SingboxConfigOptionFromJson(json);
+  factory SingboxConfigOption.fromJson(Map<String, dynamic> json) =>
+      _$SingboxConfigOptionFromJson(_normalizeDomainStrategyJsonKeys(json));
+}
+
+/// Maps experimental/legacy strings from prefs or profiles so [DomainStrategy] (wire `""` only) can decode.
+Map<String, dynamic> _normalizeDomainStrategyJsonKeys(Map<String, dynamic> json) {
+  final out = Map<String, dynamic>.from(json);
+  for (final k in ['remote-dns-domain-strategy', 'direct-dns-domain-strategy']) {
+    final v = out[k];
+    if (v is! String) continue;
+    if (v == 'as_is') {
+      out[k] = '';
+      continue;
+    }
+    if (v == 'adaptive') {
+      out[k] = 'auto';
+    }
+  }
+  return out;
 }
 
 @freezed

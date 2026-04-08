@@ -74,6 +74,7 @@ class ChoicePreferenceWidget<T> extends HookConsumerWidget {
     this.showFlag = false,
     this.icon,
     required this.presentChoice,
+    this.subtitleHint,
     this.validateInput,
     this.onChanged,
   });
@@ -86,13 +87,29 @@ class ChoicePreferenceWidget<T> extends HookConsumerWidget {
   final bool showFlag;
   final IconData? icon;
   final String Function(T value) presentChoice;
+  /// Optional extra line below the current value (e.g. UX explanation).
+  final String? subtitleHint;
   final bool Function(String value)? validateInput;
   final ValueChanged<T>? onChanged;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final valueStyle = theme.textTheme.bodyMedium;
+    final hintStyle = theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant);
     return ListTile(
       title: Text(title),
-      subtitle: Text(presentChoice(selected)),
+      subtitle: subtitleHint != null
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(presentChoice(selected), style: valueStyle),
+                const SizedBox(height: 4),
+                Text(subtitleHint!, style: hintStyle),
+              ],
+            )
+          : Text(presentChoice(selected)),
+      isThreeLine: subtitleHint != null,
       leading: icon != null ? Icon(icon) : null,
       enabled: enabled,
       onTap: () async {

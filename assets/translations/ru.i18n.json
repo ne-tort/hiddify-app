@@ -396,11 +396,13 @@
         "title": "DNS",
         "remoteDns": "Удаленный DNS",
         "remoteDnsDomainStrategy": "Стратегия домена удаленного DNS",
+        "remoteDnsDomainStrategyHint": "Авто: ядро проверяет IPv4/IPv6 через основной прокси (~400 мс, затем кэш). Как есть: без принуждения (FakeDNS может отдать и A, и AAAA). Стратегия исходящего DNS ниже влияет только на имена прокси/сервера.",
         "directDns": "Распознаватель исходящего сервера (напрямую)",
         "directDnsDomainStrategy": "Стратегия исходящего домена",
         "enableDnsRouting": "Включить маршрутизацию DNS",
         "enableFakeDns": "Включить поддельный DNS",
         "domainStrategy": {
+          "asIs": "Как есть",
           "auto": "Авто",
           "preferIpv6": "Предпочитать IPv6",
           "preferIpv4": "Предпочитать IPv4",

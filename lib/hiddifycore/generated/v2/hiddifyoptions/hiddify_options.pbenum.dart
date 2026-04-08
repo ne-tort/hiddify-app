@@ -15,6 +15,7 @@ class DomainStrategy extends $pb.ProtobufEnum {
   static const DomainStrategy prefer_ipv6 = DomainStrategy._(2, const $core.bool.fromEnvironment('protobuf.omit_enum_names') ? '' : 'prefer_ipv6');
   static const DomainStrategy ipv4_only = DomainStrategy._(3, const $core.bool.fromEnvironment('protobuf.omit_enum_names') ? '' : 'ipv4_only');
   static const DomainStrategy ipv6_only = DomainStrategy._(4, const $core.bool.fromEnvironment('protobuf.omit_enum_names') ? '' : 'ipv6_only');
+  static const DomainStrategy auto = DomainStrategy._(5, const $core.bool.fromEnvironment('protobuf.omit_enum_names') ? '' : 'auto');
 
   static const $core.List<DomainStrategy> values = <DomainStrategy> [
     as_is,
@@ -22,6 +23,7 @@ class DomainStrategy extends $pb.ProtobufEnum {
     prefer_ipv6,
     ipv4_only,
     ipv6_only,
+    auto,
   ];
 
   static final $core.Map<$core.int, DomainStrategy> _byValue = $pb.ProtobufEnum.initByValue(values);

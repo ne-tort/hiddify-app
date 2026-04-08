@@ -392,11 +392,13 @@
         "title": "DNS",
         "remoteDns": "DNS jarak jauh",
         "remoteDnsDomainStrategy": "Strategi domain DNS jarak jauh",
+        "remoteDnsDomainStrategyHint": "Prefer IPv4 does not remove AAAA records from DNS replies. To force IPv4 for browsing when IPv6 is broken, choose IPv4 only.",
         "directDns": "Penyelesai server keluar (langsung)",
         "directDnsDomainStrategy": "Strategi domain keluar",
         "enableDnsRouting": "Aktifkan perutean DNS",
         "enableFakeDns": "Aktifkan DNS palsu",
         "domainStrategy": {
+          "asIs": "As is",
           "auto": "Otomatis",
           "preferIpv6": "Pilih IPv6",
           "preferIpv4": "Pilih IPv4",

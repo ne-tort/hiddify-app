@@ -393,11 +393,13 @@
         "title": "DNS",
         "remoteDns": "Remote DNS",
         "remoteDnsDomainStrategy": "Remote DNS domain strategy",
+        "remoteDnsDomainStrategyHint": "Auto: the core probes IPv4/IPv6 through your default proxy (~400 ms, then cached). As is: no preference (FakeDNS may return both A and AAAA). Outbound strategy below only affects resolving proxy/server hostnames.",
         "directDns": "Outbound server resolver (direct)",
         "directDnsDomainStrategy": "Outbound domain strategy",
         "enableDnsRouting": "Enable DNS routing",
         "enableFakeDns": "Enable fake DNS",
         "domainStrategy": {
+          "asIs": "As is",
           "auto": "Auto",
           "preferIpv6": "Prefer IPv6",
           "preferIpv4": "Prefer IPv4",

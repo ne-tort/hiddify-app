@@ -45,6 +45,7 @@ migrate_working_dir/
 **/*.dylib
 **/*.xcframework
 /dist/
+/portable/
 /dist_docker/
 
 /assets/core/*
