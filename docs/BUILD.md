@@ -33,7 +33,7 @@ git submodule update --init --recursive
 
 | Платформа        | Команда |
 |------------------|---------|
-| Windows amd64    | `make build-windows-libs` |
+| Windows amd64    | `make build-windows-libs` (в WSL можно `bash hiddify-core/scripts/wsl-build-windows-amd64.sh`) |
 | Linux amd64      | `make build-linux-libs` (cronet + core) |
 | Linux arm64      | `make build-linux-arm64-libs` |
 | Linux amd64 musl | `make build-linux-amd64-musl-libs` |
