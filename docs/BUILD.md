@@ -33,6 +33,41 @@ cd hiddify-app
 git submodule update --init --recursive
 ```
 
+## Сабмодуль `hiddify-core`: это не «просто локальные файлы»
+
+Каталог `hiddify-core/` — **отдельный git-репозиторий** (вложенный клон с `origin` на `ne-tort/hiddify-core`), а не набор файлов без истории. Родительский `hiddify-app` в коммите хранит только **указатель (SHA)** на конкретный коммит ядра.
+
+Чтобы изменения ядра попали на GitHub, нужны **коммиты внутри** `hiddify-core` и **push в `ne-tort/hiddify-core`**, затем коммит в корне `hiddify-app`, который обновляет запись `hiddify-core` на новый SHA, и **push** `ne-tort/hiddify-app`.
+
+### Два репозитория — два коммита (классический цикл)
+
+```bash
+cd hiddify-core
+git add -A && git commit -m "feat(core): …" && git push origin main
+cd ..
+git add hiddify-core
+git commit -m "chore: bump hiddify-core submodule"
+git push origin main
+```
+
+### Один `git push` из корня клиента (удобно)
+
+После того как **уже закоммичены** и правки в `hiddify-core`, и обновление указателя в `hiddify-app`, из **корня** репозитория клиента:
+
+```bash
+git push --recurse-submodules=on-demand origin main
+```
+
+Git сначала отправит незапушенные коммиты сабмодуля (если есть), затем push родителя.
+
+Чтобы не вводить флаг каждый раз (настройка только этого клона):
+
+```bash
+git config push.recurseSubmodules on-demand
+```
+
+Нужны **права push** в оба репозитория. Если в `hiddify-core` есть только незакоммиченные правки, родитель не сможет зафиксировать новый SHA — сначала `git status` / коммит в каталоге ядра.
+
 ## Источник нативного ядра (`dependencies.properties`)
 
 | `core.source`   | Поведение |
