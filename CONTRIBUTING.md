@@ -50,8 +50,10 @@ We recommend using [Visual Studio Code](https://docs.flutter.dev/development/too
 #### Setting up the Environment
 
 We have extensive use of code generation in the form of [freezed](https://github.com/rrousselGit/freezed), [riverpod](https://github.com/rrousselGit/riverpod), etc. So it's generate these before running the code. Execute the following make commands in order:
-Assuming you have not built the `hiddify-core` and want to use [existing releases](https://github.com/hiddify/hiddify-next-core/releases), you should run the following command (based on your target platform):
 
+**This fork:** native core is built from the **`hiddify-core` submodule** by default (`core.source=submodule` in `dependencies.properties`). Full instructions: [docs/BUILD.md](docs/BUILD.md).
+
+Platform prepare (runs code gen + builds or downloads core depending on `core.source`):
 
 - `make windows-prepare`
 - `make linux-prepare` 
@@ -59,9 +61,9 @@ Assuming you have not built the `hiddify-core` and want to use [existing release
 - `make ios-prepare`
 - `make android-prepare`
 
+**Prebuilt core (optional):** set `core.source=prebuilt` and `core.prebuilt.base` in `dependencies.properties` if you publish `hiddify-lib-*` tarballs (e.g. to your own `hiddify-next-core` releases).
 
-##### build the `hiddify-core` from source (Optional)
-If you want to build the `hiddify-core` from source after `make prepare`, use:
+**Build core only (submodule):**
 - `make build-windows-libs`
 - `make build-linux-libs` 
 - `make build-macos-libs`

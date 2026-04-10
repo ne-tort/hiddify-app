@@ -19,8 +19,7 @@
 
 </div>
 
-
-
+**Fork (ne-tort):** сборка клиента и ядра из сабмодуля — [docs/BUILD.md](docs/BUILD.md).
 
 ## What is Hiddify app?
 

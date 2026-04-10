@@ -40,14 +40,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: subosito/flutter-action@v2.21.0 #issue with 2.13
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: 'stable'
           cache: true
-          
-      - name: Prepare
-        run: make linux-amd64-prepare
+
+      - name: Dart prepare (no native core — unit tests)
+        run: make get gen translate
       - name: Test
         run: flutter test
 
@@ -55,9 +57,33 @@ jobs:
         id: draftBuildCode
         run: echo "::set-output name=datetime::$(date +'%d.%H.%M')"
 
+  # Windows app links hiddify-core.dll built with MinGW; build on Linux runner then pass to Windows job.
+  build-windows-core:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hiddify-core/go.mod
+      - uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+      - name: Install rsrc (Windows CLI .syso)
+        run: go install github.com/akavel/rsrc@latest
+      - name: Build Windows amd64 core
+        working-directory: hiddify-core
+        run: make windows-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hiddify-windows-core-bin
+          path: hiddify-core/bin/
+          retention-days: 2
 
   build:
-    needs: test
+    needs: [test, build-windows-core]
     permissions: write-all
     continue-on-error: true
 
@@ -117,6 +143,8 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Import Apple Codesign Certificates
         if: ${{ inputs.upload-artifact && startsWith(matrix.os,'macos') }}
@@ -153,6 +181,29 @@ jobs:
           # flutter-version-file: pubspec.yaml
           channel: 'stable'
           cache: true
+
+      - name: Setup Go (submodule core builds)
+        if: ${{ matrix.platform == 'linux' || matrix.platform == 'android-apk' || matrix.platform == 'android-aab' || matrix.platform == 'macos' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: hiddify-core/go.mod
+
+      - name: Cache Chromium toolchain (cronet / naive)
+        if: ${{ matrix.platform == 'linux' }}
+        id: cache-chromium-app
+        uses: actions/cache@v4
+        with:
+          path: |
+            hiddify-core/cronet/naiveproxy/src/third_party/llvm-build/Release+Asserts
+            hiddify-core/cronet/naiveproxy/src/out/sysroot-build
+          key: app-cronet-linux-${{ hashFiles('hiddify-core/hiddify-sing-box/.github/CRONET_GO_VERSION') }}
+
+      - name: Download Windows core artifact
+        if: matrix.platform == 'windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: hiddify-windows-core-bin
+          path: hiddify-core/bin/
 
       - name: Clean up disk space
         if: startsWith(matrix.platform,'android')
@@ -212,6 +263,7 @@ jobs:
             gradle-${{ runner.os }}-
                   
       - name: Setup dependencies
+        shell: bash
         run: |
           make ${{ matrix.platform }}-install-deps  
           echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
@@ -243,11 +295,15 @@ jobs:
 
 
       - name: Prepare for ${{ matrix.platform }}
+        shell: bash
+        env:
+          CORE_PREBUILT_IN_TREE: ${{ matrix.platform == 'windows' && '1' || '' }}
         run: |
           make ${{ matrix.platform }}-prepare
 
 
       - name: Build ${{ matrix.platform }}
+        shell: bash
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |

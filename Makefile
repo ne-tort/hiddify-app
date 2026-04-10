@@ -1,6 +1,14 @@
 # .ONESHELL:
 include dependencies.properties
 
+# Defaults if keys missing from dependencies.properties
+ifeq ($(core.source),)
+core.source := submodule
+endif
+ifeq ($(core.prebuilt.base),)
+core.prebuilt.base := https://github.com/ne-tort/hiddify-next-core/releases/download
+endif
+
 # --- Log Colors ---
 blue   := \033[1;34m
 green  := \033[1;92m
@@ -50,9 +58,9 @@ CORE_NAME=hiddify-lib
 LIB_NAME=hiddify-core
 
 ifeq ($(CHANNEL),prod)
-	CORE_URL=https://github.com/hiddify/hiddify-next-core/releases/download/v$(core.version)
+	CORE_URL=$(core.prebuilt.base)/v$(core.version)
 else
-	CORE_URL=https://github.com/hiddify/hiddify-next-core/releases/download/draft
+	CORE_URL=$(core.prebuilt.base)/draft
 endif
 
 ifeq ($(CHANNEL),prod)
@@ -86,26 +94,93 @@ prepare:
 	@echo    make ios-prepare
 
 common-prepare:  get gen translate
-windows-prepare: common-prepare windows-libs
+
+.PHONY: windows-core-resolve linux-amd64-core-resolve linux-arm64-core-resolve \
+	linux-amd64-musl-core-resolve linux-arm64-musl-core-resolve \
+	android-core-resolve macos-core-resolve ios-core-resolve
+
+windows-core-resolve:
+ifeq ($(CORE_PREBUILT_IN_TREE),1)
+	@$(BLUE)Using hiddify-core/bin (CORE_PREBUILT_IN_TREE)$(DONE)
+	@test -f hiddify-core/bin/hiddify-core.dll || (echo "missing hiddify-core/bin/hiddify-core.dll" && exit 1)
+else ifeq ($(core.source),submodule)
+	$(MAKE) build-windows-libs
+else
+	$(MAKE) windows-libs
+endif
+
+linux-amd64-core-resolve:
+ifeq ($(CORE_PREBUILT_IN_TREE),1)
+	@$(BLUE)Using hiddify-core/bin (CORE_PREBUILT_IN_TREE)$(DONE)
+	@test -f hiddify-core/bin/lib/hiddify-core.so || (echo "missing hiddify-core/bin/lib/hiddify-core.so" && exit 1)
+else ifeq ($(core.source),submodule)
+	$(MAKE) build-linux-libs
+else
+	$(MAKE) linux-amd64-libs
+endif
+
+linux-arm64-core-resolve:
+ifeq ($(core.source),submodule)
+	$(MAKE) build-linux-arm64-libs
+else
+	$(MAKE) linux-arm64-libs
+endif
+
+linux-amd64-musl-core-resolve:
+ifeq ($(core.source),submodule)
+	$(MAKE) build-linux-amd64-musl-libs
+else
+	$(MAKE) linux-amd64-musl-libs
+endif
+
+linux-arm64-musl-core-resolve:
+ifeq ($(core.source),submodule)
+	$(MAKE) build-linux-arm64-musl-libs
+else
+	$(MAKE) linux-arm64-musl-libs
+endif
+
+android-core-resolve:
+ifeq ($(core.source),submodule)
+	$(MAKE) build-android-libs
+else
+	$(MAKE) android-libs
+endif
+
+macos-core-resolve:
+ifeq ($(core.source),submodule)
+	$(MAKE) build-macos-libs
+else
+	$(MAKE) macos-libs
+endif
+
+ios-core-resolve:
+ifeq ($(core.source),submodule)
+	$(MAKE) build-ios-libs
+else
+	$(MAKE) ios-libs
+endif
+
+windows-prepare: common-prepare windows-core-resolve
 	
-ios-prepare: common-prepare ios-libs 
+ios-prepare: common-prepare ios-core-resolve 
 	cd ios; pod repo update; pod install;echo "done ios prepare"
 	
-macos-prepare: common-prepare macos-libs
-linux-prepare: common-prepare linux-amd64-libs
+macos-prepare: common-prepare macos-core-resolve
+linux-prepare: common-prepare linux-amd64-core-resolve
 
 
-linux-amd64-prepare: common-prepare linux-amd64-libs
-linux-arm64-prepare: common-prepare linux-arm64-libs
-linux-amd64-musl-prepare: common-prepare linux-amd64-musl-libs
-linux-arm64-musl-prepare: common-prepare linux-arm64-musl-libs
+linux-amd64-prepare: common-prepare linux-amd64-core-resolve
+linux-arm64-prepare: common-prepare linux-arm64-core-resolve
+linux-amd64-musl-prepare: common-prepare linux-amd64-musl-core-resolve
+linux-arm64-musl-prepare: common-prepare linux-arm64-musl-core-resolve
 
 
 linux-appimage-prepare:linux-prepare
 linux-rpm-prepare:linux-prepare
 linux-deb-prepare:linux-prepare
 
-android-prepare:common-prepare android-libs	
+android-prepare:common-prepare android-core-resolve	
 android-apk-prepare:android-prepare
 android-aab-prepare:android-prepare
 
@@ -522,7 +597,20 @@ build-windows-libs:
 	make -C hiddify-core -f Makefile windows-amd64
 
 build-linux-libs:
-	make -C hiddify-core -f Makefile linux-amd64 
+	make -C hiddify-core -f Makefile cronet-amd64
+	make -C hiddify-core -f Makefile linux-amd64
+
+build-linux-arm64-libs:
+	make -C hiddify-core -f Makefile cronet-arm64
+	make -C hiddify-core -f Makefile linux-arm64
+
+build-linux-amd64-musl-libs:
+	VARIANT=musl $(MAKE) -C hiddify-core -f Makefile cronet-amd64
+	VARIANT=musl $(MAKE) -C hiddify-core -f Makefile linux-amd64
+
+build-linux-arm64-musl-libs:
+	VARIANT=musl $(MAKE) -C hiddify-core -f Makefile cronet-arm64
+	VARIANT=musl $(MAKE) -C hiddify-core -f Makefile linux-arm64
 
 build-macos-libs:
 	make -C hiddify-core -f Makefile macos

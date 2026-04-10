@@ -88,20 +88,23 @@ class RouteOptionsPage extends HookConsumerWidget {
             value: ref.watch(ConfigOptions.bypassLan),
             onChanged: ref.read(ConfigOptions.bypassLan.notifier).update,
           ),
-          SwitchListTile.adaptive(
-            title: Text(t.pages.settings.routing.resolveDestination),
-            secondary: const Icon(Icons.security_rounded),
-            value: ref.watch(ConfigOptions.resolveDestination),
-            onChanged: ref.read(ConfigOptions.resolveDestination.notifier).update,
-          ),
-          ChoicePreferenceWidget(
-            selected: ref.watch(ConfigOptions.ipv6Mode),
-            preferences: ref.watch(ConfigOptions.ipv6Mode.notifier),
-            choices: IPv6Mode.values,
-            title: t.pages.settings.routing.ipv6Route,
-            icon: Icons.looks_6_rounded,
-            presentChoice: (value) => value.present(t),
-          ),
+          // Устарело: resolve-destination и ipv6-mode сохраняются в prefs/JSON, но в
+          // hiddify-core/v2/config/builder.go не участвуют в генерации sing-box (логика
+          // закомментирована / не подключена). Элементы UI скрыты, чтобы не вводить в заблуждение.
+          // SwitchListTile.adaptive(
+          //   title: Text(t.pages.settings.routing.resolveDestination),
+          //   secondary: const Icon(Icons.security_rounded),
+          //   value: ref.watch(ConfigOptions.resolveDestination),
+          //   onChanged: ref.read(ConfigOptions.resolveDestination.notifier).update,
+          // ),
+          // ChoicePreferenceWidget(
+          //   selected: ref.watch(ConfigOptions.ipv6Mode),
+          //   preferences: ref.watch(ConfigOptions.ipv6Mode.notifier),
+          //   choices: IPv6Mode.values,
+          //   title: t.pages.settings.routing.ipv6Route,
+          //   icon: Icons.looks_6_rounded,
+          //   presentChoice: (value) => value.present(t),
+          // ),
         ],
       ),
     );
