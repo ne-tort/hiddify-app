@@ -19,7 +19,7 @@
 
 </div>
 
-**Fork (ne-tort):** сборка клиента и ядра из сабмодуля — [docs/BUILD.md](docs/BUILD.md).
+**Fork (ne-tort):** канонический репозиторий клиента — **https://github.com/ne-tort/hiddify-app**. Сабмодуль ядра в `.gitmodules` — **https://github.com/ne-tort/hiddify-core** (ветка `main`). Здесь же лежат доработки клиента (в т.ч. **AWG**: парсинг профилей и связанный UI/логика). Сборка: [docs/BUILD.md](docs/BUILD.md). Релизы и ссылки на скачивание ниже по странице исторически указывают на апстрим `hiddify/hiddify-app`; для сборок этого форка ориентируйтесь на **ne-tort** при публикации релизов.
 
 ## What is Hiddify app?
 

@@ -2,7 +2,9 @@
 
 Every contribution to HiddifyApp is welcome, whether it is reporting a bug, submitting a fix, proposing new features, or just asking a question. To make contributing to HiddifyApp as easy as possible, you will find more details for the development flow in this documentation. [Basic tutorial on how to contribute to HiddifyApp](https://hiddify.com/app/How-to-contribute-to-this-project/)
 
-Please note, we have a [Code of Conduct](https://github.com/hiddify/hiddify-app/blob/main/CODE_OF_CONDUCT.md), please follow it in all your interactions with the project.
+**This fork (ne-tort):** development for this line happens at **https://github.com/ne-tort/hiddify-app**. The **`hiddify-core`** git submodule URL is **https://github.com/ne-tort/hiddify-core** (see `.gitmodules`). Use **ne-tort** for issues and PRs targeting this fork; upstream remains [hiddify/hiddify-app](https://github.com/hiddify/hiddify-app).
+
+Please note, we have a [Code of Conduct](https://github.com/ne-tort/hiddify-app/blob/main/CODE_OF_CONDUCT.md), please follow it in all your interactions with the project.
 
 - [Feedback, Issues and Questions](#feedback-issues-and-questions)
 - [Adding new Features](#adding-new-features)
@@ -18,8 +20,8 @@ Please note, we have a [Code of Conduct](https://github.com/hiddify/hiddify-app/
 
 If you encounter any issue, or you have an idea to improve, please:
 
-- Search through [existing open and closed GitHub Issues](https://github.com/hiddify/hiddify-app/issues) for the answer first. If you find a relevant topic, please comment on the issue.
-- If none of the issues are relevant, please add a new [issue](https://github.com/hiddify/hiddify-app/issues/new/choose) following the templates and provide as much relevant information as possible.
+- For **this fork**, search [ne-tort/hiddify-app issues](https://github.com/ne-tort/hiddify-app/issues) first; you may also check [upstream issues](https://github.com/hiddify/hiddify-app/issues) for general Hiddify topics.
+- New issues for **ne-tort** work: [open an issue](https://github.com/ne-tort/hiddify-app/issues/new/choose) on **ne-tort/hiddify-app**.
 
 ## Adding new Features
 
@@ -95,7 +97,7 @@ flutter run --device-id=35492ae2
 
 ## Release
 
-We use [flutter_distributor](https://github.com/leanflutter/flutter_distributor) for packaging. [GitHub action](https://github.com/hiddify/hiddify-app/blob/main/.github/workflows/build.yml) is triggered on every release tag and will create a new GitHub release.
+We use [flutter_distributor](https://github.com/leanflutter/flutter_distributor) for packaging. [GitHub Actions workflow](https://github.com/ne-tort/hiddify-app/blob/main/.github/workflows/build.yml) in **ne-tort/hiddify-app** is triggered on every release tag and will create a new GitHub release.
 After setting up the environment, use the following make commands to build the release version:
 
 - `make windows-release`

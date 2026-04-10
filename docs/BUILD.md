@@ -1,6 +1,15 @@
 # Сборка форка (ne-tort): клиент и ядро
 
-Репозитории: [hiddify-app](https://github.com/ne-tort/hiddify-app), сабмодуль [hiddify-core](https://github.com/ne-tort/hiddify-core). Исходники **sing-box** и **ray2sing** входят в состав ядра как обычные каталоги `hiddify-core/hiddify-sing-box` и `hiddify-core/ray2sing` (без вложенных git-сабмодулей) и подключаются через `replace` в `hiddify-core/go.mod` на `./hiddify-sing-box` и `./ray2sing`.
+**Канонические remote (именно так задано в git):**
+
+| Роль | URL |
+|------|-----|
+| Клиент (этот репозиторий) | `https://github.com/ne-tort/hiddify-app` |
+| Сабмодуль `hiddify-core` | `https://github.com/ne-tort/hiddify-core` (см. `.gitmodules`, ветка `main`) |
+
+Доработки **клиента** под AWG (парсинг и пр.) — в **ne-tort/hiddify-app**. Отдельные изменения **ядра** (sing-box AWG и т.д.) по мере готовности коммитятся в **ne-tort/hiddify-core** и поднимают SHA сабмодуля здесь.
+
+Репозитории для справки: [hiddify-app](https://github.com/ne-tort/hiddify-app), сабмодуль [hiddify-core](https://github.com/ne-tort/hiddify-core). Исходники **sing-box** и **ray2sing** входят в состав ядра как обычные каталоги `hiddify-core/hiddify-sing-box` и `hiddify-core/ray2sing` (без вложенных git-сабмодулей) и подключаются через `replace` в `hiddify-core/go.mod` на `./hiddify-sing-box` и `./ray2sing`.
 
 ## Требования и одна среда
 
