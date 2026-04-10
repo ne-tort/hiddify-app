@@ -9,6 +9,14 @@ ifeq ($(core.prebuilt.base),)
 core.prebuilt.base := https://github.com/ne-tort/hiddify-next-core/releases/download
 endif
 
+.DEFAULT_GOAL := help
+
+# Рецепты с shell — только из POSIX-окружения (Git Bash, MSYS2, WSL, Linux/macOS), не из cmd.exe.
+ifeq ($(OS),Windows_NT)
+  SHELL := sh
+  .SHELLFLAGS := -c
+endif
+
 # --- Log Colors ---
 blue   := \033[1;34m
 green  := \033[1;92m
@@ -25,13 +33,7 @@ MKDIR := mkdir -p
 RM  := rm -rf
 SEP :=/
 
-ifeq ($(OS),Windows_NT)
-    ifeq ($(IS_GITHUB_ACTIONS),)
-		# MKDIR := -mkdir
-		RM := rmdir /s /q
-		# SEP:=\\
-	endif
-endif
+# Рецепты выполняются через sh (Git Bash / CI bash); rm -rf и mkdir -p единообразны на всех ОС.
 
 
 # Define sed command based on the OS
@@ -72,23 +74,66 @@ endif
 BUILD_ARGS=--dart-define sentry_dsn=$(SENTRY_DSN)
 DISTRIBUTOR_ARGS=--skip-clean --build-target $(TARGET) --build-dart-define sentry_dsn=$(SENTRY_DSN)
 
+.PHONY: help bootstrap-wsl-deps windows-env-check clean-portable
 
+help:
+	@echo "hiddify-app — точка входа: make <цель>"
+	@echo ""
+	@echo "=== Среда (выберите одну, не смешивайте в одной сборке) ==="
+	@echo "  A) Windows: Git Bash или MSYS2 UCRT64 — Flutter (Windows), Go, GNU make, MinGW-w64, rsrc в PATH."
+	@echo "  B) WSL Ubuntu: только ядро Windows DLL (make build-windows-libs); полный клиент Windows — в среде A."
+	@echo ""
+	@echo "Первичная настройка Windows (PowerShell, один раз):"
+	@echo "  powershell -ExecutionPolicy Bypass -File scripts/bootstrap-windows.ps1"
+	@echo ""
+	@echo "Первичная настройка WSL (ядро):"
+	@echo "  make bootstrap-wsl-deps"
+	@echo ""
+	@echo "=== Основные цели ==="
+	@echo "  make windows-portable     — rm portable/ + ядро + flutter build + portable/windows-x64/Hiddify"
+	@echo "  make build-windows-libs   — только hiddify-core (windows-amd64)"
+	@echo "  make windows-prepare      — pub get + ядро + генерация"
+	@echo "  make windows-portable-sync — только копирование Release -> portable (после сборки Flutter)"
+	@echo ""
+	@echo "Проверка инструментов (Windows-сборка):"
+	@echo "  make windows-env-check"
+
+bootstrap-wsl-deps:
+	sudo apt-get update -y
+	sudo apt-get install -y build-essential mingw-w64 golang-go make
+	@echo "Установите rsrc: go install github.com/akavel/rsrc@latest"
+	go install github.com/akavel/rsrc@latest
+
+windows-env-check:
+	@command -v flutter >/dev/null 2>&1 || (echo "Нет flutter в PATH (нужен Flutter for Windows)." && exit 1)
+	@command -v dart >/dev/null 2>&1 || (echo "Нет dart в PATH." && exit 1)
+	@command -v go >/dev/null 2>&1 || (echo "Нет go в PATH." && exit 1)
+	@echo "OK: flutter, dart, go найдены."
+	@command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || command -v x86_64-w64-mingw32-gcc-15-posix >/dev/null 2>&1 || (echo "Предупреждение: не найден MinGW (x86_64-w64-mingw32-gcc*) — нужен для build-windows-libs." && exit 1)
+	@echo "OK: MinGW в PATH."
+	@command -v rsrc >/dev/null 2>&1 || (echo "Нет rsrc: выполните go install github.com/akavel/rsrc@latest" && exit 1)
+	@echo "OK: rsrc."
+
+clean-portable:
+	rm -rf portable
 
 get:	
 	flutter pub get
 
 gen:
-	dart run build_runner build --delete-conflicting-outputs
+	flutter pub run build_runner build --delete-conflicting-outputs
 
 translate:
-	dart run slang
+	flutter pub run slang
 
 
 
 prepare:
 	@echo use the following commands to prepare the library for each platform:
+	@echo    make help
 	@echo    make android-prepare
 	@echo    make windows-prepare
+	@echo    make windows-portable   # Release + portable/windows-x64/Hiddify (all DLLs)
 	@echo    make linux-prepare 
 	@echo    make macos-prepare
 	@echo    make ios-prepare
@@ -332,6 +377,7 @@ linux-flutter-sync:
 
 windows-install-deps:
 	dart pub global activate fastforge
+	@echo "Для MinGW/make/sh см. make help и scripts/bootstrap-windows.ps1"
 # 	choco install innosetup -y
 	
 gen_translations: #generating missing translations using google translate
@@ -361,6 +407,39 @@ android-aab-release:
 
 windows-release: windows-zip-release windows-exe-release windows-msix-release
 
+# Copy build/windows/x64/runner/Release -> portable/windows-x64/Hiddify (единый POSIX-рецепт, без ps1/sh-оркестраторов)
+.PHONY: windows-portable-sync windows-portable
+
+windows-portable-sync:
+	@set -eu; \
+	ROOT="$(CURDIR)"; \
+	REL="$$ROOT/build/windows/x64/runner/Release"; \
+	DST="$$ROOT/portable/windows-x64/Hiddify"; \
+	complete_bundle() { test -f "$$1/Hiddify.exe" && test -f "$$1/flutter_windows.dll"; }; \
+	if complete_bundle "$$REL"; then SRC="$$REL"; \
+	elif [ -n "$${PROGRAMFILES:-}" ] && complete_bundle "$$PROGRAMFILES/hiddify"; then \
+	  echo "WARN: используется $$PROGRAMFILES/hiddify (CMake ставил в Program Files). Очистите CMakeCache или см. windows/CMakeLists.txt." >&2; \
+	  SRC="$$PROGRAMFILES/hiddify"; \
+	elif complete_bundle "/c/Program Files/hiddify"; then \
+	  echo "WARN: fallback /c/Program Files/hiddify" >&2; SRC="/c/Program Files/hiddify"; \
+	elif complete_bundle "/mnt/c/Program Files/hiddify"; then \
+	  echo "WARN: fallback /mnt/c/Program Files/hiddify (WSL)" >&2; SRC="/mnt/c/Program Files/hiddify"; \
+	else \
+	  echo "Нет полного bundle (нужны Hiddify.exe + flutter_windows.dll) в:" >&2; \
+	  echo "  $$REL" >&2; \
+	  echo "  или в Program Files/hiddify" >&2; \
+	  exit 1; \
+	fi; \
+	rm -rf "$$DST"; mkdir -p "$$DST"; \
+	cp -a "$$SRC"/. "$$DST"/; \
+	echo "Portable bundle: $$DST"; \
+	echo "Запуск: $$DST/Hiddify.exe"
+
+# Release-сборка с portable=true и готовая папка portable/windows-x64/Hiddify (без fastforge zip)
+windows-portable: clean-portable windows-prepare
+	flutter build windows --release --dart-define=sentry_dsn=$(SENTRY_DSN) --dart-define=portable=true
+	$(MAKE) windows-portable-sync
+
 windows-zip-release:
 	fastforge package \
 	  --platform windows \
@@ -382,6 +461,7 @@ windows-zip-release:
 	tar -a -cf "$$FILE_NAME.zip" Hiddify; \
 	rm -rf Hiddify; \
 	$(GREEN)Successful$(DONE)
+	@$(MAKE) windows-portable-sync
 
 windows-exe-release:
 	fastforge package \

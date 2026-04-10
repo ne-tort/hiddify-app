@@ -51,7 +51,7 @@ We recommend using [Visual Studio Code](https://docs.flutter.dev/development/too
 
 We have extensive use of code generation in the form of [freezed](https://github.com/rrousselGit/freezed), [riverpod](https://github.com/rrousselGit/riverpod), etc. So it's generate these before running the code. Execute the following make commands in order:
 
-**This fork:** native core is built from the **`hiddify-core` submodule** by default (`core.source=submodule` in `dependencies.properties`). Full instructions: [docs/BUILD.md](docs/BUILD.md).
+**This fork:** native core is built from the **`hiddify-core` submodule** by default (`core.source=submodule` in `dependencies.properties`). Full instructions: [docs/BUILD.md](docs/BUILD.md). Краткий список целей: `make help` (на Windows — из Git Bash или MSYS2, не из `cmd`).
 
 Platform prepare (runs code gen + builds or downloads core depending on `core.source`):
 

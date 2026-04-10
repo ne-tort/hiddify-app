@@ -68,6 +68,11 @@ set(CMAKE_VS_INCLUDE_INSTALL_TO_DEFAULT_BUILD 1)
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   set(CMAKE_INSTALL_PREFIX "${BUILD_BUNDLE_DIR}" CACHE PATH "..." FORCE)
 endif()
+# Visual Studio / some Flutter invocations pass CMAKE_INSTALL_PREFIX=C:/Program Files/...
+# That leaves runner/Release almost empty and breaks portable sync. Force bundle next to the built exe.
+if(WIN32 AND CMAKE_INSTALL_PREFIX MATCHES "[Pp]rogram [Ff]iles")
+  set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/runner/Release" CACHE PATH "Portable bundle next to Release exe" FORCE)
+endif()
 
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")

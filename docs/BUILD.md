@@ -2,11 +2,17 @@
 
 Репозитории: [hiddify-app](https://github.com/ne-tort/hiddify-app), сабмодуль [hiddify-core](https://github.com/ne-tort/hiddify-core). Исходники **sing-box** и **ray2sing** входят в состав ядра как обычные каталоги `hiddify-core/hiddify-sing-box` и `hiddify-core/ray2sing` (без вложенных git-сабмодулей) и подключаются через `replace` в `hiddify-core/go.mod` на `./hiddify-sing-box` и `./ray2sing`.
 
-## Требования
+## Требования и одна среда
+
+Не смешивайте в одной сборке **разные** установки Go/Flutter (например, Go из WSL и Flutter только на Windows). Выберите профиль и придерживайтесь его.
+
+- **Профиль «Windows-клиент целиком»** (рекомендуется для `make windows-portable`): **Git Bash** или **MSYS2** (POSIX shell), **Flutter for Windows**, **Go for Windows**, **GNU make**, **MinGW-w64** в PATH, **`rsrc`** (`go install github.com/akavel/rsrc@latest`). Команды `make` не запускайте из `cmd.exe` без `sh`.
+- **Профиль «только ядро Windows DLL»** в **WSL (Ubuntu)**: `make bootstrap-wsl-deps`, затем `make build-windows-libs` или `bash hiddify-core/scripts/wsl-build-windows-amd64.sh`. Полный Flutter-клиент под Windows в этом профиле не собирается — для него используйте профиль Windows.
+
+Первичная настройка на Windows (один раз): `powershell -ExecutionPolicy Bypass -File scripts/bootstrap-windows.ps1`, затем новый терминал Git Bash и `make windows-env-check`.
 
 - **Flutter**: версия из `pubspec.yaml` (`environment.flutter`, сейчас `^3.38.5`).
 - **Go**: версия из `hiddify-core/go.mod` (сейчас `1.25.6`).
-- **Windows DLL / CLI ядра**: сборка `make -C hiddify-core windows-amd64` использует **bash и MinGW (кросс-компиляция)**. На Windows удобнее **WSL2 (Ubuntu)** или CI; нативный PowerShell без MinGW для этой цели не подходит.
 - **Linux desktop core**: перед `linux-amd64` нужен **cronet** (`make -C hiddify-core cronet-amd64`) — долго при первом запуске; в CI кэшируется.
 
 ## Клонирование
@@ -33,7 +39,7 @@ git submodule update --init --recursive
 
 | Платформа        | Команда |
 |------------------|---------|
-| Windows amd64    | `make build-windows-libs` (в WSL можно `bash hiddify-core/scripts/wsl-build-windows-amd64.sh`) |
+| Windows amd64    | `make build-windows-libs` (в WSL: сначала `make bootstrap-wsl-deps`, опционально `bash hiddify-core/scripts/wsl-build-windows-amd64.sh`) |
 | Linux amd64      | `make build-linux-libs` (cronet + core) |
 | Linux arm64      | `make build-linux-arm64-libs` |
 | Linux amd64 musl | `make build-linux-amd64-musl-libs` |
@@ -55,10 +61,30 @@ make windows-release    # см. Makefile: есть linux-release, android-*, mac
 
 Локальный запуск без полного релиза: `flutter run` (после соответствующего `*-prepare`).
 
+### Windows: portable-папка (exe + все DLL)
+
+После `flutter build windows` CMake кладёт в `build/windows/x64/runner/Release/` не только `Hiddify.exe`, но и `flutter_windows.dll`, каталог `data/`, плагины, **`hiddify-core.dll`**, **`libcronet.dll`**, **`HiddifyCli.exe`** (см. `windows/CMakeLists.txt`).
+
+Чтобы автоматически собрать релиз с `portable=true` и скопировать **всё содержимое Release** в одну рабочую папку:
+
+```bash
+make windows-portable
+```
+
+Результат: **`portable/windows-x64/Hiddify/`** (каталог в `.gitignore`). Запуск: `portable/windows-x64/Hiddify/Hiddify.exe`. Данные portable-режима создаются рядом в `hiddify_portable_data/`.
+
+Если сборка уже есть (например после `make windows-zip-release` / fastforge), достаточно синхронизировать папку:
+
+```bash
+make windows-portable-sync
+```
+
+Копирование выполняется **одной целью в Makefile** (POSIX shell), без отдельных ps1/sh-скриптов.
+
 ## CI (GitHub Actions)
 
 - Юнит-тесты: `make get gen translate` + `flutter test` (без нативного ядра).
-- Сборка Windows-клиента: ядро собирается на **Ubuntu** (`build-windows-core`), артефакт подставляется в `hiddify-core/bin`, затем на **windows-latest** выполняется `make windows-prepare` с `CORE_PREBUILT_IN_TREE=1`.
+- Сборка Windows-клиента: ядро собирается на **Ubuntu** (`build-windows-core`), артефакт подставляется в `hiddify-core/bin`, затем на **windows-latest** выполняется `make windows-prepare` с `CORE_PREBUILT_IN_TREE=1`. После `windows-zip-release` дополнительно выполняется **`make windows-portable-sync`** — в рабочем дереве появляется `portable/windows-x64/Hiddify` (удобно для ручной проверки; в артефакты CI по умолчанию не входит).
 - Linux / Android / macOS: `actions/checkout` с `submodules: recursive`, затем `make *-prepare` с `core.source=submodule`.
 
 ## Отличия форка (AWG и парсинг)
