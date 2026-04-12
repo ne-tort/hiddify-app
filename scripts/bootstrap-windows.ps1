@@ -16,6 +16,17 @@ function Add-UserPathFront([string]$Dir) {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+# Ошибочный GOOS=linux на хосте Windows ломает CGO (cgo.exe / link). Убираем из профиля пользователя и текущей сессии.
+$userGoos = [Environment]::GetEnvironmentVariable("GOOS", "User")
+if ($userGoos -eq "linux") {
+    [Environment]::SetEnvironmentVariable("GOOS", $null, "User")
+    Write-Host "Удалён GOOS=linux из переменных среды пользователя (User)."
+}
+if ($env:GOOS -eq "linux") {
+    Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
+    Write-Host "Снят GOOS=linux в текущей сессии PowerShell."
+}
+
 # sh для GNU Make — обычно из Git for Windows
 $gitUsrBin = Join-Path ${env:ProgramFiles} "Git\usr\bin"
 if (Test-Path (Join-Path $gitUsrBin "sh.exe")) {

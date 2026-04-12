@@ -359,7 +359,7 @@ const Map<String, List<String>> possibleValues = {
     "naive",
     "anytls",
   ],
-  "config.endpoints.type": <String>["wireguard", "warp"],
+  "config.endpoints.type": <String>["wireguard", "awg", "warp"],
 };
 
 /// Edit your JSON object with this Widget. Create, edit and format objects

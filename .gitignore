@@ -69,3 +69,6 @@ app.*.map.json
 # Windows Self-Signed for msix
 windows/sign.pfx
 windows/sign.cer
+
+# Local scratch (VPN test configs, CLI workdirs — may contain secrets)
+/tmp/

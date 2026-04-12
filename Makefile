@@ -15,6 +15,8 @@ endif
 ifeq ($(OS),Windows_NT)
   SHELL := sh
   .SHELLFLAGS := -c
+  # GOOS=linux в User/session (часто от IDE) ломает CGO и go build на Windows; рецепты сами задают env GOOS=windows …
+  unexport GOOS GOARCH
 endif
 
 # --- Log Colors ---
@@ -74,7 +76,11 @@ endif
 BUILD_ARGS=--dart-define sentry_dsn=$(SENTRY_DSN)
 DISTRIBUTOR_ARGS=--skip-clean --build-target $(TARGET) --build-dart-define sentry_dsn=$(SENTRY_DSN)
 
-.PHONY: help bootstrap-wsl-deps windows-env-check clean-portable
+# Куда кладётся portable bundle (относительно корня репо). Если старый portable/ занят (lock на user data), задайте
+# другой путь, например: PORTABLE_DST=portable/windows-x64/Hiddify-current make windows-portable
+PORTABLE_DST ?= portable/windows-x64/Hiddify
+
+.PHONY: help bootstrap-wsl-deps windows-env-check clean-portable clean-portable-dst
 
 help:
 	@echo "hiddify-app — точка входа: make <цель>"
@@ -90,8 +96,9 @@ help:
 	@echo "  make bootstrap-wsl-deps"
 	@echo ""
 	@echo "=== Основные цели ==="
-	@echo "  make windows-portable     — rm portable/ + ядро + flutter build + portable/windows-x64/Hiddify"
-	@echo "  make build-windows-libs   — только hiddify-core (windows-amd64)"
+	@echo "  make windows-portable     — ядро + flutter build + копия в PORTABLE_DST (по умолчанию portable/windows-x64/Hiddify)"
+	@echo "    CORE_PREBUILT_IN_TREE=1 — не пересобирать ядро (использовать hiddify-core/bin после make build-windows-libs в WSL)"
+	@echo "  make build-windows-libs   — только hiddify-core (windows-amd64, MinGW + Go toolchain из hiddify-core/Makefile)"
 	@echo "  make windows-prepare      — pub get + ядро + генерация"
 	@echo "  make windows-portable-sync — только копирование Release -> portable (после сборки Flutter)"
 	@echo ""
@@ -116,6 +123,10 @@ windows-env-check:
 
 clean-portable:
 	rm -rf portable
+
+# Только каталог bundle (см. PORTABLE_DST), без удаления всего portable/ — удобно при EBUSY на user data.
+clean-portable-dst:
+	rm -rf "$(CURDIR)/$(PORTABLE_DST)"
 
 get:	
 	flutter pub get
@@ -414,7 +425,7 @@ windows-portable-sync:
 	@set -eu; \
 	ROOT="$(CURDIR)"; \
 	REL="$$ROOT/build/windows/x64/runner/Release"; \
-	DST="$$ROOT/portable/windows-x64/Hiddify"; \
+	DST="$$ROOT/$(PORTABLE_DST)"; \
 	complete_bundle() { test -f "$$1/Hiddify.exe" && test -f "$$1/flutter_windows.dll"; }; \
 	if complete_bundle "$$REL"; then SRC="$$REL"; \
 	elif [ -n "$${PROGRAMFILES:-}" ] && complete_bundle "$$PROGRAMFILES/hiddify"; then \
@@ -435,8 +446,8 @@ windows-portable-sync:
 	echo "Portable bundle: $$DST"; \
 	echo "Запуск: $$DST/Hiddify.exe"
 
-# Release-сборка с portable=true и готовая папка portable/windows-x64/Hiddify (без fastforge zip)
-windows-portable: clean-portable windows-prepare
+# Release-сборка с portable=true и готовая папка $(PORTABLE_DST) (без fastforge zip)
+windows-portable: clean-portable-dst windows-prepare
 	flutter build windows --release --dart-define=sentry_dsn=$(SENTRY_DSN) --dart-define=portable=true
 	$(MAKE) windows-portable-sync
 
