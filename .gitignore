@@ -72,3 +72,10 @@ windows/sign.cer
 
 # Local scratch (VPN test configs, CLI workdirs — may contain secrets)
 /tmp/
+
+# Docker/compose стенд (копия из репозитория sui, только локально)
+/stand-multi-cascad-prod-l3-universal/
+
+# Local reference clones for mieru comparison
+/mbox/
+/mieru/
