@@ -76,6 +76,9 @@ windows/sign.cer
 # Docker/compose стенд (копия из репозитория sui, только локально)
 /stand-multi-cascad-prod-l3-universal/
 
+# Local nested repo clone used for router experiments (not a submodule here)
+/experiments/router/wireguard-go/
+
 # Local reference clones for mieru comparison
 /mbox/
 /mieru/
