@@ -1,0 +1,31 @@
+{
+  "log": { "level": "debug", "timestamp": true },
+  "dns": {
+    "servers": [{ "type": "udp", "tag": "dns", "server": "1.1.1.1" }],
+    "final": "dns"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.19.0.1/30"],
+      "route_address": ["10.0.0.0/24"],
+      "stack": "mixed",
+      "l3_overlay_outbound": "hy2-out",
+      "l3_overlay_destination": "198.18.0.1:33333",
+      "l3_overlay_route_address": ["10.0.0.0/24"]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-out",
+      "server": "VPS_HOST",
+      "server_port": 9440,
+      "password": "REDACTED",
+      "tls": { "enabled": true, "server_name": "YOUR_SNI", "insecure": false }
+    },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": { "final": "direct" }
+}

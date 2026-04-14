@@ -1,0 +1,6 @@
+# runtime control-plane owner-c
+timeout_sec=2
+cmd_var=CONTROL_PLANE_STEP_CMD_OWNER_C
+cmd_source=default-runtime-hook
+status=running
+status=fail

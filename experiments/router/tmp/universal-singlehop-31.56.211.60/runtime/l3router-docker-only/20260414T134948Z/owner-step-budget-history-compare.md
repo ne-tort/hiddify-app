@@ -1,0 +1,65 @@
+# owner-step anomaly rca budget history compare
+
+- current_run_dir: tmp/universal-singlehop-31.56.211.60/runtime/l3router-docker-only/20260414T134948Z
+- previous_snapshot_found: 0
+- previous_snapshot_file: none
+- compare_summary: stable
+- budget_status_delta: 0
+- overrun_owner_total_delta: 0
+- hot_overrun_owner_total_delta: 0
+- trend_trigger_shift_delta_pct: 0
+- severity_stall_without_drop_without_jitter_hits_delta: 0
+- overruns_changed: 0
+- hot_overruns_changed: 0
+- budget_config_changed: 0
+- positive_signal_count: 0
+- sustained_regression_detected: 0
+- top_positive_deltas: none
+- drift_gate_required: 1
+- drift_gate_min_signal_count: 2
+- drift_gate_status: 0
+
+## multi-run window drift evidence
+
+- history_retention_runs: 1
+- history_window_snapshot_count: 1
+- history_window_runs: 20260414T134948Z
+- history_noisy_min_obs: 3
+- history_noisy_flip_ratio_pct: 60
+- history_noisy_age_decay_pct: 20
+- history_noisy_age_min_weight_pct: 30
+- history_noisy_suppressed_key_count: 0
+- history_noisy_suppressed_keys_top: none
+- history_top_deltas_any_owner: none
+- history_regress_trace_owner_a: none
+- history_regress_trace_owner_b: none
+- history_regress_trace_owner_c: none
+- history_improve_trace_owner_a: none
+- history_improve_trace_owner_b: none
+- history_improve_trace_owner_c: none
+- owner_step_guard_control_plane_trend_age_stability_status: 0
+- owner_step_guard_control_plane_trend_age_stability_trigger_owner_step: none
+- owner_step_guard_control_plane_trend_age_stability_per_step_trace: owner-a(all=0%,anomaly_no_jitter=0%,shift=0%,series_hits=0),owner-b(all=0%,anomaly_no_jitter=0%,shift=0%,series_hits=0),owner-c(all=0%,anomaly_no_jitter=0%,shift=0%,series_hits=0)
+- owner_step_guard_control_plane_trend_age_stability_per_step_trigger_detail_trace: owner-a(gate_pass=0,shift_pass=0,anomaly_ratio_pass=0,series_pass=0,shift=0%/thr=25%/gap=-25%,anomaly=0%/thr=60%/gap=-60%,series=0/thr=3/gap=-3),owner-b(gate_pass=0,shift_pass=0,anomaly_ratio_pass=0,series_pass=0,shift=0%/thr=25%/gap=-25%,anomaly=0%/thr=60%/gap=-60%,series=0/thr=3/gap=-3),owner-c(gate_pass=0,shift_pass=0,anomaly_ratio_pass=0,series_pass=0,shift=0%/thr=25%/gap=-25%,anomaly=0%/thr=60%/gap=-60%,series=0/thr=3/gap=-3)
+- owner_step_guard_control_plane_trend_age_stability_auto_calibration_status: insufficient-window
+- owner_step_guard_control_plane_trend_age_stability_auto_calibration_recommended_shift_threshold_pct: 25
+- owner_step_guard_control_plane_trend_age_stability_auto_calibration_recommended_min_anomaly_weighted_ratio_pct: 60
+- owner_step_guard_control_plane_trend_age_stability_auto_calibration_recommended_min_series: 3
+- owner_step_guard_control_plane_trend_age_stability_auto_calibration_trace: window_runs=1 below min_runs=3
+- owner_step_guard_control_plane_trend_age_stability_rollout_guard_status: hold-auto-calibration-not-ready
+- owner_step_guard_control_plane_trend_age_stability_rollout_guard_rollout_ready_signal: 0
+- owner_step_guard_control_plane_trend_age_stability_rollout_guard_impact_preview: shift=25->25(delta=0),min_anomaly_weighted_ratio=60->60(delta=0),min_series=3->3(delta=0),impact_score=0,impact_level=low
+- owner_step_guard_control_plane_trend_age_stability_rollout_guard_trace: status=hold-auto-calibration-not-ready,auto_calibration_status=insufficient-window,recommendation_changed=0,within_shift=1/15,within_anomaly=1/15,within_min_series=1/2
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_bucket_distribution: high:0,medium:0,low:3
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_per_owner_step_trace: owner-a(bucket=low,gate_pass=0,shift_gap=-25,anomaly_gap=-60,series_gap=-3,rollout_ready=0,auto_calibration=insufficient-window,shift=0%,anomaly=0%,series_hits=0),owner-b(bucket=low,gate_pass=0,shift_gap=-25,anomaly_gap=-60,series_gap=-3,rollout_ready=0,auto_calibration=insufficient-window,shift=0%,anomaly=0%,series_hits=0),owner-c(bucket=low,gate_pass=0,shift_gap=-25,anomaly_gap=-60,series_gap=-3,rollout_ready=0,auto_calibration=insufficient-window,shift=0%,anomaly=0%,series_hits=0)
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_top_owner_steps: owner-a(bucket=low,gate_pass=0,shift_gap=-25,anomaly_gap=-60,series_gap=-3,rollout_ready=0,auto_calibration=insufficient-window,shift=0%,anomaly=0%,series_hits=0),owner-b(bucket=low,gate_pass=0,shift_gap=-25,anomaly_gap=-60,series_gap=-3,rollout_ready=0,auto_calibration=insufficient-window,shift=0%,anomaly=0%,series_hits=0),owner-c(bucket=low,gate_pass=0,shift_gap=-25,anomaly_gap=-60,series_gap=-3,rollout_ready=0,auto_calibration=insufficient-window,shift=0%,anomaly=0%,series_hits=0)
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_drift_previous_run_found: 0
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_drift_previous_run: none
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_drift_current_run: none
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_drift_bucket_shift_distribution: high:0,medium:0,low:0
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_drift_top_bucket_shifts_per_owner_step: none
+- owner_step_guard_control_plane_trend_age_stability_recommendation_confidence_drift_regression_hints: none
+- owner_step_suppression_anomaly_cluster_total: 0
+- owner_step_suppression_anomaly_cluster_stable_count: 0
+- owner_step_suppression_anomaly_cluster_stable_trace: none
+- owner_step_suppression_anomaly_cluster_rca_top: none

@@ -1,0 +1,6 @@
+# tcp probes (timeout=2s)
+## singbox-l3router-client1 -> 10.0.0.4:445
+probe=fail
+
+## singbox-l3router-client3 -> 10.0.0.2:445
+probe=fail

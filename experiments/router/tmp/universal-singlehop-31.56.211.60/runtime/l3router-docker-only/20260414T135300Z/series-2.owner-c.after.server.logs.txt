@@ -1,0 +1,60 @@
+Error response from daemon: No such container: singbox-l3router-server
++0000 2026-04-14 13:52:22 [36mINFO[0m [[38;5;152m3794798216[0m 0ms] inbound/hysteria2[hy2-in]: inbound connection from 94.231.133.222:54486
++0000 2026-04-14 13:52:22 [36mINFO[0m [[38;5;152m3794798216[0m 1ms] inbound/hysteria2[hy2-in]: [client1] inbound connection to www.gstatic.com:443
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;152m3794798216[0m 1ms] router: match[1] inbound=hy2-in auth_user=client1 => route(direct)
++0000 2026-04-14 13:52:22 [36mINFO[0m [[38;5;152m3794798216[0m 2ms] outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;152m3794798216[0m 2ms] dns: lookup domain www.gstatic.com
++0000 2026-04-14 13:52:22 [36mINFO[0m monitoring: outbound monitoring schedule loop started
++0000 2026-04-14 13:52:22 [36mINFO[0m monitoring: starting regular outbound monitoring cycle
++0000 2026-04-14 13:52:22 [36mINFO[0m endpoint/l3router[l3router]: [l3router] drop TCP dial (stub)
++0000 2026-04-14 13:52:22 [33mWARN[0m monitoring: outbound l3router URL test failed: invalid argument
++0000 2026-04-14 13:52:22 [36mINFO[0m outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0000 2026-04-14 13:52:22 [37mDEBUG[0m dns: lookup domain www.gstatic.com
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;152m3794798216[0m 6ms] dns: exchanged www.gstatic.com NOERROR 292
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;152m3794798216[0m 7ms] dns: exchanged A www.gstatic.com. 292 IN A 173.194.221.94
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;152m3794798216[0m 7ms] dns: lookup succeed for www.gstatic.com: 173.194.221.94
++0000 2026-04-14 13:52:22 [37mDEBUG[0m dns: cached www.gstatic.com NOERROR 291
++0000 2026-04-14 13:52:22 [37mDEBUG[0m dns: cached A www.gstatic.com. 291 IN A 173.194.221.94
++0000 2026-04-14 13:52:22 [37mDEBUG[0m dns: lookup succeed for www.gstatic.com: 173.194.221.94
++0000 2026-04-14 13:52:22 [36mINFO[0m monitoring: outbound direct , IP: -          (52ms)
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;152m3794798216[0m 102ms] connection: connection upload finished
++0000 2026-04-14 13:52:22 [36mINFO[0m [[38;5;171m693223323[0m 0ms] inbound/hysteria2[hy2-in]: inbound connection from 94.231.133.222:54486
++0000 2026-04-14 13:52:22 [36mINFO[0m [[38;5;171m693223323[0m 0ms] inbound/hysteria2[hy2-in]: [client1] inbound connection to ipinfo.io:80
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;171m693223323[0m 0ms] router: match[1] inbound=hy2-in auth_user=client1 => route(direct)
++0000 2026-04-14 13:52:22 [36mINFO[0m [[38;5;171m693223323[0m 0ms] outbound/direct[direct]: outbound connection to ipinfo.io:80
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;171m693223323[0m 1ms] dns: lookup domain ipinfo.io
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;171m693223323[0m 5ms] dns: exchanged ipinfo.io NOERROR 42
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;171m693223323[0m 5ms] dns: exchanged A ipinfo.io. 42 IN A 34.117.59.81
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;171m693223323[0m 5ms] dns: lookup succeed for ipinfo.io: 34.117.59.81
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;152m3794798216[0m 118ms] connection: connection download finished
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;171m693223323[0m 194ms] connection: connection upload finished
++0000 2026-04-14 13:52:22 [37mDEBUG[0m [[38;5;171m693223323[0m 208ms] connection: connection download finished
++0000 2026-04-14 13:52:23 [36mINFO[0m [[38;5;204m1370149820[0m 0ms] inbound/hysteria2[hy2-in]: inbound connection from 94.231.133.222:54488
++0000 2026-04-14 13:52:23 [36mINFO[0m [[38;5;204m1370149820[0m 0ms] inbound/hysteria2[hy2-in]: [client3] inbound connection to www.gstatic.com:443
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;204m1370149820[0m 0ms] router: match[3] inbound=hy2-in auth_user=client3 => route(direct)
++0000 2026-04-14 13:52:23 [36mINFO[0m [[38;5;204m1370149820[0m 0ms] outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;204m1370149820[0m 1ms] dns: lookup domain www.gstatic.com
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;204m1370149820[0m 1ms] dns: lookup succeed for www.gstatic.com: 173.194.221.94
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;204m1370149820[0m 110ms] connection: connection upload finished
++0000 2026-04-14 13:52:23 [36mINFO[0m [[38;5;76m65709116[0m 0ms] inbound/hysteria2[hy2-in]: inbound connection from 94.231.133.222:54488
++0000 2026-04-14 13:52:23 [36mINFO[0m [[38;5;76m65709116[0m 0ms] inbound/hysteria2[hy2-in]: [client3] inbound connection to api.ip.sb:443
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 0ms] router: match[3] inbound=hy2-in auth_user=client3 => route(direct)
++0000 2026-04-14 13:52:23 [36mINFO[0m [[38;5;76m65709116[0m 0ms] outbound/direct[direct]: outbound connection to api.ip.sb:443
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 0ms] dns: lookup domain api.ip.sb
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 3ms] dns: exchanged api.ip.sb NOERROR 55
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 3ms] dns: exchanged CNAME api.ip.sb. 55 IN CNAME api.ip.sb.cdn.cloudflare.net.
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 3ms] dns: exchanged A api.ip.sb.cdn.cloudflare.net. 55 IN A 104.26.12.31
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 3ms] dns: exchanged A api.ip.sb.cdn.cloudflare.net. 55 IN A 104.26.13.31
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 3ms] dns: exchanged A api.ip.sb.cdn.cloudflare.net. 55 IN A 172.67.75.172
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;76m65709116[0m 3ms] dns: lookup succeed for api.ip.sb: 104.26.12.31 104.26.13.31 172.67.75.172
++0000 2026-04-14 13:52:23 [37mDEBUG[0m [[38;5;204m1370149820[0m 126ms] connection: connection download finished
++0000 2026-04-14 13:52:24 [37mDEBUG[0m [[38;5;76m65709116[0m 118ms] connection: connection upload finished
++0000 2026-04-14 13:52:24 [37mDEBUG[0m [[38;5;76m65709116[0m 138ms] connection: connection download finished
++0000 2026-04-14 13:52:32 [36mINFO[0m [[38;5;117m2730525541[0m 0ms] inbound/hysteria2[hy2-in]: inbound packet connection from 94.231.133.222:54486
++0000 2026-04-14 13:52:32 [36mINFO[0m [[38;5;117m2730525541[0m 0ms] inbound/hysteria2[hy2-in]: [client1] inbound packet connection to 198.18.0.1:33333
++0000 2026-04-14 13:52:32 [37mDEBUG[0m [[38;5;117m2730525541[0m 0ms] router: match[0] inbound=hy2-in network=udp ip_cidr=198.18.0.1/32 port=33333 => route(l3router)
++0000 2026-04-14 13:52:33 [36mINFO[0m [[38;5;229m2207373314[0m 0ms] inbound/hysteria2[hy2-in]: inbound packet connection from 94.231.133.222:54488
++0000 2026-04-14 13:52:33 [36mINFO[0m [[38;5;229m2207373314[0m 0ms] inbound/hysteria2[hy2-in]: [client3] inbound packet connection to 198.18.0.1:33333
++0000 2026-04-14 13:52:33 [37mDEBUG[0m [[38;5;229m2207373314[0m 0ms] router: match[0] inbound=hy2-in network=udp ip_cidr=198.18.0.1/32 port=33333 => route(l3router)
++0000 2026-04-14 13:52:55 [37mDEBUG[0m inbound/hysteria2[hy2-in]: connection failed: receive message: timeout: no recent network activity
++0000 2026-04-14 13:53:00 [37mDEBUG[0m inbound/hysteria2[hy2-in]: connection failed: receive message: timeout: no recent network activity

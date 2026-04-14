@@ -1,0 +1,1 @@
+{"endpoints":[{"type":"l3router","tag":"l3router","metrics":{"IngressPackets":25700,"ForwardPackets":25313,"DropPackets":387,"EgressWriteFail":0,"ControlUpsertOK":475,"ControlRemoveOK":0,"ControlErrors":0}}],"totals":{"IngressPackets":25700,"ForwardPackets":25313,"DropPackets":387,"EgressWriteFail":0,"ControlUpsertOK":475,"ControlRemoveOK":0,"ControlErrors":0}}

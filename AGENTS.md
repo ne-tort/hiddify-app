@@ -26,3 +26,7 @@ python scripts/test_cli_smb_self.py `
 ## Локальный стенд `universal`
 
 Каталог `**stand-multi-cascad-prod-l3-universal/**` (копия одноимённого стенда из репозитория `sui`) используется только локально для Docker/compose и **не коммитится** (см. `.gitignore`). При отсутствии папки скопируйте её из `sui` в корень этого репозитория под тем же именем.
+
+## Стенд HY2 + WG-хаб (VPS `31.56.211.60`)
+
+Каталог `**tmp/universal-singlehop-31.56.211.60/**`: один sing-box на сервере (HY2 → отдельные `wg-leaf` на клиента + звезда через `wg-hub` на loopback), два клиента в Docker (`docker-compose.wg-hub.yml`), третий — Windows portable CLI. Текущая схема, тесты SMB и критерий успеха: **`tmp/universal-singlehop-31.56.211.60/AGENTS.md`**.

@@ -1,0 +1,9 @@
+owner-a|none|ok
+owner-b|none|ok
+owner-c|none|ok
+owner-a|none|ok
+owner-b|none|fail
+owner-c|none|fail
+owner-a|none|fail
+owner-b|none|fail
+owner-c|none|fail

@@ -1,0 +1,8 @@
+# smb auth checks (timeout=2s)
+## singbox-l3router-client1 -> //10.0.0.4/PEER_C3_BETA
+do_connect: Connection to 10.0.0.4 failed (Error NT_STATUS_IO_TIMEOUT)
+smb=fail
+
+## singbox-l3router-client3 -> //10.0.0.2/PEER_C1_ALPHA
+do_connect: Connection to 10.0.0.2 failed (Error NT_STATUS_IO_TIMEOUT)
+smb=fail

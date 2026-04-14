@@ -1,0 +1,3 @@
+[i] collecting logs from root@31.56.211.60, container=singbox-l3router-server, window=600s
+[i] container singbox-l3router-server not found, retry with singbox-wg-hub-server
+[!] no l3router overlay UDP hit detected (198.18.0.1:33333)

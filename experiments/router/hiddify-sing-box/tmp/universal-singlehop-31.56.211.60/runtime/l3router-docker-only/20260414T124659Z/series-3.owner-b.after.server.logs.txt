@@ -1,0 +1,13 @@
+Error response from daemon: No such container: singbox-l3router-server
++0000 2026-04-14 12:38:42 [36mINFO[0m monitoring: starting regular outbound monitoring cycle
++0000 2026-04-14 12:38:42 [36mINFO[0m endpoint/l3router[l3router]: [l3router] drop TCP dial (stub)
++0000 2026-04-14 12:38:42 [33mWARN[0m monitoring: outbound l3router URL test failed: invalid argument
++0000 2026-04-14 12:43:42 [36mINFO[0m monitoring: starting regular outbound monitoring cycle
++0000 2026-04-14 12:43:42 [36mINFO[0m endpoint/l3router[l3router]: [l3router] drop TCP dial (stub)
++0000 2026-04-14 12:43:42 [33mWARN[0m monitoring: outbound l3router URL test failed: invalid argument
++0000 2026-04-14 12:43:42 [36mINFO[0m outbound/direct[direct]: outbound connection to www.gstatic.com:443
++0000 2026-04-14 12:43:42 [37mDEBUG[0m dns: lookup domain www.gstatic.com
++0000 2026-04-14 12:43:42 [37mDEBUG[0m dns: exchanged www.gstatic.com NOERROR 235
++0000 2026-04-14 12:43:42 [37mDEBUG[0m dns: exchanged A www.gstatic.com. 235 IN A 142.250.150.94
++0000 2026-04-14 12:43:42 [37mDEBUG[0m dns: lookup succeed for www.gstatic.com: 142.250.150.94
++0000 2026-04-14 12:43:42 [36mINFO[0m monitoring: outbound direct , IP: -          (72ms)

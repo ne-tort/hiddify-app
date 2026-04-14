@@ -1,0 +1,16 @@
+# series-1.owner-c.after tun stats
+## singbox-l3router-client1
+3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 65535 qdisc fq_codel state UNKNOWN mode DEFAULT group default qlen 500
+    link/none 
+    RX:  bytes packets errors dropped  missed   mcast           
+         13247      98      0       0       0       0 
+    TX:  bytes packets errors dropped carrier collsns           
+         13425     101      0       0       0       0 
+
+## singbox-l3router-client3
+3: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 65535 qdisc fq_codel state UNKNOWN mode DEFAULT group default qlen 500
+    link/none 
+    RX:  bytes packets errors dropped  missed   mcast           
+         12872      92      0       0       0       0 
+    TX:  bytes packets errors dropped carrier collsns           
+         13639     103      0       0       0       0 

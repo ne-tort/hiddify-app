@@ -1,0 +1,8 @@
+# after route snapshot
+## singbox-l3router-client1 -> 10.0.0.4
+10.0.0.4 via 198.18.0.2 dev tun0 table 2022 src 198.18.0.1 uid 0 
+    cache 
+
+## singbox-l3router-client3 -> 10.0.0.2
+10.0.0.2 via 198.18.0.2 dev tun0 table 2022 src 198.18.0.1 uid 0 
+    cache 

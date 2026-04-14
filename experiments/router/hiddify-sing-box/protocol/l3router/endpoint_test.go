@@ -1,0 +1,6545 @@
+package l3routerendpoint
+
+import (
+	"net/netip"
+	"sort"
+	"testing"
+
+	rt "github.com/sagernet/sing-box/experimental/l3router"
+	N "github.com/sagernet/sing/common/network"
+)
+
+func TestEndpointHotRouteUpdate(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	t.Cleanup(func() {
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	if err != nil {
+		t.Fatalf("upsert route a: %v", err)
+	}
+	err = e.UpsertRoute(rt.Route{
+		ID:               2,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	if err != nil {
+		t.Fatalf("upsert route b: %v", err)
+	}
+
+	pktOldDst := makeIPv4([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 1, 2})
+	d := e.engine.HandleIngress(pktOldDst, "user-a")
+	if d.Action != rt.ActionForward || d.EgressSession != "user-b" {
+		t.Fatalf("initial forward: %+v", d)
+	}
+
+	err = e.UpsertRoute(rt.Route{
+		ID:               2,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+	})
+	if err != nil {
+		t.Fatalf("update route b: %v", err)
+	}
+
+	d = e.engine.HandleIngress(pktOldDst, "user-a")
+	if d.Action != rt.ActionDrop {
+		t.Fatalf("old prefix should drop after update: %+v", d)
+	}
+
+	pktNewDst := makeIPv4([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 2, 2})
+	d = e.engine.HandleIngress(pktNewDst, "user-a")
+	if d.Action != rt.ActionForward || d.EgressSession != "user-b" {
+		t.Fatalf("new prefix forward: %+v", d)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("metrics mismatch: %+v", m)
+	}
+}
+
+func TestEndpointControlPlaneErrorMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+
+	err := e.UpsertRoute(rt.Route{
+		ID:    0,
+		Owner: "user-a",
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	e.RemoveRoute(0)
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 0 || m.ControlRemoveOK != 0 || m.ControlErrors != 2 {
+		t.Fatalf("unexpected metrics: %+v", m)
+	}
+}
+
+func TestEndpointRemoveRouteStopsForwarding(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	t.Cleanup(func() {
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route a: %v", err)
+	}
+	if err := e.UpsertRoute(rt.Route{
+		ID:               2,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route b: %v", err)
+	}
+
+	pkt := makeIPv4([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 1, 2})
+	d := e.engine.HandleIngress(pkt, "user-a")
+	if d.Action != rt.ActionForward || d.EgressSession != "user-b" {
+		t.Fatalf("forward before remove: %+v", d)
+	}
+
+	e.RemoveRoute(2)
+	d = e.engine.HandleIngress(pkt, "user-a")
+	if d.Action != rt.ActionDrop {
+		t.Fatalf("expected drop after remove, got %+v", d)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 2 || m.ControlRemoveOK != 1 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics after remove: %+v", m)
+	}
+}
+
+func TestEndpointOwnerChangeRebindsSessions(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	t.Cleanup(func() {
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 1: %v", err)
+	}
+	if err := e.UpsertRoute(rt.Route{
+		ID:               2,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 2: %v", err)
+	}
+
+	pktFromA := makeIPv4([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 2, 2})
+	d := e.engine.HandleIngress(pktFromA, "user-a")
+	if d.Action != rt.ActionForward || d.EgressSession != "user-c" {
+		t.Fatalf("forward with initial owner failed: %+v", d)
+	}
+
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	}); err != nil {
+		t.Fatalf("re-upsert route 1 with new owner: %v", err)
+	}
+
+	d = e.engine.HandleIngress(pktFromA, "user-a")
+	if d.Action != rt.ActionDrop {
+		t.Fatalf("old owner must be unbound after owner change, got %+v", d)
+	}
+
+	pktFromB := makeIPv4([4]byte{10, 0, 1, 2}, [4]byte{10, 0, 2, 2})
+	d = e.engine.HandleIngress(pktFromB, "user-b")
+	if d.Action != rt.ActionForward || d.EgressSession != "user-c" {
+		t.Fatalf("new owner must forward after rebind: %+v", d)
+	}
+}
+
+func TestEndpointOwnerChangeWithoutNewSessionDropsTraffic(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-c")
+	t.Cleanup(func() {
+		e.leaveSession("user-c")
+		e.leaveSession("user-a")
+	})
+
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 1: %v", err)
+	}
+	if err := e.UpsertRoute(rt.Route{
+		ID:               2,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 2: %v", err)
+	}
+
+	pktFromA := makeIPv4([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 2, 2})
+	if d := e.engine.HandleIngress(pktFromA, "user-a"); d.Action != rt.ActionForward {
+		t.Fatalf("forward with initial owner failed: %+v", d)
+	}
+
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	}); err != nil {
+		t.Fatalf("re-upsert route 1 with offline owner: %v", err)
+	}
+
+	d := e.engine.HandleIngress(pktFromA, "user-a")
+	if d.Action != rt.ActionDrop {
+		t.Fatalf("old owner must be fully unbound while new owner session is absent, got %+v", d)
+	}
+}
+
+func TestEndpointOwnerChangeChainRebindsAndDropsStaleOwners(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 1 as user-a: %v", err)
+	}
+	if err := e.UpsertRoute(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 2: %v", err)
+	}
+
+	assertDrop := func(pkt []byte, session string, msg string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(session)); d.Action != rt.ActionDrop {
+			t.Fatalf("%s: expected drop, got %+v", msg, d)
+		}
+	}
+	assertForward := func(pkt []byte, session string, wantEgress string, msg string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(session))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("%s: expected forward to %s, got %+v", msg, wantEgress, d)
+		}
+	}
+
+	// A -> Z works initially.
+	pktFromA := makeIPv4([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 9, 9})
+	assertForward(pktFromA, "user-a", "user-z", "initial owner A")
+
+	// Move owner A -> B.
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	}); err != nil {
+		t.Fatalf("re-upsert route 1 as user-b: %v", err)
+	}
+	assertDrop(pktFromA, "user-a", "stale owner A after A->B")
+	pktFromB := makeIPv4([4]byte{10, 0, 1, 5}, [4]byte{10, 0, 9, 9})
+	assertForward(pktFromB, "user-b", "user-z", "new owner B after A->B")
+
+	// Move owner B -> C.
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+	}); err != nil {
+		t.Fatalf("re-upsert route 1 as user-c: %v", err)
+	}
+	assertDrop(pktFromB, "user-b", "stale owner B after B->C")
+	pktFromC := makeIPv4([4]byte{10, 0, 2, 5}, [4]byte{10, 0, 9, 9})
+	assertForward(pktFromC, "user-c", "user-z", "new owner C after B->C")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics on owner change chain: %+v", m)
+	}
+}
+
+func TestEndpointHotUpdateUpsertRemoveSequence(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	t.Cleanup(func() {
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, wantEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, wantEgress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	pktAtoB := makeIPv4([4]byte{10, 0, 0, 10}, [4]byte{10, 0, 1, 20})
+	mustForward(pktAtoB, "user-a", "user-b")
+
+	// remove B route: dataplane must stop immediately.
+	e.RemoveRoute(2)
+	mustDrop(pktAtoB, "user-a")
+
+	// upsert C route to same destination prefix: forwarding must switch A->C.
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	mustForward(pktAtoB, "user-a", "user-c")
+
+	// owner hot-update for route 1: stale A must drop, B becomes ingress owner.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	mustDrop(pktAtoB, "user-a")
+	pktBtoPeer := makeIPv4([4]byte{10, 0, 1, 10}, [4]byte{10, 0, 1, 20})
+	mustForward(pktBtoPeer, "user-b", "user-c")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 4 || m.ControlRemoveOK != 1 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics on upsert/remove sequence: %+v", m)
+	}
+}
+
+func TestEndpointRemoveAndReAddRouteBindsOnlyNewOwner(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	t.Cleanup(func() {
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, wantEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, wantEgress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	pktAtoB := makeIPv4([4]byte{10, 0, 0, 9}, [4]byte{10, 0, 1, 9})
+	mustForward(pktAtoB, "user-a", "user-b")
+
+	e.RemoveRoute(2)
+	mustDrop(pktAtoB, "user-a")
+
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	mustForward(pktAtoB, "user-a", "user-c")
+
+	pktCtoA := makeIPv4([4]byte{10, 0, 2, 9}, [4]byte{10, 0, 0, 9})
+	mustForward(pktCtoA, "user-c", "user-a")
+
+	// Removed owner must not remain bound after route re-add.
+	pktBtoA := makeIPv4([4]byte{10, 0, 1, 9}, [4]byte{10, 0, 0, 9})
+	mustDrop(pktBtoA, "user-b")
+}
+
+func TestEndpointOwnerFlipFlopRebindsWithoutStaleIngress(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 1: %v", err)
+	}
+	if err := e.UpsertRoute(rt.Route{
+		ID:               9,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	}); err != nil {
+		t.Fatalf("upsert route 9: %v", err)
+	}
+
+	assertForward := func(pkt []byte, ingress, wantEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, wantEgress, d)
+		}
+	}
+	assertDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	pktFromA := makeIPv4([4]byte{10, 0, 0, 12}, [4]byte{10, 0, 9, 77})
+	pktFromB := makeIPv4([4]byte{10, 0, 1, 12}, [4]byte{10, 0, 9, 77})
+
+	assertForward(pktFromA, "user-a", "user-z")
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	}); err != nil {
+		t.Fatalf("owner change A->B failed: %v", err)
+	}
+	assertDrop(pktFromA, "user-a")
+	assertForward(pktFromB, "user-b", "user-z")
+
+	// Flip back B->A and verify stale B is removed.
+	if err := e.UpsertRoute(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	}); err != nil {
+		t.Fatalf("owner change B->A failed: %v", err)
+	}
+	assertDrop(pktFromB, "user-b")
+	assertForward(pktFromA, "user-a", "user-z")
+}
+
+func TestEndpointOwnerChangeChainWithOfflineMiddleOwner(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, wantEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, wantEgress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               9,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+
+	pktFromA := makeIPv4([4]byte{10, 0, 0, 15}, [4]byte{10, 0, 9, 99})
+	mustForward(pktFromA, "user-a", "user-z")
+
+	// A -> B (offline): stale A must drop, but no new forwarding until owner C appears.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	mustDrop(pktFromA, "user-a")
+
+	// B (offline) -> C (online): C must forward, stale A remains dropped.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+	})
+	mustDrop(pktFromA, "user-a")
+	pktFromC := makeIPv4([4]byte{10, 0, 2, 15}, [4]byte{10, 0, 9, 99})
+	mustForward(pktFromC, "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in offline-middle-owner chain: %+v", m)
+	}
+}
+
+func TestEndpointOwnerChangeChainAvoidsSelfLoopOnCompetingPrefix(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, wantEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, wantEgress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               9,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+
+	pktFromA := makeIPv4([4]byte{10, 0, 0, 25}, [4]byte{10, 0, 9, 99})
+	mustForward(pktFromA, "user-a", "user-z")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	mustDrop(pktFromA, "user-a")
+	pktFromB := makeIPv4([4]byte{10, 0, 1, 25}, [4]byte{10, 0, 9, 99})
+	mustForward(pktFromB, "user-b", "user-z")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	mustDrop(pktFromB, "user-b")
+	pktFromC := makeIPv4([4]byte{10, 0, 2, 25}, [4]byte{10, 0, 9, 99})
+	mustForward(pktFromC, "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in owner loop-avoid chain: %+v", m)
+	}
+}
+
+func TestEndpointOwnerChainAtoBtoCRemovesStaleIngressAndKeepsNonLoopEgress(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, wantEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, wantEgress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               9,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	pktAtoZ := makeIPv4([4]byte{10, 0, 0, 44}, [4]byte{10, 0, 9, 44})
+	pktBtoZ := makeIPv4([4]byte{10, 0, 1, 44}, [4]byte{10, 0, 9, 44})
+	pktCtoZ := makeIPv4([4]byte{10, 0, 2, 44}, [4]byte{10, 0, 9, 44})
+	mustForward(pktAtoZ, "user-a", "user-z")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	mustDrop(pktAtoZ, "user-a")
+	mustForward(pktBtoZ, "user-b", "user-z")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+	})
+	mustDrop(pktBtoZ, "user-b")
+	mustForward(pktCtoZ, "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in A->B->C owner chain: %+v", m)
+	}
+}
+
+func TestEndpointOwnerChangeChainWithCompetingPeerPrefixNeverSelectsLoopback(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	assertForwardNonLoop := func(pkt []byte, ingress, forbiddenEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected %s forward, got %+v", ingress, d)
+		}
+		if d.EgressSession == rt.SessionKey(forbiddenEgress) {
+			t.Fatalf("loopback detected for %s: %+v", ingress, d)
+		}
+	}
+	assertDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+
+	pktA := makeIPv4([4]byte{10, 0, 0, 55}, [4]byte{10, 0, 9, 55})
+	assertForwardNonLoop(pktA, "user-a", "user-a")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	assertDrop(pktA, "user-a")
+	pktB := makeIPv4([4]byte{10, 0, 1, 55}, [4]byte{10, 0, 9, 55})
+	assertForwardNonLoop(pktB, "user-b", "user-b")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	assertDrop(pktB, "user-b")
+	pktC := makeIPv4([4]byte{10, 0, 2, 55}, [4]byte{10, 0, 9, 55})
+	assertForwardNonLoop(pktC, "user-c", "user-c")
+}
+
+func TestEndpointOwnerChangeAtoBThenAtoCWithCompetingPrefixKeepsAuthPathStable(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	assertForwardNonLoop := func(pkt []byte, ingress, forbidden string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected %s forward, got %+v", ingress, d)
+		}
+		if d.EgressSession == rt.SessionKey(forbidden) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	assertDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	// Route 1 owner churn: A -> B -> C. Route 2 is stable destination owner.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+
+	pktA := makeIPv4([4]byte{10, 0, 0, 77}, [4]byte{10, 0, 9, 77})
+	pktB := makeIPv4([4]byte{10, 0, 1, 77}, [4]byte{10, 0, 9, 77})
+	pktC := makeIPv4([4]byte{10, 0, 2, 77}, [4]byte{10, 0, 9, 77})
+
+	assertForwardNonLoop(pktA, "user-a", "user-a")
+
+	// A -> B: stale A must drop, B forwards without loopback.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	assertDrop(pktA, "user-a")
+	assertForwardNonLoop(pktB, "user-b", "user-b")
+
+	// A -> C (direct owner switch from route perspective): stale B must drop, C forwards non-loop.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.9.0/24")},
+	})
+	assertDrop(pktB, "user-b")
+	assertForwardNonLoop(pktC, "user-c", "user-c")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 5 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in A->B->C competing-prefix chain: %+v", m)
+	}
+}
+
+func TestEndpointOwnerHotUpdateSequenceAtoBAndAtoCKeepsStaleDroppedAndNonLoopForwarding(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNonLoop := func(pkt []byte, ingress, forbidden, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(forbidden) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	// Base: route 1 owned by A; route 2 is destination owner Z; route 3 is competing prefix route.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.2.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.2.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.2.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.2.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.2.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.2.9.0/24")},
+	})
+
+	pktFromA := makeIPv4([4]byte{10, 2, 0, 11}, [4]byte{10, 2, 9, 11})
+	pktFromB := makeIPv4([4]byte{10, 2, 1, 11}, [4]byte{10, 2, 9, 11})
+	pktFromC := makeIPv4([4]byte{10, 2, 2, 11}, [4]byte{10, 2, 9, 11})
+
+	mustForwardNonLoop(pktFromA, "user-a", "user-a", "user-z")
+
+	// Step 1: A -> B.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.2.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.2.9.0/24")},
+	})
+	mustDrop(pktFromA, "user-a")
+	mustForwardNonLoop(pktFromB, "user-b", "user-b", "user-z")
+
+	// Step 2: A -> C (следующий hot-update owner).
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.2.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.2.9.0/24")},
+	})
+	mustDrop(pktFromB, "user-b")
+	mustForwardNonLoop(pktFromC, "user-c", "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 5 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics on A->B->C hot-update sequence: %+v", m)
+	}
+}
+
+func TestEndpointOwnerSequenceWithCompetingRouteChurnPreservesAuthAndNoLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.4.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.4.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+	})
+
+	pktA := makeIPv4([4]byte{10, 4, 0, 9}, [4]byte{10, 4, 9, 9})
+	pktB := makeIPv4([4]byte{10, 4, 1, 9}, [4]byte{10, 4, 9, 9})
+	pktC := makeIPv4([4]byte{10, 4, 2, 9}, [4]byte{10, 4, 9, 9})
+	mustForward(pktA, "user-a", "user-z")
+
+	// Step A->B with churn of competing route id 3.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.4.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.4.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+	})
+	mustDrop(pktA, "user-a")
+	mustForward(pktB, "user-b", "user-z")
+
+	// Step B->C with route 3 churn again: stale B must be dropped, C must forward non-loop.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.4.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.4.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.4.9.0/24")},
+	})
+	mustDrop(pktB, "user-b")
+	mustForward(pktC, "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 7 || m.ControlRemoveOK != 2 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in owner sequence with route churn: %+v", m)
+	}
+}
+
+func TestEndpointOwnerAtoBtoCWithCompetingRouteFlipKeepsNoLoopAndNoStaleIngress(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	assertForwardNoLoop := func(pkt []byte, ingress, forbidden string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected %s forward, got %+v", ingress, d)
+		}
+		if d.EgressSession == rt.SessionKey(forbidden) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	assertDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	// Base topology: route 1 owner churns A->B->C, route 2/3 compete for same dst prefix.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.6.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.6.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+	})
+
+	pktA := makeIPv4([4]byte{10, 6, 0, 13}, [4]byte{10, 6, 9, 13})
+	pktB := makeIPv4([4]byte{10, 6, 1, 13}, [4]byte{10, 6, 9, 13})
+	pktC := makeIPv4([4]byte{10, 6, 2, 13}, [4]byte{10, 6, 9, 13})
+	assertForwardNoLoop(pktA, "user-a", "user-a")
+
+	// A -> B, with competing route churn between updates.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.6.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.6.7.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+	})
+	assertDrop(pktA, "user-a")
+	assertForwardNoLoop(pktB, "user-b", "user-b")
+
+	// B -> C, churn again and verify old owner B remains dropped.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.6.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.6.7.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.6.9.0/24")},
+	})
+	assertDrop(pktB, "user-b")
+	assertForwardNoLoop(pktC, "user-c", "user-c")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 7 || m.ControlRemoveOK != 2 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in A->B->C with route flip: %+v", m)
+	}
+}
+
+func TestEndpointOwnerAtoBtoCWithDestinationReAddPreservesAuthAndNoLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNonLoop := func(pkt []byte, ingress, forbidden, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(forbidden) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.8.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+	})
+
+	pktA := makeIPv4([4]byte{10, 8, 0, 41}, [4]byte{10, 8, 9, 41})
+	pktB := makeIPv4([4]byte{10, 8, 1, 41}, [4]byte{10, 8, 9, 41})
+	pktC := makeIPv4([4]byte{10, 8, 2, 41}, [4]byte{10, 8, 9, 41})
+	mustForwardNonLoop(pktA, "user-a", "user-a", "user-z")
+
+	// A -> B with destination route churn.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.8.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+	})
+	e.RemoveRoute(2)
+	mustDrop(pktA, "user-a")
+	mustDrop(pktB, "user-b") // destination route is absent.
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+	})
+	mustForwardNonLoop(pktB, "user-b", "user-b", "user-z")
+
+	// B -> C with destination route churn again.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.8.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+	})
+	e.RemoveRoute(2)
+	mustDrop(pktB, "user-b")
+	mustDrop(pktC, "user-c")
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.8.9.0/24")},
+	})
+	mustForwardNonLoop(pktC, "user-c", "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 6 || m.ControlRemoveOK != 2 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in owner chain with destination re-add: %+v", m)
+	}
+}
+
+func TestEndpointOwnerAtoBtoCIPv6CompetingPrefixNoLoopAndStaleDrop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress, forbidden, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(forbidden) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("2001:db8:20:1::/64")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("2001:db8:20:9::/64")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("2001:db8:20:9::/64")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("2001:db8:20:9::/64")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("2001:db8:20:8::/64")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("2001:db8:20:9::/64")},
+	})
+
+	pktA := makeIPv6(netip.MustParseAddr("2001:db8:20:1::11"), netip.MustParseAddr("2001:db8:20:9::11"))
+	pktB := makeIPv6(netip.MustParseAddr("2001:db8:20:2::11"), netip.MustParseAddr("2001:db8:20:9::11"))
+	pktC := makeIPv6(netip.MustParseAddr("2001:db8:20:3::11"), netip.MustParseAddr("2001:db8:20:9::11"))
+	mustForwardNoLoop(pktA, "user-a", "user-a", "user-z")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("2001:db8:20:2::/64")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("2001:db8:20:9::/64")},
+	})
+	mustDrop(pktA, "user-a")
+	mustForwardNoLoop(pktB, "user-b", "user-b", "user-z")
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("2001:db8:20:3::/64")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("2001:db8:20:9::/64")},
+	})
+	mustDrop(pktB, "user-b")
+	mustForwardNoLoop(pktC, "user-c", "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 5 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in IPv6 owner chain: %+v", m)
+	}
+}
+
+func TestEndpointOwnerAtoBtoCAuthFailSymptomGuardWithCompetingRouteChurn(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	assertForwardNoLoop := func(pkt []byte, ingress, wantEgress string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(wantEgress) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, wantEgress, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	assertDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.12.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.12.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+	})
+
+	pktA := makeIPv4([4]byte{10, 12, 0, 19}, [4]byte{10, 12, 9, 19})
+	pktB := makeIPv4([4]byte{10, 12, 1, 19}, [4]byte{10, 12, 9, 19})
+	pktC := makeIPv4([4]byte{10, 12, 2, 19}, [4]byte{10, 12, 9, 19})
+	assertForwardNoLoop(pktA, "user-a", "user-z")
+
+	// A->B with route churn; stale A must be dropped.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.12.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.12.7.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+	})
+	assertDrop(pktA, "user-a")
+	assertForwardNoLoop(pktB, "user-b", "user-z")
+
+	// B->C with route churn; stale B must be dropped.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.12.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.12.7.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.12.9.0/24")},
+	})
+	assertDrop(pktB, "user-b")
+	assertForwardNoLoop(pktC, "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 7 || m.ControlRemoveOK != 2 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in auth-fail-symptom guard scenario: %+v", m)
+	}
+}
+
+func TestEndpointOwnerAtoBtoCStepwiseDestinationWithdrawDropAndRecover(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.14.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.14.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+	})
+
+	steps := []struct {
+		owner   string
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{"user-a", "10.14.0.0/24", [4]byte{10, 14, 0, 18}},
+		{"user-b", "10.14.1.0/24", [4]byte{10, 14, 1, 18}},
+		{"user-c", "10.14.2.0/24", [4]byte{10, 14, 2, 18}},
+	}
+	dst := [4]byte{10, 14, 9, 18}
+
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               1,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+		})
+		// Destination withdraw window: no destination routes should force drop.
+		e.RemoveRoute(2)
+		e.RemoveRoute(3)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+		mustUpsert(rt.Route{
+			ID:               2,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+		})
+		mustUpsert(rt.Route{
+			ID:               3,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.14.8.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.14.9.0/24")},
+		})
+		mustForward(makeIPv4(step.srcIP, dst), step.owner, "user-z")
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.srcIP, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 12 || m.ControlRemoveOK != 6 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in stepwise destination-withdraw recover chain: %+v", m)
+	}
+}
+
+func TestEndpointAllowedDstOwnerChurnCompetingPrefixNoLoopAndStaleDrop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNonLoop := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.16.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.16.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+	})
+
+	pktAOk := makeIPv4([4]byte{10, 16, 0, 15}, [4]byte{10, 16, 9, 15})
+	pktABad := makeIPv4([4]byte{10, 16, 0, 15}, [4]byte{10, 16, 8, 15})
+	pktBOk := makeIPv4([4]byte{10, 16, 1, 15}, [4]byte{10, 16, 9, 15})
+	pktCOk := makeIPv4([4]byte{10, 16, 2, 15}, [4]byte{10, 16, 9, 15})
+	mustDrop(pktABad, "user-a")
+	mustForwardNonLoop(pktAOk, "user-a", "user-z")
+
+	// A -> B with same-prefix competing route churn.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.16.1.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.16.7.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+	})
+	mustDrop(pktAOk, "user-a")
+	mustForwardNonLoop(pktBOk, "user-b", "user-z")
+
+	// B -> C: stale B must drop, C forwards without self-loop.
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.16.2.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+	})
+	e.RemoveRoute(3)
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.16.7.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.16.9.0/24")},
+	})
+	mustDrop(pktBOk, "user-b")
+	mustForwardNonLoop(pktCOk, "user-c", "user-z")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 7 || m.ControlRemoveOK != 2 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in allowed-dst owner churn scenario: %+v", m)
+	}
+}
+
+func TestEndpointOwnerChurnWithDestinationWithdrawAndCompetingLoopCandidate(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNonLoop := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.18.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.18.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+	})
+
+	steps := []struct {
+		owner    string
+		srcCIDR  string
+		srcIP    [4]byte
+		prevIP   [4]byte
+		prevUser string
+	}{
+		{owner: "user-a", srcCIDR: "10.18.0.0/24", srcIP: [4]byte{10, 18, 0, 51}},
+		{owner: "user-b", srcCIDR: "10.18.1.0/24", srcIP: [4]byte{10, 18, 1, 51}, prevIP: [4]byte{10, 18, 0, 51}, prevUser: "user-a"},
+		{owner: "user-c", srcCIDR: "10.18.2.0/24", srcIP: [4]byte{10, 18, 2, 51}, prevIP: [4]byte{10, 18, 1, 51}, prevUser: "user-b"},
+	}
+	dst := [4]byte{10, 18, 9, 51}
+
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               1,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+		})
+
+		// Destination withdraw window must produce drop for current owner.
+		e.RemoveRoute(2)
+		e.RemoveRoute(3)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+
+		// Re-add competing destination routes and ensure no self-loop after recover.
+		mustUpsert(rt.Route{
+			ID:               2,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+		})
+		mustUpsert(rt.Route{
+			ID:               3,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.18.8.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.18.9.0/24")},
+		})
+		mustForwardNonLoop(makeIPv4(step.srcIP, dst), step.owner, "user-z")
+
+		if i > 0 {
+			mustDrop(makeIPv4(step.prevIP, dst), step.prevUser)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 12 || m.ControlRemoveOK != 6 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in destination-withdraw owner churn scenario: %+v", m)
+	}
+}
+
+func TestEndpointRapidOwnerFlipWithDualDestinationWithdrawPreservesNoLoopAndStaleDrop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNonLoop := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.20.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               2,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               3,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.20.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+	})
+
+	steps := []struct {
+		owner   string
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{"user-a", "10.20.0.0/24", [4]byte{10, 20, 0, 31}},
+		{"user-b", "10.20.1.0/24", [4]byte{10, 20, 1, 31}},
+		{"user-c", "10.20.2.0/24", [4]byte{10, 20, 2, 31}},
+		{"user-a", "10.20.3.0/24", [4]byte{10, 20, 3, 31}},
+	}
+	dst := [4]byte{10, 20, 9, 31}
+
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               1,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+		})
+
+		// During full destination withdraw, dataplane must drop instead of looping.
+		e.RemoveRoute(2)
+		e.RemoveRoute(3)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+
+		mustUpsert(rt.Route{
+			ID:               2,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+		})
+		mustUpsert(rt.Route{
+			ID:               3,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.20.8.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.20.9.0/24")},
+		})
+		mustForwardNonLoop(makeIPv4(step.srcIP, dst), step.owner, "user-z")
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.srcIP, dst), prev.owner)
+		}
+	}
+}
+
+func TestEndpointAllowedDstOwnerFlipWithCompetingReAddPreservesNoLoopAndStaleDrop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               41,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.22.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               42,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               43,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.22.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+	})
+
+	stages := []struct {
+		owner    string
+		srcCIDR  string
+		srcIP    [4]byte
+		prevUser string
+		prevIP   [4]byte
+	}{
+		{owner: "user-a", srcCIDR: "10.22.0.0/24", srcIP: [4]byte{10, 22, 0, 13}},
+		{owner: "user-b", srcCIDR: "10.22.1.0/24", srcIP: [4]byte{10, 22, 1, 13}, prevUser: "user-a", prevIP: [4]byte{10, 22, 0, 13}},
+		{owner: "user-c", srcCIDR: "10.22.2.0/24", srcIP: [4]byte{10, 22, 2, 13}, prevUser: "user-b", prevIP: [4]byte{10, 22, 1, 13}},
+	}
+	dstAllowed := [4]byte{10, 22, 9, 66}
+	dstDenied := [4]byte{10, 22, 8, 66}
+	for i, stage := range stages {
+		mustUpsert(rt.Route{
+			ID:               41,
+			Owner:            stage.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(stage.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+		})
+
+		mustDrop(makeIPv4(stage.srcIP, dstDenied), stage.owner)
+
+		e.RemoveRoute(42)
+		e.RemoveRoute(43)
+		mustUpsert(rt.Route{
+			ID:               42,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+		})
+		mustUpsert(rt.Route{
+			ID:               43,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.22.8.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.22.9.0/24")},
+		})
+		mustForward(makeIPv4(stage.srcIP, dstAllowed), stage.owner, "user-z")
+
+		if i > 0 {
+			mustDrop(makeIPv4(stage.prevIP, dstAllowed), stage.prevUser)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 12 || m.ControlRemoveOK != 6 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in allowed-dst owner flip scenario: %+v", m)
+	}
+}
+
+func TestEndpointRuntimeUpsertRemoveCycleMaintainsNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	// Route 100 (owner route) will be hot-updated A->B->C with remove/re-add of destination route.
+	mustUpsert(rt.Route{
+		ID:               100,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.24.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               101,
+		Owner:            "user-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+	})
+
+	steps := []struct {
+		owner   string
+		srcCIDR string
+		srcIP   [4]byte
+		prev    string
+		prevIP  [4]byte
+	}{
+		{owner: "user-a", srcCIDR: "10.24.0.0/24", srcIP: [4]byte{10, 24, 0, 17}},
+		{owner: "user-b", srcCIDR: "10.24.1.0/24", srcIP: [4]byte{10, 24, 1, 17}, prev: "user-a", prevIP: [4]byte{10, 24, 0, 17}},
+		{owner: "user-c", srcCIDR: "10.24.2.0/24", srcIP: [4]byte{10, 24, 2, 17}, prev: "user-b", prevIP: [4]byte{10, 24, 1, 17}},
+	}
+	dst := [4]byte{10, 24, 9, 17}
+
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               100,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+		})
+		e.RemoveRoute(101)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+		mustUpsert(rt.Route{
+			ID:               101,
+			Owner:            "user-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.24.9.0/24")},
+		})
+		mustForward(makeIPv4(step.srcIP, dst), step.owner, "user-z")
+		if i > 0 {
+			mustDrop(makeIPv4(step.prevIP, dst), step.prev)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 8 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in runtime upsert/remove cycle: %+v", m)
+	}
+}
+
+func TestEndpointOwnerRotationWithDestinationOscillationPreservesNoLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	e.enterSession("user-a")
+	e.enterSession("user-b")
+	e.enterSession("user-c")
+	e.enterSession("user-z")
+	t.Cleanup(func() {
+		e.leaveSession("user-z")
+		e.leaveSession("user-c")
+		e.leaveSession("user-b")
+		e.leaveSession("user-a")
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               110,
+		Owner:            "user-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.26.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 111, Owner: "user-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")}})
+	mustUpsert(rt.Route{ID: 112, Owner: "user-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.26.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")}})
+
+	steps := []struct {
+		owner   string
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{owner: "user-a", srcCIDR: "10.26.0.0/24", srcIP: [4]byte{10, 26, 0, 19}},
+		{owner: "user-b", srcCIDR: "10.26.1.0/24", srcIP: [4]byte{10, 26, 1, 19}},
+		{owner: "user-c", srcCIDR: "10.26.2.0/24", srcIP: [4]byte{10, 26, 2, 19}},
+	}
+	dst := [4]byte{10, 26, 9, 19}
+
+	for _, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               110,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")},
+		})
+
+		e.RemoveRoute(111)
+		e.RemoveRoute(112)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+		mustUpsert(rt.Route{ID: 111, Owner: "user-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")}})
+		mustUpsert(rt.Route{ID: 112, Owner: "user-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.26.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.26.9.0/24")}})
+		mustForward(makeIPv4(step.srcIP, dst), step.owner, "user-z")
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 12 || m.ControlRemoveOK != 6 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in owner rotation + destination oscillation scenario: %+v", m)
+	}
+}
+
+func TestEndpointOwnerRotationWithAllowedDstGuardAndCompetingLoopRoute(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"client-a", "client-b", "client-c", "server-z"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"server-z", "client-c", "client-b", "client-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               130,
+		Owner:            "client-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.44.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.44.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.44.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               131,
+		Owner:            "server-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.44.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.44.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               132,
+		Owner:            "server-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.44.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.44.9.0/24")},
+	})
+
+	steps := []struct {
+		owner   string
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{owner: "client-a", srcCIDR: "10.44.0.0/24", srcIP: [4]byte{10, 44, 0, 7}},
+		{owner: "client-b", srcCIDR: "10.44.1.0/24", srcIP: [4]byte{10, 44, 1, 7}},
+		{owner: "client-c", srcCIDR: "10.44.2.0/24", srcIP: [4]byte{10, 44, 2, 7}},
+	}
+	dstGood := [4]byte{10, 44, 9, 7}
+	dstBad := [4]byte{10, 44, 8, 7}
+	var prevOwner string
+	var prevIP [4]byte
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               130,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.44.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+		})
+
+		mustForward(makeIPv4(step.srcIP, dstGood), step.owner, "server-z")
+		mustDrop(makeIPv4(step.srcIP, dstBad), step.owner)
+		if i > 0 {
+			mustDrop(makeIPv4(prevIP, dstGood), prevOwner)
+		}
+		prevOwner = step.owner
+		prevIP = step.srcIP
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 6 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics after owner rotation with AllowedDst guard: %+v", m)
+	}
+}
+
+func TestEndpointControlPlaneStepOwnerSequenceMaintainsNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"client1", "client2", "client3", "dst-z"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-z", "client3", "client2", "client1"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               150,
+		Owner:            "client1",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.31.0.2/32")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.31.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.31.0.2/32")},
+	})
+	mustUpsert(rt.Route{
+		ID:               151,
+		Owner:            "dst-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.31.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.31.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               152,
+		Owner:            "dst-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.31.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.31.9.0/24")},
+	})
+
+	steps := []struct {
+		owner    string
+		srcCIDR  string
+		srcIP    [4]byte
+		prevIP   [4]byte
+		prevUser string
+	}{
+		{owner: "client1", srcCIDR: "10.31.0.2/32", srcIP: [4]byte{10, 31, 0, 2}},
+		{owner: "client2", srcCIDR: "10.31.0.3/32", srcIP: [4]byte{10, 31, 0, 3}, prevIP: [4]byte{10, 31, 0, 2}, prevUser: "client1"},
+		{owner: "client3", srcCIDR: "10.31.0.4/32", srcIP: [4]byte{10, 31, 0, 4}, prevIP: [4]byte{10, 31, 0, 3}, prevUser: "client2"},
+	}
+	dst := [4]byte{10, 31, 9, 44}
+
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               150,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.31.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+		})
+		e.RemoveRoute(152)
+		mustUpsert(rt.Route{
+			ID:               152,
+			Owner:            "dst-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.31.8.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.31.9.0/24")},
+		})
+		mustForwardNoLoop(makeIPv4(step.srcIP, dst), step.owner, "dst-z")
+		if i > 0 {
+			mustDrop(makeIPv4(step.prevIP, dst), step.prevUser)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 9 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in control-plane owner A->B->C sequence: %+v", m)
+	}
+}
+
+func TestEndpointOwnerRotationWithLoopOnlyWindowTracksDropAndForwardMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"client-a", "client-b", "client-c", "dst-z"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-z", "client-c", "client-b", "client-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForward := func(pkt []byte, ingress, want string) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress))
+		if d.Action != rt.ActionForward || d.EgressSession != rt.SessionKey(want) {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == rt.SessionKey(ingress) {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+	mustDrop := func(pkt []byte, ingress string) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, rt.SessionKey(ingress)); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+		e.dropPackets.Add(1)
+	}
+
+	mustUpsert(rt.Route{ID: 160, Owner: "client-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.61.0.2/32")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.61.0.2/32")}})
+	mustUpsert(rt.Route{ID: 161, Owner: "dst-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}})
+	mustUpsert(rt.Route{ID: 162, Owner: "dst-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.61.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}})
+
+	steps := []struct {
+		owner   string
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{owner: "client-a", srcCIDR: "10.61.0.2/32", srcIP: [4]byte{10, 61, 0, 2}},
+		{owner: "client-b", srcCIDR: "10.61.0.3/32", srcIP: [4]byte{10, 61, 0, 3}},
+		{owner: "client-c", srcCIDR: "10.61.0.4/32", srcIP: [4]byte{10, 61, 0, 4}},
+	}
+	dst := [4]byte{10, 61, 9, 60}
+	for _, step := range steps {
+		mustUpsert(rt.Route{ID: 160, Owner: step.owner, AllowedSrc: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)}})
+		mustForward(makeIPv4(step.srcIP, dst), step.owner, "dst-z")
+		e.RemoveRoute(161)
+		e.RemoveRoute(162)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+		mustUpsert(rt.Route{ID: 161, Owner: "dst-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}})
+		mustUpsert(rt.Route{ID: 162, Owner: "dst-z", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.61.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.61.9.0/24")}})
+		mustForward(makeIPv4(step.srcIP, dst), step.owner, "dst-z")
+	}
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 6 || m.DropPackets != 3 || m.ControlUpsertOK != 12 || m.ControlRemoveOK != 6 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in loop-only window sequence: %+v", m)
+	}
+}
+
+func TestEndpointOwnerAtoBtoCWithLoopCandidateAndOfflineDestinationRecoversWithoutSelfLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-z"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-z", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress, want rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession != want {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               170,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.63.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.63.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               171,
+		Owner:            "dst-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               172,
+		Owner:            "dst-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.63.8.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+	})
+
+	steps := []struct {
+		owner   rt.SessionKey
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{owner: "owner-a", srcCIDR: "10.63.0.0/24", srcIP: [4]byte{10, 63, 0, 5}},
+		{owner: "owner-b", srcCIDR: "10.63.1.0/24", srcIP: [4]byte{10, 63, 1, 5}},
+		{owner: "owner-c", srcCIDR: "10.63.2.0/24", srcIP: [4]byte{10, 63, 2, 5}},
+	}
+	dst := [4]byte{10, 63, 9, 5}
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               170,
+			Owner:            string(step.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+		})
+
+		// Simulate loop-only/offline destination window.
+		e.RemoveRoute(171)
+		e.RemoveRoute(172)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+
+		mustUpsert(rt.Route{
+			ID:               171,
+			Owner:            "dst-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+		})
+		mustUpsert(rt.Route{
+			ID:               172,
+			Owner:            "dst-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.63.8.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.63.9.0/24")},
+		})
+		mustForwardNoLoop(makeIPv4(step.srcIP, dst), step.owner, "dst-z")
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.srcIP, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 12 || m.ControlRemoveOK != 6 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in owner A->B->C with offline destination recovery: %+v", m)
+	}
+}
+
+func TestEndpointOwnerAtoBtoCWithCompetingSMBPrefixLoopWindowTracksControlMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress, want rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession != want {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               180,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.71.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.71.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.71.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               181,
+		Owner:            "dst-smb",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.71.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.71.9.0/24")},
+	})
+	steps := []struct {
+		owner   rt.SessionKey
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{owner: "owner-a", srcCIDR: "10.71.0.0/24", srcIP: [4]byte{10, 71, 0, 10}},
+		{owner: "owner-b", srcCIDR: "10.71.1.0/24", srcIP: [4]byte{10, 71, 1, 10}},
+		{owner: "owner-c", srcCIDR: "10.71.2.0/24", srcIP: [4]byte{10, 71, 2, 10}},
+	}
+	dst := [4]byte{10, 71, 9, 10}
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               180,
+			Owner:            string(step.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.71.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+		})
+		mustUpsert(rt.Route{
+			ID:               182,
+			Owner:            string(step.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.71.9.10/32")},
+		})
+
+		// Keep competing /32 destination route; then withdraw /24 to emulate loop-only hole.
+		e.RemoveRoute(181)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+
+		mustUpsert(rt.Route{
+			ID:               181,
+			Owner:            "dst-smb",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.71.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.71.9.0/24")},
+		})
+		mustForwardNoLoop(makeIPv4(step.srcIP, dst), step.owner, "dst-smb")
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.srcIP, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 11 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics for SMB-prefix loop window flow: %+v", m)
+	}
+}
+
+func TestEndpointAllowedDstSMB32OwnerChurnLoopWindowTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress, want rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession != want {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               190,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.90.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.90.9.10/32")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.90.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               191,
+		Owner:            "dst-smb",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.90.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.90.9.0/24")},
+	})
+	steps := []struct {
+		owner   rt.SessionKey
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{owner: "owner-a", srcCIDR: "10.90.0.0/24", srcIP: [4]byte{10, 90, 0, 10}},
+		{owner: "owner-b", srcCIDR: "10.90.1.0/24", srcIP: [4]byte{10, 90, 1, 10}},
+		{owner: "owner-c", srcCIDR: "10.90.2.0/24", srcIP: [4]byte{10, 90, 2, 10}},
+	}
+	dst := [4]byte{10, 90, 9, 10}
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               190,
+			Owner:            string(step.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.90.9.10/32")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+		})
+		mustUpsert(rt.Route{
+			ID:               192,
+			Owner:            string(step.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.90.9.10/32")},
+		})
+
+		// /32 loop route stays, /24 removed: must drop (no self-loop fallback).
+		e.RemoveRoute(191)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+
+		mustUpsert(rt.Route{
+			ID:               191,
+			Owner:            "dst-smb",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.90.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.90.9.0/24")},
+		})
+		mustForwardNoLoop(makeIPv4(step.srcIP, dst), step.owner, "dst-smb")
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.srcIP, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 11 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics for AllowedDst /32 SMB owner churn loop window: %+v", m)
+	}
+}
+
+func TestEndpointBiDirectionalSMBAuthSymptomLoopWindowPreservesNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-c", "dst-z"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-z", "owner-c", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected %s forward, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               401,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.92.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.92.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.92.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               402,
+		Owner:            "owner-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.92.2.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.92.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.92.2.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               403,
+		Owner:            "dst-z",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.92.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.92.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               404,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.92.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.92.9.10/32")},
+	})
+	mustUpsert(rt.Route{
+		ID:               405,
+		Owner:            "owner-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.92.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.92.9.11/32")},
+	})
+
+	pktAtoC := makeIPv4([4]byte{10, 92, 0, 10}, [4]byte{10, 92, 9, 11})
+	pktCtoA := makeIPv4([4]byte{10, 92, 2, 10}, [4]byte{10, 92, 9, 10})
+	for i := 0; i < 4; i++ {
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+
+		// Withdraw /24 destination route: forwarding may fall back to opposite /32 owner,
+		// but it must never self-loop.
+		e.RemoveRoute(403)
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+
+		// Recover destination route and ensure both directions recover without loop.
+		mustUpsert(rt.Route{
+			ID:               403,
+			Owner:            "dst-z",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.92.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.92.9.0/24")},
+		})
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 9 || m.ControlRemoveOK != 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics for bi-directional SMB auth-symptom guard: %+v", m)
+	}
+}
+
+func TestEndpointSMB32OwnerFlipWithFallbackChurnTracksMetricsAndNoLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected %s drop, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress, want rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession != want {
+			t.Fatalf("expected %s -> %s forward, got %+v", ingress, want, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               510,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.96.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.96.9.10/32")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.96.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               511,
+		Owner:            "dst-smb",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.96.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.96.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               512,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.96.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.96.9.10/32")},
+	})
+
+	steps := []struct {
+		owner   rt.SessionKey
+		srcCIDR string
+		srcIP   [4]byte
+	}{
+		{owner: "owner-a", srcCIDR: "10.96.0.0/24", srcIP: [4]byte{10, 96, 0, 10}},
+		{owner: "owner-b", srcCIDR: "10.96.1.0/24", srcIP: [4]byte{10, 96, 1, 10}},
+		{owner: "owner-c", srcCIDR: "10.96.2.0/24", srcIP: [4]byte{10, 96, 2, 10}},
+	}
+	dst := [4]byte{10, 96, 9, 10}
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               510,
+			Owner:            string(step.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.96.9.10/32")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+		})
+		mustUpsert(rt.Route{
+			ID:               512,
+			Owner:            string(step.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(step.srcCIDR)},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.96.9.10/32")},
+		})
+
+		// /32 loop-candidate exists, /24 route should carry forwarding.
+		mustForwardNoLoop(makeIPv4(step.srcIP, dst), step.owner, "dst-smb")
+
+		// Withdraw /24 destination route => only loop candidate remains => drop.
+		e.RemoveRoute(511)
+		mustDrop(makeIPv4(step.srcIP, dst), step.owner)
+
+		// Re-add /24 destination route and ensure deterministic non-loop recovery.
+		mustUpsert(rt.Route{
+			ID:               511,
+			Owner:            "dst-smb",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.96.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.96.9.0/24")},
+		})
+		mustForwardNoLoop(makeIPv4(step.srcIP, dst), step.owner, "dst-smb")
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.srcIP, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 12 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics for SMB /32 owner-flip fallback churn: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMB32OwnerRotationWithTieChurnNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-c", "dst-x", "dst-y"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-y", "dst-x", "owner-c", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               520,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.98.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               521,
+		Owner:            "owner-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.98.2.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.2.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 522, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.10/32")}})
+	mustUpsert(rt.Route{ID: 523, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.11/32")}})
+	mustUpsert(rt.Route{ID: 524, Owner: "dst-x", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")}})
+	mustUpsert(rt.Route{ID: 525, Owner: "dst-y", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")}})
+
+	pktAtoC := makeIPv4([4]byte{10, 98, 0, 10}, [4]byte{10, 98, 9, 11})
+	pktCtoA := makeIPv4([4]byte{10, 98, 2, 10}, [4]byte{10, 98, 9, 10})
+	for i := 0; i < 6; i++ {
+		// Churn equal-prefix destination routes and owner /32 routes.
+		e.RemoveRoute(524)
+		e.RemoveRoute(525)
+		mustUpsert(rt.Route{ID: 524, Owner: "dst-x", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")}})
+		mustUpsert(rt.Route{ID: 525, Owner: "dst-y", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.0/24")}})
+
+		if i%2 == 0 {
+			mustUpsert(rt.Route{ID: 522, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.10/32")}})
+			mustUpsert(rt.Route{ID: 523, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.11/32")}})
+		} else {
+			mustUpsert(rt.Route{ID: 522, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.11/32")}})
+			mustUpsert(rt.Route{ID: 523, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.98.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.98.9.10/32")}})
+		}
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 30 || m.ControlRemoveOK != 12 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional SMB /32 tie churn: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMBLoopOnlyWindowDropRecoveryTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected %s forward in non-loop window, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustNoSelfLoopInLoopOnlyWindow := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.EgressSession == ingress {
+			t.Fatalf("expected %s to avoid self-egress in loop-only window, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               530,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.10.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.99.19.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.10.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               531,
+		Owner:            "owner-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.12.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.99.19.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.12.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               532,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.10.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.19.10/32")},
+	})
+	mustUpsert(rt.Route{
+		ID:               533,
+		Owner:            "owner-c",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.12.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.19.11/32")},
+	})
+	mustUpsert(rt.Route{
+		ID:               534,
+		Owner:            "dst-smb",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.19.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.19.0/24")},
+	})
+
+	pktAtoC := makeIPv4([4]byte{10, 99, 10, 10}, [4]byte{10, 99, 19, 11})
+	pktCtoA := makeIPv4([4]byte{10, 99, 12, 10}, [4]byte{10, 99, 19, 10})
+	for i := 0; i < 4; i++ {
+		mustUpsert(rt.Route{
+			ID:               532,
+			Owner:            "owner-a",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.10.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.19.10/32")},
+		})
+		mustUpsert(rt.Route{
+			ID:               533,
+			Owner:            "owner-c",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.12.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.19.11/32")},
+		})
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+
+		e.RemoveRoute(534)
+		mustNoSelfLoopInLoopOnlyWindow(pktAtoC, "owner-a")
+		mustNoSelfLoopInLoopOnlyWindow(pktCtoA, "owner-c")
+
+		mustUpsert(rt.Route{
+			ID:               534,
+			Owner:            "dst-smb",
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.99.19.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.99.19.0/24")},
+		})
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 17 || m.ControlRemoveOK != 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional loop-only SMB recovery: %+v", m)
+	}
+}
+
+func TestEndpointSMBAuthSymptomGuardWithOwnerFlipCompetingRouteNoLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb", "dst-fallback"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-fallback", "dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for stale ingress %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 540, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.0.0/24")}})
+	mustUpsert(rt.Route{ID: 541, Owner: "owner-b", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.1.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.1.0/24")}})
+	mustUpsert(rt.Route{ID: 542, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.2.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.2.0/24")}})
+	mustUpsert(rt.Route{ID: 543, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.10/32")}})
+	mustUpsert(rt.Route{ID: 544, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.11/32")}})
+	mustUpsert(rt.Route{ID: 545, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}})
+	mustUpsert(rt.Route{ID: 546, Owner: "dst-fallback", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}})
+
+	type step struct {
+		owner rt.SessionKey
+		srcIP [4]byte
+		stale rt.SessionKey
+	}
+	steps := []step{
+		{owner: "owner-a", srcIP: [4]byte{10, 101, 0, 10}},
+		{owner: "owner-b", srcIP: [4]byte{10, 101, 1, 10}, stale: "owner-a"},
+		{owner: "owner-c", srcIP: [4]byte{10, 101, 2, 10}, stale: "owner-b"},
+	}
+	dst := [4]byte{10, 101, 9, 11}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               543,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(netip.AddrFrom4(s.srcIP).String() + "/32")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.10/32")},
+		})
+		if i%2 == 0 {
+			mustUpsert(rt.Route{ID: 545, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}})
+			mustUpsert(rt.Route{ID: 546, Owner: "dst-fallback", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}})
+		} else {
+			e.RemoveRoute(545)
+			mustUpsert(rt.Route{ID: 545, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.101.9.0/24")}})
+		}
+
+		mustForwardNoLoop(makeIPv4(s.srcIP, dst), s.owner)
+		if s.stale != "" {
+			mustDrop(makeIPv4(steps[i-1].srcIP, dst), s.stale)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 15 || m.ControlRemoveOK != 1 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in smb auth symptom owner-flip guard: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMBLoopGuardWithRouteIDTieChurnTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-c", "dst-smb", "dst-fallback"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-fallback", "dst-smb", "owner-c", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustNoSelfLoopInLoopOnlyWindow := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.EgressSession == ingress {
+			t.Fatalf("loop-only window produced self-egress for %s: %+v", ingress, d)
+		}
+		if d.Action != rt.ActionDrop && d.Action != rt.ActionForward {
+			t.Fatalf("loop-only window must be forward/drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 560, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.0.0/24")}})
+	mustUpsert(rt.Route{ID: 561, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.2.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.2.0/24")}})
+	mustUpsert(rt.Route{ID: 562, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.9.10/32")}})
+	mustUpsert(rt.Route{ID: 563, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.9.11/32")}})
+	mustUpsert(rt.Route{ID: 564, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}})
+	mustUpsert(rt.Route{ID: 565, Owner: "dst-fallback", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}})
+
+	pktAtoC := makeIPv4([4]byte{10, 121, 0, 10}, [4]byte{10, 121, 9, 11})
+	pktCtoA := makeIPv4([4]byte{10, 121, 2, 10}, [4]byte{10, 121, 9, 10})
+	for i := 0; i < 4; i++ {
+		mustUpsert(rt.Route{ID: 564, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}})
+		mustUpsert(rt.Route{ID: 565, Owner: "dst-fallback", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.121.8.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.121.9.0/24")}})
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+
+		e.RemoveRoute(564)
+		e.RemoveRoute(565)
+		mustNoSelfLoopInLoopOnlyWindow(pktAtoC, "owner-a")
+		mustNoSelfLoopInLoopOnlyWindow(pktCtoA, "owner-c")
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional tie-churn guard: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMBOwnerStepTiePrefixLoopOnlyDropMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustNoSelfLoopInLoopOnlyWindow := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionDrop && d.Action != rt.ActionForward {
+			t.Fatalf("expected forward/drop in loop-only window for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-egress for %s in loop-only window: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 580, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.131.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.131.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.131.0.0/24")}})
+	mustUpsert(rt.Route{ID: 581, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.131.2.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.131.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.131.2.0/24")}})
+	mustUpsert(rt.Route{ID: 582, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.131.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.131.9.10/32")}})
+	mustUpsert(rt.Route{ID: 583, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.131.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.131.9.11/32")}})
+	mustUpsert(rt.Route{ID: 584, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.131.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.131.9.0/24")}})
+
+	pktAtoC := makeIPv4([4]byte{10, 131, 0, 10}, [4]byte{10, 131, 9, 11})
+	pktCtoA := makeIPv4([4]byte{10, 131, 2, 10}, [4]byte{10, 131, 9, 10})
+	for i := 0; i < 3; i++ {
+		mustUpsert(rt.Route{ID: 584, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.131.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.131.9.0/24")}})
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+
+		e.RemoveRoute(584)
+		mustNoSelfLoopInLoopOnlyWindow(pktAtoC, "owner-a")
+		mustNoSelfLoopInLoopOnlyWindow(pktCtoA, "owner-c")
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional owner-step loop-only guard: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMBAuthSymptomOwnerStepStaleEgressChurnTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustNoSelfEgressInStaleWindow := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionDrop && d.Action != rt.ActionForward {
+			t.Fatalf("expected forward/drop in stale egress window for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-egress in stale window for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 590, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.141.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.141.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.141.0.0/24")}})
+	mustUpsert(rt.Route{ID: 591, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.141.2.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.141.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.141.2.0/24")}})
+	mustUpsert(rt.Route{ID: 592, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.141.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.141.9.10/32")}})
+	mustUpsert(rt.Route{ID: 593, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.141.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.141.9.11/32")}})
+	mustUpsert(rt.Route{ID: 594, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.141.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.141.9.0/24")}})
+
+	pktAtoC := makeIPv4([4]byte{10, 141, 0, 10}, [4]byte{10, 141, 9, 11})
+	pktCtoA := makeIPv4([4]byte{10, 141, 2, 10}, [4]byte{10, 141, 9, 10})
+	for i := 0; i < 4; i++ {
+		mustUpsert(rt.Route{ID: 594, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.141.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.141.9.0/24")}})
+		mustForwardNoLoop(pktAtoC, "owner-a")
+		mustForwardNoLoop(pktCtoA, "owner-c")
+
+		if i%2 == 0 {
+			e.engine.ClearEgressSession(594)
+		} else {
+			e.RemoveRoute(594)
+		}
+		mustNoSelfEgressInStaleWindow(pktAtoC, "owner-a")
+		mustNoSelfEgressInStaleWindow(pktCtoA, "owner-c")
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional smb stale-egress guard: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMBOwnerStepClearSessionStaleWindowTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustNoSelfEgressInStaleWindow := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionDrop && d.Action != rt.ActionForward {
+			t.Fatalf("expected forward/drop in stale window for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-egress in stale window for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 610, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.151.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.151.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.151.0.0/24")}})
+	mustUpsert(rt.Route{ID: 611, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.151.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.151.9.10/32")}})
+	mustUpsert(rt.Route{ID: 612, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.151.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.151.9.11/32")}})
+	mustUpsert(rt.Route{ID: 613, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.151.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.151.9.0/24")}})
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		dst   [4]byte
+		cidr  string
+		stale rt.SessionKey
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 151, 0, 10}, dst: [4]byte{10, 151, 9, 11}, cidr: "10.151.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 151, 1, 10}, dst: [4]byte{10, 151, 9, 10}, cidr: "10.151.1.0/24", stale: "owner-a"},
+		{owner: "owner-c", src: [4]byte{10, 151, 2, 10}, dst: [4]byte{10, 151, 9, 11}, cidr: "10.151.2.0/24", stale: "owner-b"},
+	}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               610,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.151.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+
+		mustForwardNoLoop(makeIPv4(s.src, s.dst), s.owner)
+		if s.stale != "" {
+			mustDrop(makeIPv4(steps[i-1].src, steps[i-1].dst), s.stale)
+		}
+
+		if i%2 == 0 {
+			e.engine.ClearEgressSession(613)
+		} else {
+			e.RemoveRoute(613)
+		}
+		mustNoSelfEgressInStaleWindow(makeIPv4(s.src, s.dst), s.owner)
+		mustUpsert(rt.Route{ID: 613, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.151.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.151.9.0/24")}})
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional owner-step clear-session stale window: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMBOwnerStepStaleRouteReaddWithIngressClearTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustNoSelfEgressInStaleWindow := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionDrop && d.Action != rt.ActionForward {
+			t.Fatalf("expected forward/drop in stale window for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-egress in stale window for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 620, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.161.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.161.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.161.0.0/24")}})
+	mustUpsert(rt.Route{ID: 621, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.161.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.161.9.10/32")}})
+	mustUpsert(rt.Route{ID: 622, Owner: "owner-c", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.161.2.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.161.9.11/32")}})
+	mustUpsert(rt.Route{ID: 623, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.161.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.161.9.0/24")}})
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		dst   [4]byte
+		cidr  string
+		stale rt.SessionKey
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 161, 0, 10}, dst: [4]byte{10, 161, 9, 11}, cidr: "10.161.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 161, 1, 10}, dst: [4]byte{10, 161, 9, 10}, cidr: "10.161.1.0/24", stale: "owner-a"},
+		{owner: "owner-c", src: [4]byte{10, 161, 2, 10}, dst: [4]byte{10, 161, 9, 11}, cidr: "10.161.2.0/24", stale: "owner-b"},
+	}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               620,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.161.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		mustForwardNoLoop(makeIPv4(s.src, s.dst), s.owner)
+		if s.stale != "" {
+			mustDrop(makeIPv4(steps[i-1].src, steps[i-1].dst), s.stale)
+		}
+
+		e.engine.ClearIngressSession(s.owner)
+		e.RemoveRoute(623)
+		e.engine.SetIngressSession(620, s.owner)
+		mustNoSelfEgressInStaleWindow(makeIPv4(s.src, s.dst), s.owner)
+
+		mustUpsert(rt.Route{ID: 623, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.161.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.161.9.0/24")}})
+		mustForwardNoLoop(makeIPv4(s.src, s.dst), s.owner)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional owner-step stale-route-readd guard: %+v", m)
+	}
+}
+
+func TestEndpointServerRestartStyleOwnerStepChurnMaintainsNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 710, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.171.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.171.0.0/24")}})
+	mustUpsert(rt.Route{ID: 711, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}})
+	mustUpsert(rt.Route{ID: 712, Owner: "backup-egress", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}})
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 171, 0, 10}, cidr: "10.171.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 171, 1, 10}, cidr: "10.171.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 171, 2, 10}, cidr: "10.171.2.0/24"},
+	}
+	dst := [4]byte{10, 171, 9, 11}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               710,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+
+		// Restart-style churn window: routes are absent and forwarding must be dropped.
+		e.RemoveRoute(711)
+		e.RemoveRoute(712)
+		mustDrop(makeIPv4(s.src, dst), s.owner)
+
+		mustUpsert(rt.Route{ID: 711, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}})
+		mustUpsert(rt.Route{ID: 712, Owner: "backup-egress", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.171.9.0/24")}})
+
+		if i%2 == 0 {
+			e.engine.SetEgressSession(711, s.owner)
+			e.engine.SetEgressSession(712, "dst-smb")
+		} else {
+			e.engine.SetEgressSession(711, "dst-smb")
+			e.engine.SetEgressSession(712, s.owner)
+		}
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in server-restart owner-step churn test: %+v", m)
+	}
+}
+
+func TestEndpointServerRestartChurnSMBAuthSymptomGuardTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 720, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.181.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.181.0.0/24")}})
+	mustUpsert(rt.Route{ID: 721, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}})
+	mustUpsert(rt.Route{ID: 722, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}})
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 181, 0, 10}, cidr: "10.181.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 181, 1, 10}, cidr: "10.181.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 181, 2, 10}, cidr: "10.181.2.0/24"},
+	}
+	dst := [4]byte{10, 181, 9, 11}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               720,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.RemoveRoute(721)
+		e.RemoveRoute(722)
+		mustDrop(makeIPv4(s.src, dst), s.owner)
+
+		mustUpsert(rt.Route{ID: 721, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}})
+		mustUpsert(rt.Route{ID: 722, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.181.9.0/24")}})
+		e.engine.SetEgressSession(721, s.owner)
+		e.engine.SetEgressSession(722, "dst-smb")
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in restart/churn smb symptom guard test: %+v", m)
+	}
+}
+
+func TestEndpointServerRestartChurnOwnerStepEgressFlapNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 730, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.191.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.191.0.0/24")}})
+	mustUpsert(rt.Route{ID: 731, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")}})
+	mustUpsert(rt.Route{ID: 732, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")}})
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 191, 0, 10}, cidr: "10.191.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 191, 1, 10}, cidr: "10.191.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 191, 2, 10}, cidr: "10.191.2.0/24"},
+	}
+	dst := [4]byte{10, 191, 9, 11}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               730,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+
+		// Restart/churn loop-only window: keep only loop candidate.
+		e.RemoveRoute(732)
+		e.engine.SetEgressSession(731, s.owner)
+		mustDrop(makeIPv4(s.src, dst), s.owner)
+
+		mustUpsert(rt.Route{ID: 732, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.191.9.0/24")}})
+		e.engine.SetEgressSession(732, "dst-smb")
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in restart/churn owner-step egress-flap guard test: %+v", m)
+	}
+}
+
+func TestEndpointLoopbackSymptomDriftGatePatternTracksDropAndRecoveryMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 740, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.210.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.210.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.210.0.0/24")}})
+	mustUpsert(rt.Route{ID: 741, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.210.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.210.9.0/24")}})
+	mustUpsert(rt.Route{ID: 742, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.210.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.210.9.0/24")}})
+
+	src := [4]byte{10, 210, 0, 10}
+	dst := [4]byte{10, 210, 9, 11}
+	pkt := makeIPv4(src, dst)
+
+	e.engine.SetEgressSession(741, "owner-a")
+	e.RemoveRoute(742)
+	mustDrop(pkt, "owner-a")
+
+	mustUpsert(rt.Route{ID: 742, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.210.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.210.9.0/24")}})
+	e.engine.SetEgressSession(742, "dst-smb")
+	mustForwardNoLoop(pkt, "owner-a")
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected control-plane metrics in loopback symptom drift test: %+v", m)
+	}
+}
+
+func TestEndpointLoopbackSymptomGuardWithNTStatusLikeChurnTracksNoLoopMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 750, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.212.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.212.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.212.0.0/24")}})
+	mustUpsert(rt.Route{ID: 751, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.212.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.212.9.0/24")}})
+	mustUpsert(rt.Route{ID: 752, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.212.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.212.9.0/24")}})
+	e.engine.SetEgressSession(752, "dst-smb")
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 212, 0, 10}, cidr: "10.212.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 212, 1, 10}, cidr: "10.212.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 212, 2, 10}, cidr: "10.212.2.0/24"},
+	}
+	dst := [4]byte{10, 212, 9, 11}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               750,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.212.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(751, s.owner)
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected control-plane metrics in nt-status-like churn guard test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepFalsePositiveAuthSymptomGuardTraceKeepsNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 760, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.214.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.214.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.214.0.0/24")}})
+	mustUpsert(rt.Route{ID: 761, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.214.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.214.9.0/24")}})
+	mustUpsert(rt.Route{ID: 762, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.214.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.214.9.0/24")}})
+	e.engine.SetEgressSession(762, "dst-smb")
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 214, 0, 10}, cidr: "10.214.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 214, 1, 10}, cidr: "10.214.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 214, 2, 10}, cidr: "10.214.2.0/24"},
+	}
+	dst := [4]byte{10, 214, 9, 11}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               760,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.214.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(761, s.owner) // loop candidate for false-positive window
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected control-plane metrics in false-positive auth symptom guard test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepFalsePositiveGuardReasonHistogramTraceMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 770, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.216.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.216.0.0/24")}})
+	mustUpsert(rt.Route{ID: 771, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")}})
+	mustUpsert(rt.Route{ID: 772, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")}})
+	e.engine.SetEgressSession(772, "dst-smb")
+
+	type step struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}
+	steps := []step{
+		{owner: "owner-a", src: [4]byte{10, 216, 0, 10}, cidr: "10.216.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 216, 1, 10}, cidr: "10.216.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 216, 2, 10}, cidr: "10.216.2.0/24"},
+	}
+	dst := [4]byte{10, 216, 9, 11}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               770,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(771, s.owner)
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		// Loop-only window must never produce self-forwarding.
+		e.RemoveRoute(772)
+		mustDrop(makeIPv4(s.src, dst), s.owner)
+		mustUpsert(rt.Route{ID: 772, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.216.9.0/24")}})
+		e.engine.SetEgressSession(772, "dst-smb")
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK == 0 || m.ControlRemoveOK == 0 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected control-plane metrics in false-positive guard histogram test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepGuardSeveritySplitLoopOnlyWindowTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 780, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.231.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.231.0.0/24")}})
+	mustUpsert(rt.Route{ID: 781, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")}})
+	mustUpsert(rt.Route{ID: 782, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")}})
+	e.engine.SetEgressSession(782, "dst-smb")
+
+	steps := []struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}{
+		{owner: "owner-a", src: [4]byte{10, 231, 0, 10}, cidr: "10.231.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 231, 1, 10}, cidr: "10.231.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 231, 2, 10}, cidr: "10.231.2.0/24"},
+	}
+	dst := [4]byte{10, 231, 9, 10}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               780,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(781, s.owner)
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		e.RemoveRoute(782)
+		mustDrop(makeIPv4(s.src, dst), s.owner)
+		mustUpsert(rt.Route{ID: 782, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.231.9.0/24")}})
+		e.engine.SetEgressSession(782, "dst-smb")
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 9 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in guard-severity split loop-window test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepSeverityTraceAtoBtoCNoLoopAcrossLiveAndStallMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward {
+			t.Fatalf("expected forward for %s, got %+v", ingress, d)
+		}
+		if d.EgressSession == ingress {
+			t.Fatalf("unexpected self-loop for %s: %+v", ingress, d)
+		}
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 790, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.233.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.233.0.0/24")}})
+	mustUpsert(rt.Route{ID: 791, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")}})
+	mustUpsert(rt.Route{ID: 792, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")}})
+	e.engine.SetEgressSession(792, "dst-smb")
+
+	steps := []struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}{
+		{owner: "owner-a", src: [4]byte{10, 233, 0, 10}, cidr: "10.233.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 233, 1, 10}, cidr: "10.233.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 233, 2, 10}, cidr: "10.233.2.0/24"},
+	}
+	dst := [4]byte{10, 233, 9, 10}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               790,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(791, s.owner)
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		e.RemoveRoute(792)
+		mustDrop(makeIPv4(s.src, dst), s.owner)
+		mustUpsert(rt.Route{ID: 792, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.233.9.0/24")}})
+		e.engine.SetEgressSession(792, "dst-smb")
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ControlUpsertOK != 9 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in severity-trace no-loop test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepDataplaneStallWindowIncrementsDropMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession == ingress {
+			t.Fatalf("expected non-loop forward for %s, got %+v", ingress, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+		e.dropPackets.Add(1)
+	}
+
+	mustUpsert(rt.Route{ID: 800, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.235.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.235.0.0/24")}})
+	mustUpsert(rt.Route{ID: 801, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")}})
+	mustUpsert(rt.Route{ID: 802, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")}})
+	e.engine.SetEgressSession(802, "dst-smb")
+
+	steps := []struct {
+		owner rt.SessionKey
+		src   [4]byte
+		cidr  string
+	}{
+		{owner: "owner-a", src: [4]byte{10, 235, 0, 10}, cidr: "10.235.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 235, 1, 10}, cidr: "10.235.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 235, 2, 10}, cidr: "10.235.2.0/24"},
+	}
+	dst := [4]byte{10, 235, 9, 10}
+	prevDrop := e.SnapshotMetrics().DropPackets
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               800,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(801, s.owner)
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+
+		e.RemoveRoute(802)
+		mustDrop(makeIPv4(s.src, dst), s.owner)
+		curDrop := e.SnapshotMetrics().DropPackets
+		if curDrop <= prevDrop {
+			t.Fatalf("step %d: dataplane stall window did not increase drop metrics: prev=%d cur=%d", i, prevDrop, curDrop)
+		}
+		prevDrop = curDrop
+
+		mustUpsert(rt.Route{ID: 802, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.235.9.0/24")}})
+		e.engine.SetEgressSession(802, "dst-smb")
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 6 || m.DropPackets != 3 || m.ControlUpsertOK != 9 || m.ControlRemoveOK != 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in dataplane stall/drop growth test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepControlPlaneErrorJitterKeepsNonLoopForwarding(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession == ingress {
+			t.Fatalf("expected non-loop forward for %s, got %+v", ingress, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+
+	mustUpsert(rt.Route{ID: 810, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.236.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.236.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.236.0.0/24")}})
+	mustUpsert(rt.Route{ID: 811, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.236.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.236.9.0/24")}})
+	e.engine.SetEgressSession(811, "dst-smb")
+
+	steps := []struct {
+		owner rt.SessionKey
+		cidr  string
+		src   [4]byte
+	}{
+		{owner: "owner-a", cidr: "10.236.0.0/24", src: [4]byte{10, 236, 0, 10}},
+		{owner: "owner-b", cidr: "10.236.1.0/24", src: [4]byte{10, 236, 1, 10}},
+		{owner: "owner-c", cidr: "10.236.2.0/24", src: [4]byte{10, 236, 2, 10}},
+	}
+	dst := [4]byte{10, 236, 9, 10}
+
+	for _, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               810,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.236.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		if err := e.UpsertRoute(rt.Route{
+			ID:         910 + rt.RouteID(len(s.cidr)),
+			Owner:      "",
+			AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.236.0.0/24")},
+		}); err == nil {
+			t.Fatalf("expected control-plane validation error for empty owner")
+		}
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets != 0 || m.ControlUpsertOK != 5 || m.ControlErrors != 3 {
+		t.Fatalf("unexpected metrics in control-plane jitter/no-loop test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepControlPlaneJitterLoopOnlyWindowDropThenRecoverNoLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession == ingress {
+			t.Fatalf("expected non-loop forward for %s, got %+v", ingress, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+		e.dropPackets.Add(1)
+	}
+
+	mustUpsert(rt.Route{ID: 820, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.238.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.238.0.0/24")}})
+	mustUpsert(rt.Route{ID: 821, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")}})
+	mustUpsert(rt.Route{ID: 822, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")}})
+	e.engine.SetEgressSession(822, "dst-smb")
+
+	steps := []struct {
+		owner      rt.SessionKey
+		src        [4]byte
+		cidr       string
+		loopWindow bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 238, 0, 10}, cidr: "10.238.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 238, 1, 10}, cidr: "10.238.1.0/24", loopWindow: true},
+		{owner: "owner-c", src: [4]byte{10, 238, 2, 10}, cidr: "10.238.2.0/24"},
+	}
+	dst := [4]byte{10, 238, 9, 10}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               820,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(821, s.owner)
+
+		if err := e.UpsertRoute(rt.Route{
+			ID:         980 + rt.RouteID(i),
+			Owner:      "",
+			AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.238.0.0/24")},
+		}); err == nil {
+			t.Fatalf("step %d: expected control-plane validation error for empty owner", i)
+		}
+
+		if s.loopWindow {
+			e.RemoveRoute(822)
+			mustDrop(makeIPv4(s.src, dst), s.owner)
+			mustUpsert(rt.Route{ID: 822, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.238.9.0/24")}})
+			e.engine.SetEgressSession(822, "dst-smb")
+		}
+
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets != 3 || m.ControlUpsertOK != 7 || m.ControlRemoveOK != 1 || m.ControlErrors != 3 {
+		t.Fatalf("unexpected metrics in control-plane jitter loop-window test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepControlPlaneResultBaselineAllVsAnomalyKeepsNoLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession == ingress {
+			t.Fatalf("expected non-loop forward for %s, got %+v", ingress, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+		e.dropPackets.Add(1)
+	}
+
+	mustUpsert(rt.Route{ID: 830, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.239.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.239.0.0/24")}})
+	mustUpsert(rt.Route{ID: 831, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")}})
+	mustUpsert(rt.Route{ID: 832, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")}})
+	e.engine.SetEgressSession(832, "dst-smb")
+
+	steps := []struct {
+		owner   rt.SessionKey
+		src     [4]byte
+		cidr    string
+		anomaly bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 239, 0, 10}, cidr: "10.239.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 239, 1, 10}, cidr: "10.239.1.0/24", anomaly: true},
+		{owner: "owner-c", src: [4]byte{10, 239, 2, 10}, cidr: "10.239.2.0/24"},
+	}
+	dst := [4]byte{10, 239, 9, 10}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               830,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(831, s.owner)
+
+		if s.anomaly {
+			e.RemoveRoute(832)
+			mustDrop(makeIPv4(s.src, dst), s.owner)
+			mustUpsert(rt.Route{ID: 832, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.239.9.0/24")}})
+			e.engine.SetEgressSession(832, "dst-smb")
+		}
+
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets != 3 || m.ControlUpsertOK != 7 || m.ControlRemoveOK != 1 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in control-plane result baseline test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepGuardControlPlaneCrossCheckCompetingPrefixMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession == ingress {
+			t.Fatalf("expected non-loop forward for %s, got %+v", ingress, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+		e.dropPackets.Add(1)
+	}
+
+	mustUpsert(rt.Route{ID: 840, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.242.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.242.0.0/24")}})
+	mustUpsert(rt.Route{ID: 841, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")}})
+	mustUpsert(rt.Route{ID: 842, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")}})
+	e.engine.SetEgressSession(842, "dst-smb")
+
+	steps := []struct {
+		owner      rt.SessionKey
+		src        [4]byte
+		cidr       string
+		loopWindow bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 242, 0, 10}, cidr: "10.242.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 242, 1, 10}, cidr: "10.242.1.0/24", loopWindow: true},
+		{owner: "owner-c", src: [4]byte{10, 242, 2, 10}, cidr: "10.242.2.0/24"},
+	}
+	dst := [4]byte{10, 242, 9, 10}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               840,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(841, s.owner)
+
+		if s.loopWindow {
+			if err := e.UpsertRoute(rt.Route{ID: 990 + rt.RouteID(i), Owner: "", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.242.0.0/24")}}); err == nil {
+				t.Fatalf("step %d: expected control-plane validation error for empty owner", i)
+			}
+			e.RemoveRoute(842)
+			mustDrop(makeIPv4(s.src, dst), s.owner)
+			mustUpsert(rt.Route{ID: 842, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.242.9.0/24")}})
+			e.engine.SetEgressSession(842, "dst-smb")
+		}
+
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets != 3 || m.ControlUpsertOK != 7 || m.ControlRemoveOK != 1 || m.ControlErrors != 1 {
+		t.Fatalf("unexpected metrics in guard/control-plane cross-check test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepGuardControlPlanePerResultBaselineMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustForwardNoLoop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		d := e.engine.HandleIngress(pkt, ingress)
+		if d.Action != rt.ActionForward || d.EgressSession == ingress {
+			t.Fatalf("expected non-loop forward for %s, got %+v", ingress, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+	mustDrop := func(pkt []byte, ingress rt.SessionKey) {
+		t.Helper()
+		if d := e.engine.HandleIngress(pkt, ingress); d.Action != rt.ActionDrop {
+			t.Fatalf("expected drop for %s, got %+v", ingress, d)
+		}
+		e.dropPackets.Add(1)
+	}
+
+	mustUpsert(rt.Route{ID: 850, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.244.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.0.0/24")}})
+	mustUpsert(rt.Route{ID: 851, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}})
+	mustUpsert(rt.Route{ID: 852, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}})
+	e.engine.SetEgressSession(852, "dst-smb")
+
+	steps := []struct {
+		owner      rt.SessionKey
+		src        [4]byte
+		cidr       string
+		loopWindow bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 244, 0, 10}, cidr: "10.244.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 244, 1, 10}, cidr: "10.244.1.0/24", loopWindow: true},
+		{owner: "owner-c", src: [4]byte{10, 244, 2, 10}, cidr: "10.244.2.0/24"},
+	}
+	dst := [4]byte{10, 244, 9, 10}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               850,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(851, s.owner)
+
+		if s.loopWindow {
+			if err := e.UpsertRoute(rt.Route{ID: 995, Owner: "", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.244.1.0/24")}}); err == nil {
+				t.Fatalf("step %d: expected control-plane validation error for empty owner", i)
+			}
+			e.RemoveRoute(852)
+			mustDrop(makeIPv4(s.src, dst), s.owner)
+			mustUpsert(rt.Route{ID: 852, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}})
+			e.engine.SetEgressSession(852, "dst-smb")
+		}
+
+		mustForwardNoLoop(makeIPv4(s.src, dst), s.owner)
+		if i > 0 {
+			prev := steps[i-1]
+			mustDrop(makeIPv4(prev.src, dst), prev.owner)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets != 3 || m.ControlUpsertOK != 7 || m.ControlRemoveOK != 1 || m.ControlErrors != 1 {
+		t.Fatalf("unexpected metrics in per-result baseline test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepGuardControlPlaneTrendBaselineMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{ID: 860, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.246.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.0.0/24")}})
+	mustUpsert(rt.Route{ID: 861, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+	mustUpsert(rt.Route{ID: 862, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+	e.engine.SetEgressSession(862, "dst-smb")
+
+	steps := []struct {
+		owner  rt.SessionKey
+		src    [4]byte
+		cidr   string
+		stall  bool
+		jitter bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 246, 0, 10}, cidr: "10.246.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 246, 1, 10}, cidr: "10.246.1.0/24", stall: true, jitter: true},
+		{owner: "owner-c", src: [4]byte{10, 246, 2, 10}, cidr: "10.246.2.0/24"},
+		{owner: "owner-a", src: [4]byte{10, 246, 3, 10}, cidr: "10.246.3.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 246, 4, 10}, cidr: "10.246.4.0/24", stall: true},
+		{owner: "owner-c", src: [4]byte{10, 246, 5, 10}, cidr: "10.246.5.0/24"},
+	}
+	dst := [4]byte{10, 246, 9, 10}
+
+	allSteps := 0
+	anomalySteps := 0
+	allStallWithoutDrop := 0
+	anomalyStallWithoutDrop := 0
+	lastDrop := uint64(0)
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               860,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(861, s.owner)
+
+		allSteps++
+		dropBefore := e.dropPackets.Load()
+		if s.stall {
+			anomalySteps++
+			if s.jitter {
+				if err := e.UpsertRoute(rt.Route{ID: 998, Owner: "", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.246.1.0/24")}}); err == nil {
+					t.Fatalf("step %d: expected control-plane jitter (validation error)", i)
+				}
+			}
+			e.RemoveRoute(862)
+			if d := e.engine.HandleIngress(makeIPv4(s.src, dst), s.owner); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in stall window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+			mustUpsert(rt.Route{ID: 862, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+			e.engine.SetEgressSession(862, "dst-smb")
+		}
+		dropAfter := e.dropPackets.Load()
+		dropDelta := dropAfter - dropBefore
+		if s.stall && !s.jitter && dropDelta <= 0 {
+			allStallWithoutDrop++
+			anomalyStallWithoutDrop++
+		}
+		lastDrop = dropAfter
+
+		if d := e.engine.HandleIngress(makeIPv4(s.src, dst), s.owner); d.Action != rt.ActionForward || d.EgressSession == s.owner {
+			t.Fatalf("step %d: expected non-loop forward, got %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), prev.owner); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	if allSteps != len(steps) || anomalySteps != 2 {
+		t.Fatalf("unexpected trend counters: all=%d anomaly=%d", allSteps, anomalySteps)
+	}
+	if allStallWithoutDrop != 0 || anomalyStallWithoutDrop != 0 {
+		t.Fatalf("unexpected sustained trend shift: all=%d anomaly=%d lastDrop=%d",
+			allStallWithoutDrop, anomalyStallWithoutDrop, lastDrop)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 6 || m.DropPackets < 7 || m.ControlErrors != 1 {
+		t.Fatalf("unexpected trend-baseline metrics: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepBudgetDecayCooldownWindowTracksNoLoopMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, sk := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-loop", "dst-smb"} {
+		e.enterSession(sk)
+	}
+	t.Cleanup(func() {
+		for _, sk := range []rt.SessionKey{"dst-smb", "dst-loop", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(sk)
+		}
+	})
+
+	mustUpsert := func(r rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(r); err != nil {
+			t.Fatalf("upsert route %d (%s): %v", r.ID, r.Owner, err)
+		}
+	}
+	mustUpsert(rt.Route{ID: 970, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.251.0.0/24")}, AllowedDst: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.0.0/24")}})
+	mustUpsert(rt.Route{ID: 971, Owner: "dst-loop", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+	mustUpsert(rt.Route{ID: 972, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+	e.engine.SetEgressSession(972, "dst-smb")
+
+	steps := []struct {
+		owner      rt.SessionKey
+		src        [4]byte
+		cidr       string
+		loopWindow bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 251, 0, 10}, cidr: "10.251.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 251, 1, 10}, cidr: "10.251.1.0/24", loopWindow: true}, // aged anomaly candidate
+		{owner: "owner-c", src: [4]byte{10, 251, 2, 10}, cidr: "10.251.2.0/24"},
+		{owner: "owner-a", src: [4]byte{10, 251, 3, 10}, cidr: "10.251.3.0/24"},
+	}
+	dst := [4]byte{10, 251, 9, 10}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               970,
+			Owner:            string(s.owner),
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(971, s.owner)
+
+		if s.loopWindow {
+			e.RemoveRoute(972)
+			if d := e.engine.HandleIngress(makeIPv4(s.src, dst), s.owner); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in loop-only window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+			mustUpsert(rt.Route{ID: 972, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+			e.engine.SetEgressSession(972, "dst-smb")
+		}
+
+		if d := e.engine.HandleIngress(makeIPv4(s.src, dst), s.owner); d.Action != rt.ActionForward || d.EgressSession == s.owner {
+			t.Fatalf("step %d: expected non-loop forward, got %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), prev.owner); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != uint64(len(steps)) || m.DropPackets < 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in decay/cooldown window test: %+v", m)
+	}
+}
+
+func TestEndpointBidirectionalSMBAuthSymptomOwnerFlapTracksNoLoopMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []string{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(rt.SessionKey(owner))
+	}
+	t.Cleanup(func() {
+		for _, owner := range []string{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(rt.SessionKey(owner))
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d: %v", route.ID, err)
+		}
+	}
+	mustUpsert(rt.Route{ID: 983, Owner: "owner-a", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.253.0.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.0.0/24")}})
+	mustUpsert(rt.Route{ID: 984, Owner: "dst-smb", AllowedSrc: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}, ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}})
+	mustUpsert(rt.Route{ID: 985, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}})
+	e.engine.SetEgressSession(984, "dst-smb")
+
+	steps := []struct {
+		owner string
+		src   [4]byte
+		cidr  string
+	}{
+		{owner: "owner-a", src: [4]byte{10, 253, 0, 10}, cidr: "10.253.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 253, 1, 10}, cidr: "10.253.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 253, 2, 10}, cidr: "10.253.2.0/24"},
+	}
+	dst := [4]byte{10, 253, 9, 44}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               983,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(985, rt.SessionKey(s.owner)) // force loop candidate
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if d.Action != rt.ActionForward || d.EgressSession != "dst-smb" {
+			t.Fatalf("step %d: expected non-loop forward to dst-smb, got %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != uint64(len(steps)) || m.DropPackets != uint64(len(steps)-1) || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in bidirectional auth symptom guard test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepNoisySuppressionDecisionWindowTracksNoLoopMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+	mustUpsert(rt.Route{
+		ID:               1101,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               1102,
+		Owner:            "owner-a",
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               1103,
+		Owner:            "dst-smb",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+	})
+	e.engine.SetEgressSession(1103, "dst-smb")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		loopWindow bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 255, 0, 10}, cidr: "10.255.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 255, 1, 10}, cidr: "10.255.1.0/24", loopWindow: true},
+		{owner: "owner-c", src: [4]byte{10, 255, 2, 10}, cidr: "10.255.2.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 255, 3, 10}, cidr: "10.255.3.0/24"},
+	}
+	dst := [4]byte{10, 255, 9, 44}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1101,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1102, rt.SessionKey(s.owner))
+		if s.loopWindow {
+			e.RemoveRoute(1103)
+			if d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in loop-only window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+			mustUpsert(rt.Route{
+				ID:               1103,
+				Owner:            "dst-smb",
+				AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+				ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+			})
+			e.engine.SetEgressSession(1103, "dst-smb")
+		}
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if d.Action != rt.ActionForward || d.EgressSession != "dst-smb" {
+			t.Fatalf("step %d: expected non-loop SMB forward, got %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != uint64(len(steps)) || m.DropPackets < 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in noisy suppression decision window test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepAgeWeightedSuppressionWindowTracksNoLoopAndStaleDrop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+	mustUpsert(rt.Route{
+		ID:               1201,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.249.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.249.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.249.0.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               1202,
+		Owner:            "owner-a",
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.249.9.0/24")},
+	})
+	mustUpsert(rt.Route{
+		ID:               1203,
+		Owner:            "dst-smb",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.249.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.249.9.0/24")},
+	})
+	e.engine.SetEgressSession(1203, "dst-smb")
+
+	steps := []struct {
+		owner string
+		src   [4]byte
+		cidr  string
+	}{
+		{owner: "owner-a", src: [4]byte{10, 249, 0, 10}, cidr: "10.249.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 249, 1, 10}, cidr: "10.249.1.0/24"},
+		{owner: "owner-a", src: [4]byte{10, 249, 2, 10}, cidr: "10.249.2.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 249, 3, 10}, cidr: "10.249.3.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 249, 4, 10}, cidr: "10.249.4.0/24"},
+	}
+	dst := [4]byte{10, 249, 9, 44}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1201,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.249.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1202, rt.SessionKey(s.owner))
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if d.Action != rt.ActionForward || d.EgressSession != "dst-smb" {
+			t.Fatalf("step %d: expected non-loop SMB forward, got %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != uint64(len(steps)) || m.DropPackets != uint64(len(steps)-1) || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in age-weighted suppression window test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepTrendAgeStabilityLoopOnlyWindowTracksDropAndRecovery(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+	mustUpsert(rt.Route{
+		ID:               1301,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.248.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.248.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.248.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1302, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.248.9.0/24")}})
+	mustUpsert(rt.Route{
+		ID:               1303,
+		Owner:            "dst-smb",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.248.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.248.9.0/24")},
+	})
+	e.engine.SetEgressSession(1303, "dst-smb")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		loopWindow bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 248, 0, 10}, cidr: "10.248.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 248, 1, 10}, cidr: "10.248.1.0/24", loopWindow: true},
+		{owner: "owner-c", src: [4]byte{10, 248, 2, 10}, cidr: "10.248.2.0/24"},
+	}
+	dst := [4]byte{10, 248, 9, 44}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1301,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.248.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1302, rt.SessionKey(s.owner))
+		if s.loopWindow {
+			e.RemoveRoute(1303)
+			if d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in loop-only window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+			mustUpsert(rt.Route{
+				ID:               1303,
+				Owner:            "dst-smb",
+				AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.248.9.0/24")},
+				ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.248.9.0/24")},
+			})
+			e.engine.SetEgressSession(1303, "dst-smb")
+		}
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if d.Action != rt.ActionForward || d.EgressSession != "dst-smb" {
+			t.Fatalf("step %d: expected recovered non-loop forwarding, got %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != uint64(len(steps)) || m.DropPackets < uint64(len(steps)) || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in trend-age stability loop-only test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepAuthSymptomCompetingRouteChurnLoopWindowTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-a", "dst-b"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-b", "dst-a", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1401,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.246.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1402, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1403, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1404, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+	e.engine.SetEgressSession(1403, "dst-a")
+	e.engine.SetEgressSession(1404, "dst-b")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		withdrawA  bool
+		withdrawB  bool
+		expectDest rt.SessionKey
+	}{
+		{owner: "owner-a", src: [4]byte{10, 246, 0, 10}, cidr: "10.246.0.0/24", expectDest: "dst-a"},
+		{owner: "owner-b", src: [4]byte{10, 246, 1, 10}, cidr: "10.246.1.0/24", withdrawA: true, expectDest: "dst-b"},
+		{owner: "owner-c", src: [4]byte{10, 246, 2, 10}, cidr: "10.246.2.0/24", withdrawA: true, withdrawB: true},
+		{owner: "owner-b", src: [4]byte{10, 246, 3, 10}, cidr: "10.246.3.0/24", expectDest: "dst-a"},
+	}
+	dst := [4]byte{10, 246, 9, 44}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1401,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1402, rt.SessionKey(s.owner))
+
+		if s.withdrawA {
+			e.RemoveRoute(1403)
+		} else {
+			mustUpsert(rt.Route{ID: 1403, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+			e.engine.SetEgressSession(1403, "dst-a")
+		}
+		if s.withdrawB {
+			e.RemoveRoute(1404)
+		} else {
+			mustUpsert(rt.Route{ID: 1404, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.246.9.0/24")}})
+			e.engine.SetEgressSession(1404, "dst-b")
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if s.expectDest == "" {
+			if d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in loop-only window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+		} else if d.Action != rt.ActionForward || d.EgressSession != s.expectDest {
+			t.Fatalf("step %d: expected non-loop forward to %q, got %+v", i, s.expectDest, d)
+		} else {
+			e.forwardPackets.Add(1)
+		}
+
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets < 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in auth-symptom competing churn test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepRecommendationConfidenceBucketChurnKeepsNoLoopMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1451,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.244.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1452, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1453, Owner: "dst-smb", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}})
+	e.engine.SetEgressSession(1453, "dst-smb")
+
+	steps := []struct {
+		owner       string
+		src         [4]byte
+		cidr        string
+		withdrawDst bool
+		expectDrop  bool
+	}{
+		{owner: "owner-a", src: [4]byte{10, 244, 0, 10}, cidr: "10.244.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 244, 1, 10}, cidr: "10.244.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 244, 2, 10}, cidr: "10.244.2.0/24", withdrawDst: true, expectDrop: true},
+		{owner: "owner-b", src: [4]byte{10, 244, 3, 10}, cidr: "10.244.3.0/24"},
+	}
+	dst := [4]byte{10, 244, 9, 44}
+
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1451,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1452, rt.SessionKey(s.owner))
+		if s.withdrawDst {
+			e.RemoveRoute(1453)
+		} else {
+			mustUpsert(rt.Route{ID: 1453, Owner: "dst-smb", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.244.9.0/24")}})
+			e.engine.SetEgressSession(1453, "dst-smb")
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if s.expectDrop {
+			if d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in low-confidence loop-only window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+		} else if d.Action != rt.ActionForward || d.EgressSession != "dst-smb" {
+			t.Fatalf("step %d: expected non-loop forward to dst-smb, got %+v", i, d)
+		} else {
+			e.forwardPackets.Add(1)
+		}
+
+		if i > 0 {
+			prev := steps[i-1]
+			if d := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, d)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets < 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in recommendation-confidence owner-step churn test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepConfidenceBucketShiftLoopbackSymptomWindowTracksMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-a", "dst-b"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-b", "dst-a", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1661,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.243.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.243.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.243.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1662, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.243.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1663, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.243.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1664, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.243.9.0/24")}})
+	e.engine.SetEgressSession(1663, "dst-a")
+	e.engine.SetEgressSession(1664, "dst-b")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		withdrawA  bool
+		withdrawB  bool
+		expectDest rt.SessionKey
+	}{
+		{owner: "owner-a", src: [4]byte{10, 243, 0, 10}, cidr: "10.243.0.0/24", expectDest: "dst-a"},
+		{owner: "owner-b", src: [4]byte{10, 243, 1, 10}, cidr: "10.243.1.0/24", withdrawA: true, expectDest: "dst-b"},
+		{owner: "owner-c", src: [4]byte{10, 243, 2, 10}, cidr: "10.243.2.0/24", withdrawA: true, withdrawB: true},
+		{owner: "owner-b", src: [4]byte{10, 243, 3, 10}, cidr: "10.243.3.0/24", expectDest: "dst-a"},
+	}
+	dst := [4]byte{10, 243, 9, 44}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1661,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.243.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1662, rt.SessionKey(s.owner))
+		if s.withdrawA {
+			e.RemoveRoute(1663)
+		} else {
+			mustUpsert(rt.Route{ID: 1663, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.243.9.0/24")}})
+			e.engine.SetEgressSession(1663, "dst-a")
+		}
+		if s.withdrawB {
+			e.RemoveRoute(1664)
+		} else {
+			mustUpsert(rt.Route{ID: 1664, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.243.9.0/24")}})
+			e.engine.SetEgressSession(1664, "dst-b")
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if s.expectDest == "" {
+			if d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in bucket-shift loopback symptom window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+		} else if d.Action != rt.ActionForward || d.EgressSession != s.expectDest {
+			t.Fatalf("step %d: expected non-loop forward to %q, got %+v", i, s.expectDest, d)
+		} else {
+			e.forwardPackets.Add(1)
+		}
+		if d.Action == rt.ActionForward && d.EgressSession == rt.SessionKey(s.owner) {
+			t.Fatalf("step %d: self-loop detected %+v", i, d)
+		}
+		if i > 0 {
+			prev := steps[i-1]
+			if dPrev := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); dPrev.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, dPrev)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets < 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in confidence-bucket shift loopback symptom test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepAnomalyClusterRotationKeepsNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-smb"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-smb", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1501,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.245.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.245.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.245.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1502, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.245.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1503, Owner: "dst-smb", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.245.9.0/24")}})
+	e.engine.SetEgressSession(1503, "dst-smb")
+
+	steps := []struct {
+		owner string
+		src   [4]byte
+		cidr  string
+	}{
+		{owner: "owner-a", src: [4]byte{10, 245, 0, 10}, cidr: "10.245.0.0/24"},
+		{owner: "owner-b", src: [4]byte{10, 245, 1, 10}, cidr: "10.245.1.0/24"},
+		{owner: "owner-c", src: [4]byte{10, 245, 2, 10}, cidr: "10.245.2.0/24"},
+	}
+	dst := [4]byte{10, 245, 9, 44}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1501,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.245.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1502, rt.SessionKey(s.owner))
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if d.Action != rt.ActionForward || d.EgressSession != "dst-smb" {
+			t.Fatalf("step %d: expected non-loop forward to dst-smb, got %+v", i, d)
+		}
+		if d.EgressSession == rt.SessionKey(s.owner) {
+			t.Fatalf("step %d: self-loop detected %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+
+		if i > 0 {
+			prev := steps[i-1]
+			if dPrev := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); dPrev.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, dPrev)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets != 2 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in anomaly-cluster owner rotation test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepRiskScorePatternQueueReadinessTracksNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-a", "dst-b"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-b", "dst-a", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1701,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.251.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1702, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1703, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1704, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+	e.engine.SetEgressSession(1703, "dst-a")
+	e.engine.SetEgressSession(1704, "dst-b")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		withdrawA  bool
+		withdrawB  bool
+		expectDest rt.SessionKey
+	}{
+		{owner: "owner-a", src: [4]byte{10, 251, 0, 10}, cidr: "10.251.0.0/24", expectDest: "dst-a"},
+		{owner: "owner-b", src: [4]byte{10, 251, 1, 10}, cidr: "10.251.1.0/24", withdrawA: true, expectDest: "dst-b"},
+		{owner: "owner-c", src: [4]byte{10, 251, 2, 10}, cidr: "10.251.2.0/24", withdrawA: true, withdrawB: true},
+		{owner: "owner-a", src: [4]byte{10, 251, 3, 10}, cidr: "10.251.3.0/24", expectDest: "dst-a"},
+	}
+	dst := [4]byte{10, 251, 9, 44}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1701,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1702, rt.SessionKey(s.owner))
+
+		if s.withdrawA {
+			e.RemoveRoute(1703)
+		} else {
+			mustUpsert(rt.Route{ID: 1703, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+			e.engine.SetEgressSession(1703, "dst-a")
+		}
+		if s.withdrawB {
+			e.RemoveRoute(1704)
+		} else {
+			mustUpsert(rt.Route{ID: 1704, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.251.9.0/24")}})
+			e.engine.SetEgressSession(1704, "dst-b")
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if s.expectDest == "" {
+			if d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in risk-score queue pattern, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+		} else if d.Action != rt.ActionForward || d.EgressSession != s.expectDest {
+			t.Fatalf("step %d: expected forward to %q, got %+v", i, s.expectDest, d)
+		} else {
+			e.forwardPackets.Add(1)
+		}
+		if d.Action == rt.ActionForward && d.EgressSession == rt.SessionKey(s.owner) {
+			t.Fatalf("step %d: self-loop detected %+v", i, d)
+		}
+		if i > 0 {
+			prev := steps[i-1]
+			if dPrev := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); dPrev.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, dPrev)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets < 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in risk-score queue readiness test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepSustainedHighRiskFailOnlyWindowTracksNoLoopMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-a", "dst-b"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-b", "dst-a", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1711,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.252.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.252.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.252.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1712, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.252.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1713, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.252.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1714, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.252.9.0/24")}})
+	e.engine.SetEgressSession(1713, "dst-a")
+	e.engine.SetEgressSession(1714, "dst-b")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		withdrawA  bool
+		withdrawB  bool
+		expectDest rt.SessionKey
+	}{
+		{owner: "owner-a", src: [4]byte{10, 252, 0, 10}, cidr: "10.252.0.0/24", expectDest: "dst-a"},
+		{owner: "owner-b", src: [4]byte{10, 252, 1, 10}, cidr: "10.252.1.0/24", withdrawA: true, expectDest: "dst-b"},
+		{owner: "owner-c", src: [4]byte{10, 252, 2, 10}, cidr: "10.252.2.0/24", withdrawA: true, withdrawB: true},
+		{owner: "owner-a", src: [4]byte{10, 252, 3, 10}, cidr: "10.252.3.0/24", withdrawA: true, withdrawB: true},
+		{owner: "owner-b", src: [4]byte{10, 252, 4, 10}, cidr: "10.252.4.0/24", expectDest: "dst-a"},
+	}
+	dst := [4]byte{10, 252, 9, 44}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1711,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.252.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1712, rt.SessionKey(s.owner))
+
+		if s.withdrawA {
+			e.RemoveRoute(1713)
+		} else {
+			mustUpsert(rt.Route{ID: 1713, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.252.9.0/24")}})
+			e.engine.SetEgressSession(1713, "dst-a")
+		}
+		if s.withdrawB {
+			e.RemoveRoute(1714)
+		} else {
+			mustUpsert(rt.Route{ID: 1714, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.252.9.0/24")}})
+			e.engine.SetEgressSession(1714, "dst-b")
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if s.expectDest == "" {
+			if d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in sustained high-risk fail-only window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+		} else if d.Action != rt.ActionForward || d.EgressSession != s.expectDest {
+			t.Fatalf("step %d: expected forward to %q, got %+v", i, s.expectDest, d)
+		} else {
+			e.forwardPackets.Add(1)
+		}
+		if d.Action == rt.ActionForward && d.EgressSession == rt.SessionKey(s.owner) {
+			t.Fatalf("step %d: self-loop detected %+v", i, d)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets < 2 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in sustained high-risk fail-only test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepRiskTierQueueTraceWindowKeepsNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-a", "dst-b"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-b", "dst-a", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1721,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.253.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1722, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1723, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1724, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}})
+	e.engine.SetEgressSession(1723, "dst-a")
+	e.engine.SetEgressSession(1724, "dst-b")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		withdrawA  bool
+		withdrawB  bool
+		expectDest rt.SessionKey
+	}{
+		{owner: "owner-a", src: [4]byte{10, 253, 0, 10}, cidr: "10.253.0.0/24", expectDest: "dst-a"},
+		{owner: "owner-b", src: [4]byte{10, 253, 1, 10}, cidr: "10.253.1.0/24", withdrawA: true, expectDest: "dst-b"},
+		{owner: "owner-c", src: [4]byte{10, 253, 2, 10}, cidr: "10.253.2.0/24", withdrawA: true, withdrawB: true},
+		{owner: "owner-a", src: [4]byte{10, 253, 3, 10}, cidr: "10.253.3.0/24", withdrawA: true, withdrawB: true},
+		{owner: "owner-b", src: [4]byte{10, 253, 4, 10}, cidr: "10.253.4.0/24", expectDest: "dst-a"},
+	}
+	dst := [4]byte{10, 253, 9, 44}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1721,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1722, rt.SessionKey(s.owner))
+
+		if s.withdrawA {
+			e.RemoveRoute(1723)
+		} else {
+			mustUpsert(rt.Route{ID: 1723, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}})
+			e.engine.SetEgressSession(1723, "dst-a")
+		}
+		if s.withdrawB {
+			e.RemoveRoute(1724)
+		} else {
+			mustUpsert(rt.Route{ID: 1724, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.253.9.0/24")}})
+			e.engine.SetEgressSession(1724, "dst-b")
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if s.expectDest == "" {
+			if d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in risk-tier queue trace window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+		} else if d.Action != rt.ActionForward || d.EgressSession != s.expectDest {
+			t.Fatalf("step %d: expected forward to %q, got %+v", i, s.expectDest, d)
+		} else {
+			e.forwardPackets.Add(1)
+		}
+		if d.Action == rt.ActionForward && d.EgressSession == rt.SessionKey(s.owner) {
+			t.Fatalf("step %d: self-loop detected %+v", i, d)
+		}
+		if i > 0 {
+			prev := steps[i-1]
+			if dPrev := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); dPrev.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, dPrev)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets < 3 || m.DropPackets < 4 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in risk-tier queue trace test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepRiskTierJitterBudgetWindowKeepsNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-a", "dst-b"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-b", "dst-a", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+
+	mustUpsert(rt.Route{
+		ID:               1731,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.254.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.254.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1732, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.254.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1733, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.254.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1734, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.254.9.0/24")}})
+	e.engine.SetEgressSession(1733, "dst-a")
+	e.engine.SetEgressSession(1734, "dst-b")
+
+	steps := []struct {
+		owner      string
+		src        [4]byte
+		cidr       string
+		tier       string
+		jitter     bool
+		expectDest rt.SessionKey
+	}{
+		{owner: "owner-c", src: [4]byte{10, 254, 3, 10}, cidr: "10.254.3.0/24", tier: "P3", jitter: true, expectDest: "dst-a"},
+		{owner: "owner-b", src: [4]byte{10, 254, 2, 10}, cidr: "10.254.2.0/24", tier: "P2", jitter: true, expectDest: "dst-a"},
+		{owner: "owner-a", src: [4]byte{10, 254, 1, 10}, cidr: "10.254.1.0/24", tier: "P1", jitter: false, expectDest: "dst-a"},
+	}
+	dst := [4]byte{10, 254, 9, 40}
+	for i, s := range steps {
+		mustUpsert(rt.Route{
+			ID:               1731,
+			Owner:            s.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.254.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix(s.cidr)},
+		})
+		e.engine.SetEgressSession(1732, rt.SessionKey(s.owner))
+
+		if s.jitter && s.tier != "P3" {
+			e.RemoveRoute(1733)
+			e.RemoveRoute(1734)
+			if d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d (%s): expected drop in loop-only jitter window, got %+v", i, s.tier, d)
+			}
+			e.dropPackets.Add(1)
+			mustUpsert(rt.Route{ID: 1733, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.254.9.0/24")}})
+			mustUpsert(rt.Route{ID: 1734, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.254.9.0/24")}})
+			e.engine.SetEgressSession(1733, "dst-a")
+			e.engine.SetEgressSession(1734, "dst-b")
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(s.src, dst), rt.SessionKey(s.owner))
+		if d.Action != rt.ActionForward || d.EgressSession != s.expectDest {
+			t.Fatalf("step %d (%s): expected deterministic forward to %q, got %+v", i, s.tier, s.expectDest, d)
+		}
+		if d.EgressSession == rt.SessionKey(s.owner) {
+			t.Fatalf("step %d (%s): self-loop detected %+v", i, s.tier, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prev := steps[i-1]
+			if dPrev := e.engine.HandleIngress(makeIPv4(prev.src, dst), rt.SessionKey(prev.owner)); dPrev.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prev.owner, dPrev)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != 3 || m.DropPackets < 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in risk-tier jitter-budget test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepDeterministicQueueTieBreakWindowNoLoopAndMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-low", "dst-high"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-high", "dst-low", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+	mustUpsert(rt.Route{
+		ID:               1741,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.0.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.0.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1742, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1743, Owner: "dst-low", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")}})
+	mustUpsert(rt.Route{ID: 1744, Owner: "dst-high", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")}})
+	e.engine.SetEgressSession(1743, "dst-low")
+	e.engine.SetEgressSession(1744, "dst-high")
+
+	src := [4]byte{10, 255, 0, 11}
+	dst := [4]byte{10, 255, 9, 41}
+	owners := []string{"owner-c", "owner-b", "owner-a", "owner-c", "owner-a", "owner-b"}
+	expected := []rt.SessionKey{"dst-low", "dst-high", "dst-low", "dst-high", "dst-low", "dst-high"}
+	for i, owner := range owners {
+		mustUpsert(rt.Route{
+			ID:               1741,
+			Owner:            owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.0.0/24")},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.0.0/24")},
+		})
+		e.engine.SetEgressSession(1742, rt.SessionKey(owner))
+		if i%2 == 0 {
+			e.RemoveRoute(1744)
+			mustUpsert(rt.Route{ID: 1743, Owner: "dst-low", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")}})
+			e.engine.SetEgressSession(1743, "dst-low")
+		} else {
+			e.RemoveRoute(1743)
+			mustUpsert(rt.Route{ID: 1744, Owner: "dst-high", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.9.0/24")}})
+			e.engine.SetEgressSession(1744, "dst-high")
+		}
+		d := e.engine.HandleIngress(makeIPv4(src, dst), rt.SessionKey(owner))
+		if d.Action != rt.ActionForward || d.EgressSession != expected[i] {
+			t.Fatalf("step %d: expected stable forward to %q, got %+v", i, expected[i], d)
+		}
+		if d.EgressSession == rt.SessionKey(owner) {
+			t.Fatalf("step %d: self-loop detected %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+		if i > 0 {
+			prevOwner := rt.SessionKey(owners[i-1])
+			if stale := e.engine.HandleIngress(makeIPv4(src, dst), prevOwner); stale.Action != rt.ActionDrop {
+				t.Fatalf("step %d: stale owner %q must drop, got %+v", i, prevOwner, stale)
+			}
+			e.dropPackets.Add(1)
+		}
+	}
+
+	m := e.SnapshotMetrics()
+	if m.ForwardPackets != uint64(len(owners)) || m.DropPackets < uint64(len(owners)-1) || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in deterministic tie-break test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepJitterBudgetOverrunWindowDropsLoopOnlyAndRecoversWithoutSelfLoop(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-low", "dst-high"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-high", "dst-low", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+	mustUpsert(rt.Route{
+		ID:               1751,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.10.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.10.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1752, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")}})
+	mustUpsert(rt.Route{ID: 1753, Owner: "dst-low", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")}})
+	mustUpsert(rt.Route{ID: 1754, Owner: "dst-high", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")}})
+	e.engine.SetEgressSession(1753, "dst-low")
+	e.engine.SetEgressSession(1754, "dst-high")
+	src := [4]byte{10, 255, 10, 11}
+	dst := [4]byte{10, 255, 11, 41}
+	owners := []string{"owner-a", "owner-b", "owner-c", "owner-a", "owner-b", "owner-c"}
+
+	for i, owner := range owners {
+		mustUpsert(rt.Route{
+			ID:               1751,
+			Owner:            owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.10.0/24")},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.10.0/24")},
+		})
+		e.engine.SetEgressSession(1752, rt.SessionKey(owner))
+		if i < 3 {
+			e.RemoveRoute(1753)
+			e.RemoveRoute(1754)
+			if d := e.engine.HandleIngress(makeIPv4(src, dst), rt.SessionKey(owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d: expected drop in jitter overrun loop-only window, got %+v", i, d)
+			}
+			e.dropPackets.Add(1)
+			mustUpsert(rt.Route{ID: 1753, Owner: "dst-low", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")}})
+			mustUpsert(rt.Route{ID: 1754, Owner: "dst-high", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")}})
+			e.engine.SetEgressSession(1753, "dst-low")
+			e.engine.SetEgressSession(1754, "dst-high")
+			continue
+		}
+		if i%2 == 0 {
+			e.RemoveRoute(1754)
+			mustUpsert(rt.Route{ID: 1753, Owner: "dst-low", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")}})
+			e.engine.SetEgressSession(1753, "dst-low")
+		} else {
+			e.RemoveRoute(1753)
+			mustUpsert(rt.Route{ID: 1754, Owner: "dst-high", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.11.0/24")}})
+			e.engine.SetEgressSession(1754, "dst-high")
+		}
+		d := e.engine.HandleIngress(makeIPv4(src, dst), rt.SessionKey(owner))
+		if d.Action != rt.ActionForward || d.EgressSession == rt.SessionKey(owner) {
+			t.Fatalf("step %d: expected non-loop forward after recovery, got %+v", i, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+	m := e.SnapshotMetrics()
+	if m.DropPackets < 3 || m.ForwardPackets < 3 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in jitter overrun recovery test: %+v", m)
+	}
+}
+
+func TestEndpointOwnerStepBudgetOverrunQueueOrderCorrelationTracksFailVsSoftTimeout(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+	for _, owner := range []rt.SessionKey{"owner-a", "owner-b", "owner-c", "dst-a", "dst-b"} {
+		e.enterSession(owner)
+	}
+	t.Cleanup(func() {
+		for _, owner := range []rt.SessionKey{"dst-b", "dst-a", "owner-c", "owner-b", "owner-a"} {
+			e.leaveSession(owner)
+		}
+	})
+	mustUpsert := func(route rt.Route) {
+		t.Helper()
+		if err := e.UpsertRoute(route); err != nil {
+			t.Fatalf("upsert route %d(%s): %v", route.ID, route.Owner, err)
+		}
+	}
+	mustUpsert(rt.Route{
+		ID:               1761,
+		Owner:            "owner-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.20.0/24")},
+		AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.21.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.20.0/24")},
+	})
+	mustUpsert(rt.Route{ID: 1762, Owner: "owner-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.21.0/24")}})
+	mustUpsert(rt.Route{ID: 1763, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.21.0/24")}})
+	mustUpsert(rt.Route{ID: 1764, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.21.0/24")}})
+	e.engine.SetEgressSession(1763, "dst-a")
+	e.engine.SetEgressSession(1764, "dst-b")
+
+	type ownerStep struct {
+		owner      string
+		cpResult   string
+		queueScore int
+	}
+	steps := []ownerStep{
+		{owner: "owner-a", cpResult: "fail", queueScore: 95},
+		{owner: "owner-b", cpResult: "ok-soft-timeout", queueScore: 70},
+		{owner: "owner-c", cpResult: "ok", queueScore: 30},
+	}
+	sort.Slice(steps, func(i, j int) bool {
+		if steps[i].queueScore == steps[j].queueScore {
+			return steps[i].owner < steps[j].owner
+		}
+		return steps[i].queueScore > steps[j].queueScore
+	})
+	srcByOwner := map[string][4]byte{
+		"owner-a": {10, 255, 20, 11},
+		"owner-b": {10, 255, 20, 12},
+		"owner-c": {10, 255, 20, 13},
+	}
+	dst := [4]byte{10, 255, 21, 50}
+	for i, step := range steps {
+		mustUpsert(rt.Route{
+			ID:               1761,
+			Owner:            step.owner,
+			AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.255.20.0/24")},
+			AllowedDst:       []netip.Prefix{netip.MustParsePrefix("10.255.21.0/24")},
+			ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.20.0/24")},
+		})
+		e.engine.SetEgressSession(1762, rt.SessionKey(step.owner))
+		if step.cpResult == "fail" || step.cpResult == "ok-soft-timeout" {
+			e.RemoveRoute(1763)
+			e.RemoveRoute(1764)
+			if d := e.engine.HandleIngress(makeIPv4(srcByOwner[step.owner], dst), rt.SessionKey(step.owner)); d.Action != rt.ActionDrop {
+				t.Fatalf("step %d(%s): expected drop in loop-only window, got %+v", i, step.owner, d)
+			}
+			e.dropPackets.Add(1)
+			mustUpsert(rt.Route{ID: 1763, Owner: "dst-a", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.21.0/24")}})
+			mustUpsert(rt.Route{ID: 1764, Owner: "dst-b", ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.255.21.0/24")}})
+			e.engine.SetEgressSession(1763, "dst-a")
+			e.engine.SetEgressSession(1764, "dst-b")
+			continue
+		}
+
+		d := e.engine.HandleIngress(makeIPv4(srcByOwner[step.owner], dst), rt.SessionKey(step.owner))
+		if d.Action != rt.ActionForward || d.EgressSession != "dst-a" {
+			t.Fatalf("step %d(%s): expected deterministic forward to dst-a, got %+v", i, step.owner, d)
+		}
+		if d.EgressSession == rt.SessionKey(step.owner) {
+			t.Fatalf("step %d(%s): self-loop detected %+v", i, step.owner, d)
+		}
+		e.forwardPackets.Add(1)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.DropPackets < 2 || m.ForwardPackets < 1 || m.ControlErrors != 0 {
+		t.Fatalf("unexpected metrics in budget-overrun correlation test: %+v", m)
+	}
+}
+
+func makeIPv4(src, dst [4]byte) []byte {
+	b := make([]byte, 20)
+	b[0] = 0x45
+	copy(b[12:16], src[:])
+	copy(b[16:20], dst[:])
+	return b
+}
+
+func makeIPv6(src, dst netip.Addr) []byte {
+	b := make([]byte, 40)
+	b[0] = 0x60
+	src16 := src.As16()
+	dst16 := dst.As16()
+	copy(b[8:24], src16[:])
+	copy(b[24:40], dst16[:])
+	return b
+}

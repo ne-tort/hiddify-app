@@ -1,0 +1,3 @@
+[i] collecting logs from root@31.56.211.60, container=singbox-l3router-server, window=600s
+[i] container singbox-l3router-server not found, retry with singbox-wg-hub-server
+[ok] l3router overlay path observed; no HY2 TCP SMB degradation detected

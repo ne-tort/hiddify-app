@@ -1,0 +1,13 @@
+# runtime control-plane owner-a
+timeout_sec=2
+cmd_var=CONTROL_PLANE_STEP_CMD_OWNER_A
+cmd_source=default-runtime-hook
+status=running
+attempt_url=http://127.0.0.1:9090/l3router/routes
+attempt_http_status=200
+attempt_response_body_begin
+{"status":"ok","tag":"l3router","id":991}
+
+attempt_response_body_end
+attempt_result=ok
+status=ok
