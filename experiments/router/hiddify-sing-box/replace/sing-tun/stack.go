@@ -39,6 +39,7 @@ type StackOptions struct {
 	// instead of being delivered to the user network stack (TCP/UDP proxy path is bypassed).
 	L3OverlayRoutePrefixes []netip.Prefix
 	L3OverlaySend          func(packet []byte) error
+	L3OverlaySendError     func(error)
 }
 
 func NewStack(

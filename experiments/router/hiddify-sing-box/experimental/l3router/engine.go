@@ -61,6 +61,18 @@ func (e *MemEngine) ClearIngressSession(session SessionKey) {
 	delete(e.sessionIngress, session)
 }
 
+func (e *MemEngine) ClearIngressSessionRoute(routeID RouteID, session SessionKey) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	routeSet, exists := e.sessionIngress[session]
+	if !exists {
+		return
+	}
+	if routeSet == routeID {
+		delete(e.sessionIngress, session)
+	}
+}
+
 func (e *MemEngine) SetEgressSession(routeID RouteID, session SessionKey) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -77,32 +89,32 @@ func (e *MemEngine) ClearEgressSession(routeID RouteID) {
 func (e *MemEngine) HandleIngress(packet []byte, ingress SessionKey) Decision {
 	src, dst, ok := packetSrcDst(packet)
 	if !ok {
-		return Decision{Action: ActionDrop}
+		return Decision{Action: ActionDrop, DropReason: DropMalformedPacket}
 	}
 
 	e.mu.RLock()
 	ingressRouteID, ok := e.sessionIngress[ingress]
 	if !ok {
 		e.mu.RUnlock()
-		return Decision{Action: ActionDrop}
+		return Decision{Action: ActionDrop, DropReason: DropNoIngressRoute}
 	}
 	ingressRoute, ok := e.routes[ingressRouteID]
 	if !ok {
 		e.mu.RUnlock()
-		return Decision{Action: ActionDrop}
+		return Decision{Action: ActionDrop, DropReason: DropNoIngressRoute}
 	}
 	if !prefixListContains(ingressRoute.AllowedSrc, src) {
 		e.mu.RUnlock()
-		return Decision{Action: ActionDrop}
+		return Decision{Action: ActionDrop, DropReason: DropACLSource}
 	}
 	if len(ingressRoute.AllowedDst) > 0 && !prefixListContains(ingressRoute.AllowedDst, dst) {
 		e.mu.RUnlock()
-		return Decision{Action: ActionDrop}
+		return Decision{Action: ActionDrop, DropReason: DropACLDestination}
 	}
 	egressSession, ok := e.fibLookupForwardSessionLocked(dst, ingress)
 	if !ok {
 		e.mu.RUnlock()
-		return Decision{Action: ActionDrop}
+		return Decision{Action: ActionDrop, DropReason: DropNoEgressRoute}
 	}
 	e.mu.RUnlock()
 

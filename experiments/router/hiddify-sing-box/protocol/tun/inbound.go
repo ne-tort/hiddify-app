@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -296,6 +297,12 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, E.New("tun: auto_redirect cannot be used with l3_overlay_outbound")
 	}
 	if options.L3OverlayOutbound != "" {
+		if options.MTU == 0 && tunMTU > 9000 {
+			// Jumbo defaults are unreliable for raw IP overlay under long SMB flows.
+			tunMTU = 1500
+			inbound.tunOptions.MTU = tunMTU
+			logger.Warn("tun: normalize MTU to 1500 for l3_overlay_outbound")
+		}
 		destStr := options.L3OverlayDestination
 		if destStr == "" {
 			destStr = "198.18.0.1:33333"
@@ -456,7 +463,8 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 		}
 		var (
 			l3Prefixes []netip.Prefix
-			l3Send       func([]byte) error
+			l3Send     func([]byte) error
+			l3SendErr  func(error)
 		)
 		if t.l3OverlayOutboundTag != "" && len(t.l3OverlayPrefixes) > 0 {
 			outManager := service.FromContext[adapter.OutboundManager](t.ctx)
@@ -475,6 +483,8 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 			udpAddr := t.l3OverlayUDPDest
 			l3Prefixes = t.l3OverlayPrefixes
 			rewriteSrc := t.l3OverlayRewriteSrc
+			var overlaySendErrors atomic.Uint64
+			var lastOverlaySendLog atomic.Int64
 			l3Send = func(packet []byte) error {
 				if rewriteSrc.IsValid() {
 					b := append([]byte(nil), packet...)
@@ -483,6 +493,14 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 				}
 				_, err := pConn.WriteTo(packet, udpAddr)
 				return err
+			}
+			l3SendErr = func(err error) {
+				count := overlaySendErrors.Add(1)
+				now := time.Now().UnixNano()
+				lastLoggedAt := lastOverlaySendLog.Load()
+				if now-lastLoggedAt >= int64(5*time.Second) && lastOverlaySendLog.CompareAndSwap(lastLoggedAt, now) {
+					t.logger.Warn("l3 overlay send error: ", err, " total_failures=", count)
+				}
 			}
 			go t.l3OverlayReceiveLoop(pConn)
 		}
@@ -498,6 +516,7 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 			IncludeAllNetworks:     includeAllNetworks,
 			L3OverlayRoutePrefixes: l3Prefixes,
 			L3OverlaySend:          l3Send,
+			L3OverlaySendError:     l3SendErr,
 		})
 		if err != nil {
 			return err

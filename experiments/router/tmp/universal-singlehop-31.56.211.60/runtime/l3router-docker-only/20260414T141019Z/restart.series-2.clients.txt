@@ -1,5 +1,0 @@
-client1=singbox-l3router-client1
-singbox-l3router-client1
-client3=singbox-l3router-client3
-singbox-l3router-client3
-status=ok

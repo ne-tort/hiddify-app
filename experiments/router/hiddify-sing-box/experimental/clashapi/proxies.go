@@ -3,7 +3,6 @@ package clashapi
 import (
 	"context"
 	"net/http"
-	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,9 +32,9 @@ func proxyRouter(server *Server, router adapter.Router) http.Handler {
 		r.Use(parseProxyName, findProxyByName(server))
 		r.Get("/", getProxy(server))
 		r.Get("/delay", getProxyDelay(server))
-		r.Get("/metrics", getProxyMetrics)
-		r.Post("/routes", upsertProxyRoute)
-		r.Delete("/routes/{id}", removeProxyRoute)
+		r.Get("/metrics", getProxyMetrics(server))
+		r.Post("/routes", upsertProxyRoute(server))
+		r.Delete("/routes/{id}", removeProxyRoute(server))
 		r.Put("/", updateProxy)
 	})
 	return r
@@ -87,7 +86,7 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
 		info.Put("now", group.Now())
 		info.Put("all", group.All())
 	}
-	if l3, ok := detour.(*l3routerendpoint.Endpoint); ok {
+	if l3, ok := detour.(l3RouterMetricsProvider); ok {
 		info.Put("l3router", map[string]any{
 			"metrics": l3.SnapshotMetrics(),
 		})
@@ -255,118 +254,104 @@ type l3RouterControlResponse struct {
 	ID     uint64 `json:"id,omitempty"`
 }
 
-func getProxyMetrics(w http.ResponseWriter, r *http.Request) {
-	proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
-	l3, ok := proxy.(*l3routerendpoint.Endpoint)
-	if !ok {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, newError("proxy does not support metrics"))
-		return
-	}
-	metrics := l3.SnapshotMetrics()
-	render.JSON(w, r, map[string]any{
-		"type":    proxy.Type(),
-		"name":    proxy.Tag(),
-		"metrics": metrics,
-		"totals":  metrics,
-		"endpoints": []l3RouterEndpointMetrics{
-			{
-				Type:    proxy.Type(),
-				Tag:     proxy.Tag(),
-				Metrics: metrics,
-			},
-		},
-	})
+type l3RouterMetricsProvider interface {
+	SnapshotMetrics() l3routerendpoint.Metrics
 }
 
-func upsertProxyRoute(w http.ResponseWriter, r *http.Request) {
-	proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
-	l3, ok := proxy.(*l3routerendpoint.Endpoint)
-	if !ok {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, newError("proxy does not support routes"))
-		return
-	}
-	var req l3RouterRouteRequest
-	if err := render.DecodeJSON(r.Body, &req); err != nil {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, ErrBadRequest)
-		return
-	}
-	route, err := routeFromControlRequest(req.L3RouterRouteOptions)
-	if err != nil {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, ErrBadRequest)
-		return
-	}
-	if err := l3.UpsertRoute(route); err != nil {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, ErrBadRequest)
-		return
-	}
-	render.JSON(w, r, l3RouterControlResponse{
-		Status: "ok",
-		Tag:    l3.Tag(),
-		ID:     req.ID,
-	})
+type l3RouterRouteController interface {
+	UpsertRoute(rt.Route) error
+	RemoveRoute(rt.RouteID)
 }
 
-func removeProxyRoute(w http.ResponseWriter, r *http.Request) {
-	proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
-	l3, ok := proxy.(*l3routerendpoint.Endpoint)
-	if !ok {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, newError("proxy does not support routes"))
-		return
-	}
-	idText := chi.URLParam(r, "id")
-	id, err := strconv.ParseUint(idText, 10, 64)
-	if err != nil || id == 0 {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, ErrBadRequest)
-		return
-	}
-	l3.RemoveRoute(rt.RouteID(id))
-	render.JSON(w, r, l3RouterControlResponse{
-		Status: "ok",
-		Tag:    l3.Tag(),
-		ID:     id,
-	})
+func l3routerCapabilities(proxy adapter.Outbound) (l3RouterMetricsProvider, l3RouterRouteController, bool) {
+	metricsProvider, hasMetrics := proxy.(l3RouterMetricsProvider)
+	routeController, hasRoutes := proxy.(l3RouterRouteController)
+	return metricsProvider, routeController, hasMetrics && hasRoutes
 }
 
-func routeFromControlRequest(ro option.L3RouterRouteOptions) (rt.Route, error) {
-	var r rt.Route
-	r.ID = rt.RouteID(ro.ID)
-	r.Owner = ro.Owner
-	var err error
-	r.AllowedSrc, err = parseControlPrefixes(ro.AllowedSrc)
-	if err != nil {
-		return rt.Route{}, err
-	}
-	r.AllowedDst, err = parseControlPrefixes(ro.AllowedDst)
-	if err != nil {
-		return rt.Route{}, err
-	}
-	r.ExportedPrefixes, err = parseControlPrefixes(ro.ExportedPrefixes)
-	if err != nil {
-		return rt.Route{}, err
-	}
-	return r, nil
-}
-
-func parseControlPrefixes(items []string) ([]netip.Prefix, error) {
-	if len(items) == 0 {
-		return nil, nil
-	}
-	result := make([]netip.Prefix, 0, len(items))
-	for _, item := range items {
-		prefix, err := netip.ParsePrefix(item)
-		if err != nil {
-			return nil, err
+func getProxyMetrics(_ *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+		l3Metrics, _, ok := l3routerCapabilities(proxy)
+		if !ok {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("proxy does not support metrics"))
+			return
 		}
-		result = append(result, prefix)
+		metrics := l3Metrics.SnapshotMetrics()
+		render.JSON(w, r, map[string]any{
+			"type":    proxy.Type(),
+			"name":    proxy.Tag(),
+			"metrics": metrics,
+			"totals":  metrics,
+			"endpoints": []l3RouterEndpointMetrics{
+				{
+					Type:    proxy.Type(),
+					Tag:     proxy.Tag(),
+					Metrics: metrics,
+				},
+			},
+		})
 	}
-	return result, nil
+}
+
+func upsertProxyRoute(server *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+		_, routeController, ok := l3routerCapabilities(proxy)
+		if !ok {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("proxy does not support routes"))
+			return
+		}
+		var req l3RouterRouteRequest
+		if err := decodeJSONBody(w, r, &req, server.l3RouterStrictValidation); err != nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError(err.Error()))
+			return
+		}
+		route, err := l3routerendpoint.ParseRouteOptions(req.L3RouterRouteOptions)
+		if err != nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError(err.Error()))
+			return
+		}
+		if err := routeController.UpsertRoute(route); err != nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError(err.Error()))
+			return
+		}
+		render.JSON(w, r, l3RouterControlResponse{
+			Status: "ok",
+			Tag:    proxy.Tag(),
+			ID:     req.ID,
+		})
+	}
+}
+
+func removeProxyRoute(_ *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+		_, routeController, ok := l3routerCapabilities(proxy)
+		if !ok {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("proxy does not support routes"))
+			return
+		}
+		idText := chi.URLParam(r, "id")
+		id, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil || id == 0 {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("route id must be a non-zero unsigned integer"))
+			return
+		}
+		routeController.RemoveRoute(rt.RouteID(id))
+		render.JSON(w, r, l3RouterControlResponse{
+			Status: "ok",
+			Tag:    proxy.Tag(),
+			ID:     id,
+		})
+	}
 }
 
 func findProxyOrEndpointByName(server *Server, name string) (adapter.Outbound, bool) {

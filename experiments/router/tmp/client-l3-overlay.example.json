@@ -11,19 +11,32 @@
       "address": ["172.19.0.1/30"],
       "route_address": ["10.0.0.0/24"],
       "stack": "mixed",
-      "l3_overlay_outbound": "hy2-out",
+      "l3_overlay_outbound": "vless-re-out",
       "l3_overlay_destination": "198.18.0.1:33333",
       "l3_overlay_route_address": ["10.0.0.0/24"]
     }
   ],
   "outbounds": [
     {
-      "type": "hysteria2",
-      "tag": "hy2-out",
+      "type": "vless",
+      "tag": "vless-re-out",
       "server": "VPS_HOST",
       "server_port": 9440,
-      "password": "REDACTED",
-      "tls": { "enabled": true, "server_name": "YOUR_SNI", "insecure": false }
+      "uuid": "YOUR_UUID",
+      "flow": "xtls-rprx-vision",
+      "network": "tcp",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "alpn": ["h2", "http/1.1"],
+        "min_version": "1.3",
+        "reality": {
+          "enabled": true,
+          "public_key": "REALITY_PUBLIC_KEY",
+          "short_id": "SHORT_ID_HEX"
+        }
+      }
     },
     { "type": "direct", "tag": "direct" }
   ],

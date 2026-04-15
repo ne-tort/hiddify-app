@@ -1,1 +1,0 @@
-[!] fail-fast: step=owner-b: runtime control-plane command failed

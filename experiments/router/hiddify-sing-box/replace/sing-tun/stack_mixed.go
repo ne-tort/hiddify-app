@@ -225,14 +225,27 @@ func (m *Mixed) processIPv4(ipHdr header.IPv4) (writeBack bool, err error) {
 	}
 	if m.l3OverlaySend != nil && len(m.l3OverlayPrefixes) > 0 && prefixListContains(m.l3OverlayPrefixes, destination) {
 		if ipHdr.Flags()&header.IPv4FlagMoreFragments != 0 || ipHdr.FragmentOffset() != 0 {
-			return false, E.New("l3 overlay: ipv4 fragment dropped")
+			err := E.New("l3 overlay: ipv4 fragment dropped")
+			if m.l3OverlaySendError != nil {
+				m.l3OverlaySendError(err)
+			}
+			return false, err
 		}
 		totalLen := int(ipHdr.TotalLength())
 		if totalLen < header.IPv4MinimumSize || totalLen > len(ipHdr) {
-			return false, E.New("l3 overlay: bad ipv4 datagram length")
+			err := E.New("l3 overlay: bad ipv4 datagram length")
+			if m.l3OverlaySendError != nil {
+				m.l3OverlaySendError(err)
+			}
+			return false, err
 		}
 		pkt := ipHdr[:totalLen]
-		_ = m.l3OverlaySend(append([]byte(nil), pkt...))
+		if err := m.l3OverlaySend(append([]byte(nil), pkt...)); err != nil {
+			if m.l3OverlaySendError != nil {
+				m.l3OverlaySendError(err)
+			}
+			return false, err
+		}
 		return false, nil
 	}
 	writeBack = true
@@ -263,10 +276,19 @@ func (m *Mixed) processIPv6(ipHdr header.IPv6) (writeBack bool, err error) {
 		pl := int(ipHdr.PayloadLength())
 		totalLen := header.IPv6MinimumSize + pl
 		if totalLen < header.IPv6MinimumSize || totalLen > len(ipHdr) {
-			return false, E.New("l3 overlay: bad ipv6 datagram length")
+			err := E.New("l3 overlay: bad ipv6 datagram length")
+			if m.l3OverlaySendError != nil {
+				m.l3OverlaySendError(err)
+			}
+			return false, err
 		}
 		pkt := ipHdr[:totalLen]
-		_ = m.l3OverlaySend(append([]byte(nil), pkt...))
+		if err := m.l3OverlaySend(append([]byte(nil), pkt...)); err != nil {
+			if m.l3OverlaySendError != nil {
+				m.l3OverlaySendError(err)
+			}
+			return false, err
+		}
 		return false, nil
 	}
 	writeBack = true

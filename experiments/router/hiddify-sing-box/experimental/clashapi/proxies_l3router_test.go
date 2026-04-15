@@ -48,8 +48,8 @@ func (m *testOutboundManager) Outbound(tag string) (adapter.Outbound, bool) {
 	return o, ok
 }
 func (m *testOutboundManager) Outbounds() []adapter.Outbound { return nil }
-func (m *testOutboundManager) Default() adapter.Outbound      { return nil }
-func (m *testOutboundManager) Remove(tag string) error        { return nil }
+func (m *testOutboundManager) Default() adapter.Outbound     { return nil }
+func (m *testOutboundManager) Remove(tag string) error       { return nil }
 func (m *testOutboundManager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, outboundType string, options any) error {
 	return nil
 }
@@ -80,6 +80,9 @@ func TestL3RouterControlAPIPayloadValidationAndUpsert(t *testing.T) {
 	if emptyRec.Code != http.StatusBadRequest {
 		t.Fatalf("empty payload must fail with 400, got %d (%s)", emptyRec.Code, emptyRec.Body.String())
 	}
+	if !strings.Contains(emptyRec.Body.String(), "route id must be non-zero") {
+		t.Fatalf("expected detailed validation message, got %s", emptyRec.Body.String())
+	}
 
 	validReq := httptest.NewRequest(http.MethodPost, "/l3-test/routes", strings.NewReader(`{"id":101,"owner":"owner-a","allowed_src":["10.201.0.0/24"],"exported_prefixes":["10.201.0.0/24"]}`))
 	validReq = withProxyRouteContext(validReq, "l3-test")
@@ -93,6 +96,28 @@ func TestL3RouterControlAPIPayloadValidationAndUpsert(t *testing.T) {
 	m := ep.SnapshotMetrics()
 	if m.ControlErrors == 0 || m.ControlUpsertOK == 0 {
 		t.Fatalf("expected both failed and successful control-plane operations, got %+v", m)
+	}
+}
+
+func TestL3RouterControlAPIStrictValidationRejectsUnknownFields(t *testing.T) {
+	ep := newTestL3Endpoint("l3-test")
+	server := &Server{
+		outbound:                 &testOutboundManager{outbounds: map[string]adapter.Outbound{}},
+		endpoint:                 &testEndpointManager{endpoints: []adapter.Endpoint{ep}},
+		l3RouterStrictValidation: true,
+	}
+	router := proxyRouter(server, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/l3-test/routes", strings.NewReader(`{"id":101,"owner":"owner-a","exported_prefixes":["10.201.0.0/24"],"unknown_field":true}`))
+	req = withProxyRouteContext(req, "l3-test")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("strict mode must reject unknown fields, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(rec.Body.String()), "unknown") {
+		t.Fatalf("expected unknown field message, got %s", rec.Body.String())
 	}
 }
 

@@ -53,6 +53,7 @@ type System struct {
 	multiPendingPackets  bool
 	l3OverlayPrefixes    []netip.Prefix
 	l3OverlaySend        func([]byte) error
+	l3OverlaySendError   func(error)
 }
 
 type Session struct {
@@ -81,6 +82,7 @@ func NewSystem(options StackOptions) (Stack, error) {
 		multiPendingPackets:  options.TunOptions.EXP_MultiPendingPackets,
 		l3OverlayPrefixes:    options.L3OverlayRoutePrefixes,
 		l3OverlaySend:        options.L3OverlaySend,
+		l3OverlaySendError:   options.L3OverlaySendError,
 	}
 	if len(options.TunOptions.Inet4Address) > 0 {
 		if !HasNextAddress(options.TunOptions.Inet4Address[0], 1) {
@@ -359,14 +361,27 @@ func (s *System) processIPv4(ipHdr header.IPv4) (writeBack bool, err error) {
 	// L3 overlay for private/overlay ranges must run before the broadcast / non-unicast early return below.
 	if s.l3OverlaySend != nil && len(s.l3OverlayPrefixes) > 0 && prefixListContains(s.l3OverlayPrefixes, destination) {
 		if ipHdr.Flags()&header.IPv4FlagMoreFragments != 0 || ipHdr.FragmentOffset() != 0 {
-			return false, E.New("l3 overlay: ipv4 fragment dropped")
+			err := E.New("l3 overlay: ipv4 fragment dropped")
+			if s.l3OverlaySendError != nil {
+				s.l3OverlaySendError(err)
+			}
+			return false, err
 		}
 		totalLen := int(ipHdr.TotalLength())
 		if totalLen < header.IPv4MinimumSize || totalLen > len(ipHdr) {
-			return false, E.New("l3 overlay: bad ipv4 datagram length")
+			err := E.New("l3 overlay: bad ipv4 datagram length")
+			if s.l3OverlaySendError != nil {
+				s.l3OverlaySendError(err)
+			}
+			return false, err
 		}
 		pkt := ipHdr[:totalLen]
-		_ = s.l3OverlaySend(append([]byte(nil), pkt...))
+		if err := s.l3OverlaySend(append([]byte(nil), pkt...)); err != nil {
+			if s.l3OverlaySendError != nil {
+				s.l3OverlaySendError(err)
+			}
+			return false, err
+		}
 		return false, nil
 	}
 	if destination == s.broadcastAddr || !destination.IsGlobalUnicast() {
@@ -394,10 +409,19 @@ func (s *System) processIPv6(ipHdr header.IPv6) (writeBack bool, err error) {
 		pl := int(ipHdr.PayloadLength())
 		totalLen := header.IPv6MinimumSize + pl
 		if totalLen < header.IPv6MinimumSize || totalLen > len(ipHdr) {
-			return false, E.New("l3 overlay: bad ipv6 datagram length")
+			err := E.New("l3 overlay: bad ipv6 datagram length")
+			if s.l3OverlaySendError != nil {
+				s.l3OverlaySendError(err)
+			}
+			return false, err
 		}
 		pkt := ipHdr[:totalLen]
-		_ = s.l3OverlaySend(append([]byte(nil), pkt...))
+		if err := s.l3OverlaySend(append([]byte(nil), pkt...)); err != nil {
+			if s.l3OverlaySendError != nil {
+				s.l3OverlaySendError(err)
+			}
+			return false, err
+		}
 		return false, nil
 	}
 	if !dest.IsGlobalUnicast() {

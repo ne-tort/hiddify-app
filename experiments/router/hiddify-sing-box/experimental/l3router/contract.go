@@ -41,7 +41,19 @@ type Decision struct {
 	Action Action
 	// EgressSession, when Action == ActionForward, selects the target delivery session.
 	EgressSession SessionKey
+	DropReason    DropReason
 }
+
+type DropReason uint8
+
+const (
+	DropUnknown DropReason = iota
+	DropMalformedPacket
+	DropNoIngressRoute
+	DropACLSource
+	DropACLDestination
+	DropNoEgressRoute
+)
 
 // Engine is the Router data plane: ACL + FIB. Implementations must not depend on inbound protocol types.
 type Engine interface {

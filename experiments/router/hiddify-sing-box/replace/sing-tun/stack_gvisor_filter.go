@@ -14,10 +14,11 @@ var _ stack.LinkEndpoint = (*LinkEndpointFilter)(nil)
 
 type LinkEndpointFilter struct {
 	stack.LinkEndpoint
-	BroadcastAddress    netip.Addr
-	Writer              GVisorTun
-	L3OverlayPrefixes   []netip.Prefix
-	L3OverlaySend       func([]byte) error
+	BroadcastAddress   netip.Addr
+	Writer             GVisorTun
+	L3OverlayPrefixes  []netip.Prefix
+	L3OverlaySend      func([]byte) error
+	L3OverlaySendError func(error)
 }
 
 func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
@@ -27,6 +28,7 @@ func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
 		writer:            w.Writer,
 		l3Prefixes:        w.L3OverlayPrefixes,
 		l3Send:            w.L3OverlaySend,
+		l3SendError:       w.L3OverlaySendError,
 	})
 }
 
@@ -38,6 +40,7 @@ type networkDispatcherFilter struct {
 	writer           GVisorTun
 	l3Prefixes       []netip.Prefix
 	l3Send           func([]byte) error
+	l3SendError      func(error)
 }
 
 func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
@@ -58,7 +61,9 @@ func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkPro
 	destination := AddrFromAddress(network.DestinationAddress())
 	if w.l3Send != nil && len(w.l3Prefixes) > 0 && prefixListContains(w.l3Prefixes, destination) {
 		packetSlice := append([]byte(nil), pkt.Data().AsRange().ToSlice()...)
-		_ = w.l3Send(packetSlice)
+		if err := w.l3Send(packetSlice); err != nil && w.l3SendError != nil {
+			w.l3SendError(err)
+		}
 		pkt.DecRef()
 		return
 	}

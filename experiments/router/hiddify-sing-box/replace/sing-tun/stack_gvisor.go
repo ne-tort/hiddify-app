@@ -41,6 +41,7 @@ type GVisor struct {
 	endpoint             stack.LinkEndpoint
 	l3OverlayPrefixes    []netip.Prefix
 	l3OverlaySend        func([]byte) error
+	l3OverlaySendError   func(error)
 }
 
 type GVisorTun interface {
@@ -81,6 +82,7 @@ func NewGVisor(
 		logger:               options.Logger,
 		l3OverlayPrefixes:    options.L3OverlayRoutePrefixes,
 		l3OverlaySend:        options.L3OverlaySend,
+		l3OverlaySendError:   options.L3OverlaySendError,
 	}
 	return gStack, nil
 }
@@ -91,11 +93,12 @@ func (t *GVisor) Start() error {
 		return err
 	}
 	linkEndpoint = &LinkEndpointFilter{
-		LinkEndpoint:     linkEndpoint,
-		BroadcastAddress: t.broadcastAddr,
-		Writer:           t.tun,
-		L3OverlayPrefixes: t.l3OverlayPrefixes,
-		L3OverlaySend:    t.l3OverlaySend,
+		LinkEndpoint:       linkEndpoint,
+		BroadcastAddress:   t.broadcastAddr,
+		Writer:             t.tun,
+		L3OverlayPrefixes:  t.l3OverlayPrefixes,
+		L3OverlaySend:      t.l3OverlaySend,
+		L3OverlaySendError: t.l3OverlaySendError,
 	}
 	ipStack, err := NewGVisorStackWithOptions(linkEndpoint, nicOptions, false)
 	if err != nil {
