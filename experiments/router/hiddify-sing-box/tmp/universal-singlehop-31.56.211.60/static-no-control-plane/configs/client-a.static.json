@@ -1,0 +1,45 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun0",
+      "inet4_address": "10.10.1.2/24",
+      "auto_route": true,
+      "strict_route": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "to-hub",
+      "server": "31.56.211.60",
+      "server_port": 443,
+      "uuid": "11111111-1111-1111-1111-111111111111",
+      "flow": "",
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.example.com",
+        "insecure": false
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "outbound": "to-hub"
+      }
+    ],
+    "final": "direct"
+  }
+}

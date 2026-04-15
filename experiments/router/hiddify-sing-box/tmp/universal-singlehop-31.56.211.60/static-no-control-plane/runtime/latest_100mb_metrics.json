@@ -1,0 +1,15 @@
+{
+  "mode": "static-only",
+  "file_size_mb": 100,
+  "bytes": 104857600,
+  "duration_sec": 1,
+  "throughput_bytes_per_sec": 104857600,
+  "throughput_mib_per_sec": 100.00,
+  "throughput_mbit_per_sec": 838.86,
+  "src_file": "/tmp/l3router-src/l3router-static-100mb.bin",
+  "dst_file": "/tmp/l3router-dst/l3router-static-100mb.bin",
+  "sha256_src": "89a9c5255e588d5e5e25223dfd8d030bb8260847402615d331a36e4c71b5b3c0",
+  "sha256_dst": "89a9c5255e588d5e5e25223dfd8d030bb8260847402615d331a36e4c71b5b3c0",
+  "sha256_match": true,
+  "runtime_route_api_used": false
+}

@@ -33,6 +33,7 @@ func proxyRouter(server *Server, router adapter.Router) http.Handler {
 		r.Get("/", getProxy(server))
 		r.Get("/delay", getProxyDelay(server))
 		r.Get("/metrics", getProxyMetrics(server))
+		// Runtime route mutation is an optional ops API; static JSON routes are the primary path.
 		r.Post("/routes", upsertProxyRoute(server))
 		r.Delete("/routes/{id}", removeProxyRoute(server))
 		r.Put("/", updateProxy)

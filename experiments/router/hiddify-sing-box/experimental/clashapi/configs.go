@@ -108,6 +108,8 @@ func collectL3RouterMetrics(endpoints []adapter.Endpoint) ([]l3RouterEndpointMet
 		totals.ForwardPackets += metrics.ForwardPackets
 		totals.DropPackets += metrics.DropPackets
 		totals.EgressWriteFail += metrics.EgressWriteFail
+		totals.StaticLoadOK += metrics.StaticLoadOK
+		totals.StaticLoadError += metrics.StaticLoadError
 		totals.ControlUpsertOK += metrics.ControlUpsertOK
 		totals.ControlRemoveOK += metrics.ControlRemoveOK
 		totals.ControlErrors += metrics.ControlErrors

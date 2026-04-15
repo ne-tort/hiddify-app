@@ -98,6 +98,32 @@ func TestEndpointControlPlaneErrorMetrics(t *testing.T) {
 	}
 }
 
+func TestEndpointStaticRouteLoadMetrics(t *testing.T) {
+	e := &Endpoint{
+		engine:      rt.NewMemEngine(),
+		routeOwners: map[rt.RouteID]string{},
+		userRef:     map[rt.SessionKey]int{},
+		sessions:    map[rt.SessionKey]N.PacketConn{},
+	}
+
+	if err := e.LoadStaticRoute(rt.Route{
+		ID:               10,
+		Owner:            "user-static",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.9.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.9.0.0/24")},
+	}); err != nil {
+		t.Fatalf("load static route: %v", err)
+	}
+
+	m := e.SnapshotMetrics()
+	if m.StaticLoadOK != 1 || m.StaticLoadError != 0 {
+		t.Fatalf("unexpected static metrics: %+v", m)
+	}
+	if m.ControlUpsertOK != 0 || m.ControlErrors != 0 {
+		t.Fatalf("control metrics must stay zero for static bootstrap: %+v", m)
+	}
+}
+
 func TestEndpointRemoveRouteStopsForwarding(t *testing.T) {
 	e := &Endpoint{
 		engine:      rt.NewMemEngine(),

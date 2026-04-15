@@ -2,11 +2,11 @@ package l3routerendpoint
 
 import rt "github.com/sagernet/sing-box/experimental/l3router"
 
-// UpsertRoute updates/creates one route in runtime control-plane and immediately binds
-// currently active owner session (if present) as ingress+egress session.
-func (e *Endpoint) UpsertRoute(r rt.Route) error {
+func (e *Endpoint) applyRoute(r rt.Route, countControl bool) error {
 	if err := ValidateRoute(r); err != nil {
-		e.controlErrors.Add(1)
+		if countControl {
+			e.controlErrors.Add(1)
+		}
 		return err
 	}
 	e.sessMu.Lock()
@@ -14,7 +14,11 @@ func (e *Endpoint) UpsertRoute(r rt.Route) error {
 	e.sessMu.Unlock()
 
 	e.engine.UpsertRoute(r)
-	e.controlUpsertOK.Add(1)
+	if countControl {
+		e.controlUpsertOK.Add(1)
+	} else {
+		e.staticLoadOK.Add(1)
+	}
 	if prevOwner != "" && prevOwner != r.Owner {
 		// Drop only stale bindings for this route when ownership changes.
 		e.engine.ClearIngressSessionRoute(r.ID, rt.SessionKey(prevOwner))
@@ -36,6 +40,17 @@ func (e *Endpoint) UpsertRoute(r rt.Route) error {
 		}
 	}
 	return nil
+}
+
+// LoadStaticRoute registers one route from endpoint JSON bootstrap.
+func (e *Endpoint) LoadStaticRoute(r rt.Route) error {
+	return e.applyRoute(r, false)
+}
+
+// UpsertRoute updates/creates one route in runtime control-plane and immediately binds
+// currently active owner session (if present) as ingress+egress session.
+func (e *Endpoint) UpsertRoute(r rt.Route) error {
+	return e.applyRoute(r, true)
 }
 
 // RemoveRoute deletes one route in runtime control-plane.

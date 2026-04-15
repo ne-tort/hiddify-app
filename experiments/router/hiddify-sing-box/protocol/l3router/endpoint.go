@@ -61,6 +61,8 @@ type Endpoint struct {
 	dropACLSource   atomic.Uint64
 	dropACLDest     atomic.Uint64
 	fragmentDrops   atomic.Uint64
+	staticLoadOK    atomic.Uint64
+	staticLoadError atomic.Uint64
 	controlUpsertOK atomic.Uint64
 	controlRemoveOK atomic.Uint64
 	controlErrors   atomic.Uint64
@@ -78,6 +80,8 @@ type Metrics struct {
 	DropACLSource   uint64
 	DropACLDest     uint64
 	FragmentDrops   uint64
+	StaticLoadOK    uint64
+	StaticLoadError uint64
 	ControlUpsertOK uint64
 	ControlRemoveOK uint64
 	ControlErrors   uint64
@@ -111,10 +115,12 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 	for _, ro := range options.Routes {
 		r, err := ParseRouteOptions(ro)
 		if err != nil {
+			e.staticLoadError.Add(1)
 			cancel()
 			return nil, E.Cause(err, "l3router route ", ro.ID)
 		}
-		if err := e.UpsertRoute(r); err != nil {
+		if err := e.LoadStaticRoute(r); err != nil {
+			e.staticLoadError.Add(1)
 			cancel()
 			return nil, E.Cause(err, "l3router route ", ro.ID)
 		}
@@ -138,6 +144,8 @@ func (e *Endpoint) SnapshotMetrics() Metrics {
 		DropACLSource:   e.dropACLSource.Load(),
 		DropACLDest:     e.dropACLDest.Load(),
 		FragmentDrops:   e.fragmentDrops.Load(),
+		StaticLoadOK:    e.staticLoadOK.Load(),
+		StaticLoadError: e.staticLoadError.Load(),
 		ControlUpsertOK: e.controlUpsertOK.Load(),
 		ControlRemoveOK: e.controlRemoveOK.Load(),
 		ControlErrors:   e.controlErrors.Load(),

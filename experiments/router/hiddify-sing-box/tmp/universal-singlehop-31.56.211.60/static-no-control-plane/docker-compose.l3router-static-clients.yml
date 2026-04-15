@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  l3router-client-a:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: l3router-client-a
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./configs/client-a.static.json:/etc/sing-box/config.json:ro
+    command: run -c /etc/sing-box/config.json
+
+  l3router-client-b:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: l3router-client-b
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./configs/client-b.static.json:/etc/sing-box/config.json:ro
+    command: run -c /etc/sing-box/config.json
