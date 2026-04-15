@@ -5,7 +5,6 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
-	"time"
 
 	rt "github.com/sagernet/sing-box/experimental/l3router"
 	"github.com/sagernet/sing-box/log"
@@ -51,7 +50,8 @@ func TestEndpointConcurrentRouteAndSessionChurn(t *testing.T) {
 	wg.Wait()
 }
 
-func TestEgressQueueCountsOverflow(t *testing.T) {
+// Egress to a SessionKey that has never entered (no userRef) must not spawn idle workers or queues.
+func TestEgressPhantomSessionUsesFastPath(t *testing.T) {
 	loggerFactory := log.NewNOPFactory()
 	endpointAny, err := NewEndpoint(context.Background(), nil, loggerFactory.Logger(), "queue", option.L3RouterEndpointOptions{})
 	if err != nil {
@@ -59,11 +59,22 @@ func TestEgressQueueCountsOverflow(t *testing.T) {
 	}
 	e := endpointAny.(*Endpoint)
 	for i := 0; i < 400; i++ {
-		_ = e.enqueueEgress("missing-session", buf.As([]byte{0x45, 0x00, 0x00, 0x14}))
+		b := buf.As([]byte{0x45, 0x00, 0x00, 0x14})
+		queued, queueFull := e.enqueueEgress("missing-session", b)
+		if queued || queueFull {
+			b.Release()
+			t.Fatalf("expected fast-path reject, got queued=%v queueFull=%v", queued, queueFull)
+		}
+		b.Release()
 	}
-	time.Sleep(20 * time.Millisecond)
-	if e.queueOverflow.Load() == 0 && e.egressWriteFail.Load() == 0 {
-		t.Fatalf("expected queue or write failure counters to increment")
+	e.egressMu.Lock()
+	nQ := len(e.egressQueues)
+	e.egressMu.Unlock()
+	if nQ != 0 {
+		t.Fatalf("expected no egress queues for phantom session, got %d", nQ)
+	}
+	if e.queueOverflow.Load() != 0 {
+		t.Fatalf("queueOverflow should be 0, got %d", e.queueOverflow.Load())
 	}
 }
 

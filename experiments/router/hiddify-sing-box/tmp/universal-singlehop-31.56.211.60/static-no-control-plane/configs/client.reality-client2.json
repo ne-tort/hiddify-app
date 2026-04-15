@@ -1,0 +1,40 @@
+{
+  "log": { "level": "info" },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun1",
+      "inet4_address": "10.0.0.3/24",
+      "inet4_route_address": ["10.0.0.0/24"],
+      "iproute2_table_index": 2026,
+      "auto_route": true,
+      "strict_route": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "to-hub",
+      "server": "31.56.211.60",
+      "server_port": 9440,
+      "uuid": "a2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a202",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "6UthLd4-BuUwP01B6dLpF7qxTpXrx-oLkI5RDOt8hHg",
+          "short_id": "a1b2c3d4"
+        }
+      }
+    },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [{ "inbound": ["tun-in"], "outbound": "to-hub" }],
+    "final": "direct"
+  }
+}

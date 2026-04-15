@@ -1,0 +1,41 @@
+services:
+  l3router-smb-client1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.smb-client
+    image: sing-box-l3router-smb:local
+    container_name: l3router-smb-client1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/client.reality-smb-client1.json:/etc/sing-box/config.json:ro
+      - smb-client1-share:/srv/smb/share
+    environment:
+      SMB_SHARE_NAME: PEER_C1_ALPHA
+      SMB_USER: owner_a
+      SMB_PASS: owner_a_2026
+    restart: unless-stopped
+
+  l3router-smb-client2:
+    image: sing-box-l3router-smb:local
+    container_name: l3router-smb-client2
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/client.reality-smb-client2.json:/etc/sing-box/config.json:ro
+      - smb-client2-share:/srv/smb/share
+    environment:
+      SMB_SHARE_NAME: PEER_C3_BETA
+      SMB_USER: owner_c
+      SMB_PASS: owner_c_2026
+    restart: unless-stopped
+    depends_on:
+      - l3router-smb-client1
+
+volumes:
+  smb-client1-share:
+  smb-client2-share:

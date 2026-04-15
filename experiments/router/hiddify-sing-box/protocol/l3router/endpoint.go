@@ -2,6 +2,7 @@ package l3routerendpoint
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -40,9 +41,12 @@ type Endpoint struct {
 	overlayDest M.Socksaddr
 
 	routeOwners map[rt.RouteID]string
+	ownerRoutes map[string]map[rt.RouteID]struct{}
 
 	refMu   sync.Mutex
 	userRef map[rt.SessionKey]int
+	// Tracks one active session per owner for fast applyRoute binding.
+	activeOwnerSession map[string]rt.SessionKey
 
 	sessMu   sync.RWMutex
 	sessions map[rt.SessionKey]N.PacketConn
@@ -66,12 +70,23 @@ type Endpoint struct {
 	controlUpsertOK atomic.Uint64
 	controlRemoveOK atomic.Uint64
 	controlErrors   atomic.Uint64
+
+	telemetryMode atomic.Uint32
 }
+
+type telemetryMode uint32
+
+const (
+	telemetryModeBaseline telemetryMode = iota
+	telemetryModeDiagnostic
+	telemetryModeForensic
+)
 
 // Metrics is a snapshot of l3router dataplane counters.
 type Metrics struct {
 	IngressPackets  uint64
-	ForwardPackets  uint64
+	// ForwardPackets counts packets accepted into the egress queue (after fragment filter), not wire writes.
+	ForwardPackets uint64
 	DropPackets     uint64
 	EgressWriteFail uint64
 	WriteTimeout    uint64
@@ -107,7 +122,9 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		engine:       rt.NewMemEngine(),
 		overlayDest:  overlayDest,
 		routeOwners:  make(map[rt.RouteID]string),
+		ownerRoutes:  make(map[string]map[rt.RouteID]struct{}),
 		userRef:      make(map[rt.SessionKey]int),
+		activeOwnerSession: make(map[string]rt.SessionKey),
 		sessions:     make(map[rt.SessionKey]N.PacketConn),
 		egressQueues: make(map[rt.SessionKey]chan *buf.Buffer),
 	}
@@ -125,7 +142,30 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 			return nil, E.Cause(err, "l3router route ", ro.ID)
 		}
 	}
+	// Keep default compatibility with existing tests/behavior:
+	// reason-specific counters are enabled unless explicitly switched.
+	e.telemetryMode.Store(uint32(telemetryModeDiagnostic))
 	return e, nil
+}
+
+func (e *Endpoint) detailCountersEnabled() bool {
+	return telemetryMode(e.telemetryMode.Load()) != telemetryModeBaseline
+}
+
+// SetTelemetryMode switches detail counter collection strategy at runtime.
+// Valid modes: baseline, diagnostic, forensic.
+func (e *Endpoint) SetTelemetryMode(mode string) error {
+	switch mode {
+	case "baseline":
+		e.telemetryMode.Store(uint32(telemetryModeBaseline))
+	case "diagnostic":
+		e.telemetryMode.Store(uint32(telemetryModeDiagnostic))
+	case "forensic":
+		e.telemetryMode.Store(uint32(telemetryModeForensic))
+	default:
+		return fmt.Errorf("unsupported telemetry mode: %s", mode)
+	}
+	return nil
 }
 
 // Engine exposes the router data plane for protocol integration (ingress path).

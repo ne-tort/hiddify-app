@@ -10,6 +10,12 @@ func (e *Endpoint) applyRoute(r rt.Route, countControl bool) error {
 		return err
 	}
 	e.sessMu.Lock()
+	if e.routeOwners == nil {
+		e.routeOwners = make(map[rt.RouteID]string)
+	}
+	if e.ownerRoutes == nil {
+		e.ownerRoutes = make(map[string]map[rt.RouteID]struct{})
+	}
 	prevOwner := e.routeOwners[r.ID]
 	e.sessMu.Unlock()
 
@@ -26,18 +32,27 @@ func (e *Endpoint) applyRoute(r rt.Route, countControl bool) error {
 	}
 	e.sessMu.Lock()
 	e.routeOwners[r.ID] = r.Owner
+	if prevOwner != "" && prevOwner != r.Owner {
+		if routeSet, ok := e.ownerRoutes[prevOwner]; ok {
+			delete(routeSet, r.ID)
+			if len(routeSet) == 0 {
+				delete(e.ownerRoutes, prevOwner)
+			}
+		}
+	}
+	if _, ok := e.ownerRoutes[r.Owner]; !ok {
+		e.ownerRoutes[r.Owner] = make(map[rt.RouteID]struct{})
+	}
+	e.ownerRoutes[r.Owner][r.ID] = struct{}{}
 	e.sessMu.Unlock()
 	e.refMu.Lock()
 	defer e.refMu.Unlock()
-	for sk, refs := range e.userRef {
-		if refs <= 0 {
-			continue
-		}
-		if string(sk) == r.Owner {
-			e.engine.SetIngressSession(r.ID, sk)
-			e.engine.SetEgressSession(r.ID, sk)
-			return nil
-		}
+	if e.activeOwnerSession == nil {
+		e.activeOwnerSession = make(map[string]rt.SessionKey)
+	}
+	if sk, ok := e.activeOwnerSession[r.Owner]; ok {
+		e.engine.SetIngressSession(r.ID, sk)
+		e.engine.SetEgressSession(r.ID, sk)
 	}
 	return nil
 }
@@ -62,6 +77,15 @@ func (e *Endpoint) RemoveRoute(id rt.RouteID) {
 	e.engine.RemoveRoute(id)
 	e.controlRemoveOK.Add(1)
 	e.sessMu.Lock()
+	owner := e.routeOwners[id]
 	delete(e.routeOwners, id)
+	if owner != "" {
+		if routeSet, ok := e.ownerRoutes[owner]; ok {
+			delete(routeSet, id)
+			if len(routeSet) == 0 {
+				delete(e.ownerRoutes, owner)
+			}
+		}
+	}
 	e.sessMu.Unlock()
 }

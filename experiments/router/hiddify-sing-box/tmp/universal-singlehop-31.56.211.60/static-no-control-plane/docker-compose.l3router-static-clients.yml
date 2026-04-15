@@ -1,24 +1,34 @@
-version: "3.8"
+# Build from experiments/router/hiddify-sing-box (three levels up from this file):
+#   docker compose -f docker-compose.l3router-static-clients.yml build
+#
+# Stock ghcr.io/sagernet/sing-box does not ship this fork's l3router endpoint — use the local image.
 
 services:
   l3router-client-a:
-    image: ghcr.io/sagernet/sing-box:latest
+    build:
+      context: ../../..
+      dockerfile: tmp/universal-singlehop-31.56.211.60/static-no-control-plane/docker/Dockerfile
+    image: sing-box-l3router:local
     container_name: l3router-client-a
     network_mode: host
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - ./configs/client-a.static.json:/etc/sing-box/config.json:ro
     command: run -c /etc/sing-box/config.json
 
   l3router-client-b:
-    image: ghcr.io/sagernet/sing-box:latest
+    image: sing-box-l3router:local
     container_name: l3router-client-b
     network_mode: host
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - ./configs/client-b.static.json:/etc/sing-box/config.json:ro
     command: run -c /etc/sing-box/config.json

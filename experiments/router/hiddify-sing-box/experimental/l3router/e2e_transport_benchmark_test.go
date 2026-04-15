@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 )
 
@@ -276,6 +277,16 @@ func BenchmarkL3RouterEndToEndSyntheticTransport(b *testing.B) {
 	}
 }
 
+func BenchmarkL3RouterEndToEndSyntheticTransportParallel(b *testing.B) {
+	profiles := syntheticTransportProfiles(b)
+	for _, p := range profiles {
+		profile := p
+		b.Run(profile.Name(), func(b *testing.B) {
+			benchEndToEndParallelForProfile(b, profile)
+		})
+	}
+}
+
 func BenchmarkSyntheticTransportOnly(b *testing.B) {
 	profiles := syntheticTransportProfiles(b)
 	for _, p := range profiles {
@@ -305,12 +316,7 @@ func benchEndToEndForProfile(b *testing.B, profile TransportProfile) {
 	engine.SetIngressSession(2, SessionKey("client-b"))
 	engine.SetEgressSession(2, SessionKey("client-b"))
 
-	ipPacket := []byte{
-		0x45, 0x00, 0x00, 0x20, 0x12, 0x34, 0x00, 0x00,
-		0x40, 0x11, 0x00, 0x00, 10, 10, 1, 2, 10, 10, 2, 2,
-		0x00, 0x35, 0x82, 0x35, 0x00, 0x0c, 0x00, 0x00,
-		0xde, 0xad, 0xbe, 0xef,
-	}
+	ipPacket := makeBenchmarkIPv4UDPPacket(benchmarkPacketSize, 10, 10, 1, 2, 10, 10, 2, 2)
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(ipPacket)))
@@ -345,12 +351,7 @@ func benchEndToEndForProfile(b *testing.B, profile TransportProfile) {
 }
 
 func benchTransportOnlyForProfile(b *testing.B, profile TransportProfile) {
-	ipPacket := []byte{
-		0x45, 0x00, 0x00, 0x20, 0x12, 0x34, 0x00, 0x00,
-		0x40, 0x11, 0x00, 0x00, 10, 10, 1, 2, 10, 10, 2, 2,
-		0x00, 0x35, 0x82, 0x35, 0x00, 0x0c, 0x00, 0x00,
-		0xde, 0xad, 0xbe, 0xef,
-	}
+	ipPacket := makeBenchmarkIPv4UDPPacket(benchmarkPacketSize, 10, 10, 1, 2, 10, 10, 2, 2)
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(ipPacket)))
@@ -378,4 +379,67 @@ func benchTransportOnlyForProfile(b *testing.B, profile TransportProfile) {
 			b.Fatalf("payload length mismatch: got %d want %d", len(clientBPayload), len(ipPacket))
 		}
 	}
+}
+
+func benchEndToEndParallelForProfile(b *testing.B, profile TransportProfile) {
+	engine := NewMemEngine()
+	engine.UpsertRoute(Route{
+		ID:               1,
+		Owner:            "client-a",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.10.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.10.1.0/24")},
+	})
+	engine.UpsertRoute(Route{
+		ID:               2,
+		Owner:            "client-b",
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.10.2.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.10.2.0/24")},
+	})
+	engine.SetIngressSession(1, SessionKey("client-a"))
+	engine.SetEgressSession(1, SessionKey("client-a"))
+	engine.SetIngressSession(2, SessionKey("client-b"))
+	engine.SetEgressSession(2, SessionKey("client-b"))
+
+	ipPacket := makeBenchmarkIPv4UDPPacket(benchmarkPacketSize, 10, 10, 1, 2, 10, 10, 2, 2)
+
+	var packetIndex uint64
+	var errorCount uint64
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(ipPacket)))
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			packetID := atomic.AddUint64(&packetIndex, 1)
+			clientAFrame, err := profile.Encode(ipPacket, packetID)
+			if err != nil {
+				atomic.AddUint64(&errorCount, 1)
+				continue
+			}
+			ingressPayload, err := profile.Decode(clientAFrame, packetID)
+			if err != nil {
+				atomic.AddUint64(&errorCount, 1)
+				continue
+			}
+			decision := engine.HandleIngress(ingressPayload, SessionKey("client-a"))
+			if decision.Action != ActionForward || decision.EgressSession != SessionKey("client-b") {
+				atomic.AddUint64(&errorCount, 1)
+				continue
+			}
+			serverEgressFrame, err := profile.Encode(ingressPayload, packetID)
+			if err != nil {
+				atomic.AddUint64(&errorCount, 1)
+				continue
+			}
+			clientBPayload, err := profile.Decode(serverEgressFrame, packetID)
+			if err != nil || len(clientBPayload) != len(ipPacket) {
+				atomic.AddUint64(&errorCount, 1)
+			}
+		}
+	})
+	b.StopTimer()
+
+	b.ReportMetric(float64(errorCount), "errors")
+	b.ReportMetric(float64(errorCount)/float64(b.N), "error/op")
 }

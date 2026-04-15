@@ -51,10 +51,40 @@ func (e *Endpoint) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn,
 }
 
 func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt.SessionKey, onClose N.CloseHandlerFunc) {
+	const detailFlushEvery = 64
+	var localDropACLSource uint64
+	var localDropACLDest uint64
+	var localFragmentDrops uint64
+	flushDetail := func(force bool) {
+		if !e.detailCountersEnabled() {
+			localDropACLSource = 0
+			localDropACLDest = 0
+			localFragmentDrops = 0
+			return
+		}
+		total := localDropACLSource + localDropACLDest + localFragmentDrops
+		if !force && total < detailFlushEvery {
+			return
+		}
+		if localDropACLSource > 0 {
+			e.dropACLSource.Add(localDropACLSource)
+			localDropACLSource = 0
+		}
+		if localDropACLDest > 0 {
+			e.dropACLDest.Add(localDropACLDest)
+			localDropACLDest = 0
+		}
+		if localFragmentDrops > 0 {
+			e.fragmentDrops.Add(localFragmentDrops)
+			localFragmentDrops = 0
+		}
+	}
+	defer flushDetail(true)
 	for {
 		buffer := buf.NewPacket()
 		_, err := conn.ReadPacket(buffer)
 		if err != nil {
+			flushDetail(true)
 			buffer.Release()
 			if onClose != nil {
 				onClose(err)
@@ -74,30 +104,52 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 			e.dropPackets.Add(1)
 			switch dec.DropReason {
 			case rt.DropACLSource:
-				e.dropACLSource.Add(1)
+				localDropACLSource++
 			case rt.DropACLDestination:
-				e.dropACLDest.Add(1)
+				localDropACLDest++
+			}
+			flushDetail(false)
+			continue
+		}
+		if isIPv4Fragment(pkt) {
+			buffer.Release()
+			localFragmentDrops++
+			e.dropPackets.Add(1)
+			flushDetail(false)
+			continue
+		}
+		queued, queueFull := e.enqueueEgress(dec.EgressSession, buffer)
+		if !queued {
+			// enqueueEgress does not Release on failure; caller owns payload.
+			buffer.Release()
+			e.dropPackets.Add(1)
+			if queueFull {
+				e.queueOverflow.Add(1)
+			} else {
+				e.dropNoSession.Add(1)
 			}
 			continue
 		}
 		e.forwardPackets.Add(1)
-		if isIPv4Fragment(pkt) {
-			buffer.Release()
-			e.fragmentDrops.Add(1)
-			e.dropPackets.Add(1)
-			continue
-		}
-		if !e.enqueueEgress(dec.EgressSession, buffer) {
-			buffer.Release()
-			e.queueOverflow.Add(1)
-			e.dropPackets.Add(1)
-			continue
-		}
 		// buffer ownership transferred to egressWorker (sing managed pool).
 	}
 }
 
-func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) bool {
+// enqueueEgress queues payload for the egress session writer. On success, ownership moves to the worker.
+// On failure, the caller must Release the buffer. Returns queueFull=true only when the egress queue rejected
+// the datagram after an eviction attempt (real overflow).
+func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) (queued bool, queueFull bool) {
+	// Avoid spawning idle egress workers for unknown SessionKeys: if nobody has ever entered as this user,
+	// there is no transient bind/register window to buffer for.
+	if e.sessionConn(session) == nil {
+		e.refMu.Lock()
+		hasUserRef := e.userRef[session] > 0
+		e.refMu.Unlock()
+		if !hasUserRef {
+			return false, false
+		}
+	}
+
 	e.egressMu.RLock()
 	queue, ok := e.egressQueues[session]
 	e.egressMu.RUnlock()
@@ -115,7 +167,7 @@ func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) boo
 
 	select {
 	case queue <- payload:
-		return true
+		return true, false
 	default:
 		select {
 		case stale := <-queue:
@@ -126,10 +178,9 @@ func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) boo
 		}
 		select {
 		case queue <- payload:
-			return true
+			return true, false
 		default:
-			payload.Release()
-			return false
+			return false, true
 		}
 	}
 }
@@ -137,6 +188,9 @@ func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) boo
 func (e *Endpoint) egressWorker(session rt.SessionKey, queue <-chan *buf.Buffer) {
 	defer e.egressWg.Done()
 	var nextDeadlineExtend time.Time
+	var cachedConn N.PacketConn
+	var cachedDeadlineConn interface{ SetWriteDeadline(time.Time) error }
+	var deadlineCapKnown bool
 	for {
 		payload, ok := <-queue
 		if !ok {
@@ -147,13 +201,27 @@ func (e *Endpoint) egressWorker(session rt.SessionKey, queue <-chan *buf.Buffer)
 			payload.Release()
 			e.dropNoSession.Add(1)
 			e.egressWriteFail.Add(1)
+			cachedConn = nil
+			cachedDeadlineConn = nil
+			deadlineCapKnown = false
 			continue
 		}
+		if out != cachedConn {
+			cachedConn = out
+			cachedDeadlineConn = nil
+			deadlineCapKnown = false
+		}
 		// Amortize SetWriteDeadline: per-packet calls dominated syscall cost at high PPS (SMB/TCP in tunnel).
-		if deadlineConn, hasDeadline := out.(interface{ SetWriteDeadline(time.Time) error }); hasDeadline {
+		if !deadlineCapKnown {
+			deadlineCapKnown = true
+			if deadlineConn, hasDeadline := out.(interface{ SetWriteDeadline(time.Time) error }); hasDeadline {
+				cachedDeadlineConn = deadlineConn
+			}
+		}
+		if cachedDeadlineConn != nil {
 			now := time.Now()
 			if now.After(nextDeadlineExtend) {
-				_ = deadlineConn.SetWriteDeadline(now.Add(egressWriteBlockBudget))
+				_ = cachedDeadlineConn.SetWriteDeadline(now.Add(egressWriteBlockBudget))
 				nextDeadlineExtend = now.Add(egressWriteDeadlineMinInterval)
 			}
 		}

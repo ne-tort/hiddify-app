@@ -15,22 +15,27 @@
 
 - Единственный штатный контур: `l3router` hub-and-spoke, static-first (`routes` в JSON), стенд `static-no-control-plane/`.
 - Legacy/fallback не поддерживаются. `clashapi` route API — только ops, не базовый dataplane.
+- Static-only E2E подтвержден: smoke + `>=100MB` (`sha256_match=true`, `runtime_route_api_used=false`) в `static-no-control-plane/runtime/`.
+- Phase 0 baseline зафиксирован и автоматизирован: `scripts/collect_phase0_baseline.ps1` (raw bench + JSON summary в `runtime/`).
+- Покрытие по корректности высокое (owner churn / route churn / loop-avoid / race в `experimental/l3router` и `protocol/l3router`), но отдельного целевого сценария fairness для **многих параллельных потоков на одного owner** пока нет.
+- Текущий hot path: `MemEngine.HandleIngress` с `RWMutex` и линейным LPM-сканом по `routes`; egress — `chan` + single worker на session, с drop-oldest при overflow.
 
 ## Текущее задание
 
-Изучение и доводка `l3router`:
+Миграция `l3router` к production-ready static-first контуру (без изменения целевой модели):
 
-- поиск узких мест и регрессий (нагрузка, локи, дропы, очереди);
-- оптимизации hot path и соответствие каноническому packet path sing-box;
-- проверка сценариев, в т.ч. **много соединений на одного пира** (как ожидается от wg-go-подобной модели);
-- бенчмарки: `experimental/l3router`, при необходимости E2E на VPS.
+- Phase 0 (baseline): зафиксировать измерения текущего dataplane (pps/latency/drop/queueOverflow/writeTimeout) на synthetic + static-no-control-plane.
+- Phase 1 (fairness): добавить тест/бенч профили для **many-flows-per-owner** и проверить отсутствие нежелательной сериализации/голодания.
+- Phase 2 (engine hot path): при подтверждении узкого места подготовить безопасную оптимизацию lookup (индексация FIB/snapshot, снижение lock contention) без изменения semantics.
+- Phase 3 (endpoint queues): при необходимости уточнить дисциплину очередей egress (burst handling, drop policy, наблюдаемость per-owner/per-session).
+- Phase 4 (rollout): повторить VPS smoke + `>=100MB` hash + многопоточный сценарий, обновить runbook/архитектурные заметки.
 
 ## Следующий шаг
 
-Зафиксировать выводы по multi-connection / fairness и список конкретных правок в endpoint/engine при расхождении с целевым поведением.
+Добавить fairness baseline для сценария many-flows-per-owner (отдельный тест/бенч + метрики), затем решить по фактам: нужны ли правки в `MemEngine` lookup или в egress queue policy.
 
 ## Рабочие ссылки
 
 - Код: `experiments/router/hiddify-sing-box`
 - Архитектура: `experiments/router/docs/router-architecture.md`
-- Стенд: `tmp/universal-singlehop-31.56.211.60/static-no-control-plane/`
+- Стенд static-only (чеклист, Docker из форка, скрипты тестов): `tmp/universal-singlehop-31.56.211.60/static-no-control-plane/README.md`

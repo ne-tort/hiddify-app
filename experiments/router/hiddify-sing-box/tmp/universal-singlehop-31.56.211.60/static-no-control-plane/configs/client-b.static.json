@@ -6,7 +6,7 @@
     {
       "type": "tun",
       "tag": "tun-in",
-      "interface_name": "tun0",
+      "interface_name": "tun1",
       "inet4_address": "10.10.2.2/24",
       "auto_route": true,
       "strict_route": true

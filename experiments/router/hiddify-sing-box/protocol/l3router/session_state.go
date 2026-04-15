@@ -9,8 +9,12 @@ import (
 func (e *Endpoint) enterSession(sk rt.SessionKey) {
 	e.refMu.Lock()
 	defer e.refMu.Unlock()
+	if e.activeOwnerSession == nil {
+		e.activeOwnerSession = make(map[string]rt.SessionKey)
+	}
 	e.userRef[sk]++
 	if e.userRef[sk] == 1 {
+		e.activeOwnerSession[string(sk)] = sk
 		e.bindUserSessions(sk)
 	}
 }
@@ -21,6 +25,7 @@ func (e *Endpoint) leaveSession(sk rt.SessionKey) {
 	e.userRef[sk]--
 	if e.userRef[sk] == 0 {
 		delete(e.userRef, sk)
+		delete(e.activeOwnerSession, string(sk))
 		e.unbindUserSessions(sk)
 	}
 }
@@ -29,22 +34,26 @@ func (e *Endpoint) bindUserSessions(sk rt.SessionKey) {
 	user := string(sk)
 	e.sessMu.Lock()
 	defer e.sessMu.Unlock()
-	for rid, owner := range e.routeOwners {
-		if owner == user {
-			e.engine.SetIngressSession(rid, sk)
-			e.engine.SetEgressSession(rid, sk)
-		}
+	if e.ownerRoutes == nil {
+		return
+	}
+	routeIDs := e.ownerRoutes[user]
+	for rid := range routeIDs {
+		e.engine.SetIngressSession(rid, sk)
+		e.engine.SetEgressSession(rid, sk)
 	}
 }
 
 func (e *Endpoint) unbindUserSessions(sk rt.SessionKey) {
 	e.sessMu.Lock()
 	defer e.sessMu.Unlock()
-	for rid, owner := range e.routeOwners {
-		if owner == string(sk) {
-			e.engine.ClearIngressSessionRoute(rid, sk)
-			e.engine.ClearEgressSession(rid)
-		}
+	if e.ownerRoutes == nil {
+		return
+	}
+	routeIDs := e.ownerRoutes[string(sk)]
+	for rid := range routeIDs {
+		e.engine.ClearIngressSessionRoute(rid, sk)
+		e.engine.ClearEgressSession(rid)
 	}
 }
 
