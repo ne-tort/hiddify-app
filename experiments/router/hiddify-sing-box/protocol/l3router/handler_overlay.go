@@ -25,6 +25,7 @@ const egressWriteDeadlineMinInterval = 400 * time.Millisecond
 
 // egressWriteBlockBudget is the maximum duration a single blocked WritePacket may wait before the deadline fires.
 const egressWriteBlockBudget = 30 * time.Second
+const maxEgressBatchSize = 32
 
 func (e *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	e.logger.WarnContext(ctx, "[l3router] inbound TCP is unsupported; expected UDP raw IP overlay")
@@ -67,15 +68,21 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 			return
 		}
 		if localDropACLSource > 0 {
-			e.dropACLSource.Add(localDropACLSource)
+			if e.detailCountersEnabled() {
+				e.dropACLSource.Add(localDropACLSource)
+			}
 			localDropACLSource = 0
 		}
 		if localDropACLDest > 0 {
-			e.dropACLDest.Add(localDropACLDest)
+			if e.detailCountersEnabled() {
+				e.dropACLDest.Add(localDropACLDest)
+			}
 			localDropACLDest = 0
 		}
 		if localFragmentDrops > 0 {
-			e.fragmentDrops.Add(localFragmentDrops)
+			if e.detailCountersEnabled() {
+				e.fragmentDrops.Add(localFragmentDrops)
+			}
 			localFragmentDrops = 0
 		}
 	}
@@ -96,12 +103,12 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 			buffer.Release()
 			continue
 		}
-		e.ingressPackets.Add(1)
+		e.addIngressPackets(1)
 
 		dec := e.engine.HandleIngress(pkt, ingress)
 		if dec.Action != rt.ActionForward {
 			buffer.Release()
-			e.dropPackets.Add(1)
+			e.addDropPackets(1)
 			switch dec.DropReason {
 			case rt.DropACLSource:
 				localDropACLSource++
@@ -111,10 +118,10 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 			flushDetail(false)
 			continue
 		}
-		if isIPv4Fragment(pkt) {
+		if e.fragmentPolicy == fragmentPolicyDrop && isIPv4Fragment(pkt) {
 			buffer.Release()
 			localFragmentDrops++
-			e.dropPackets.Add(1)
+			e.addDropPackets(1)
 			flushDetail(false)
 			continue
 		}
@@ -122,15 +129,15 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 		if !queued {
 			// enqueueEgress does not Release on failure; caller owns payload.
 			buffer.Release()
-			e.dropPackets.Add(1)
+			e.addDropPackets(1)
 			if queueFull {
-				e.queueOverflow.Add(1)
+				e.addQueueOverflow(1)
 			} else {
-				e.dropNoSession.Add(1)
+				e.addDropNoSession(1)
 			}
 			continue
 		}
-		e.forwardPackets.Add(1)
+		e.addForwardPackets(1)
 		// buffer ownership transferred to egressWorker (sing managed pool).
 	}
 }
@@ -169,19 +176,21 @@ func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) (qu
 	case queue <- payload:
 		return true, false
 	default:
-		select {
-		case stale := <-queue:
-			if stale != nil {
-				stale.Release()
+		if e.overflowPolicy == overflowPolicyDropOldest {
+			select {
+			case stale := <-queue:
+				if stale != nil {
+					stale.Release()
+				}
+			default:
 			}
-		default:
+			select {
+			case queue <- payload:
+				return true, false
+			default:
+			}
 		}
-		select {
-		case queue <- payload:
-			return true, false
-		default:
-			return false, true
-		}
+		return false, true
 	}
 }
 
@@ -191,19 +200,40 @@ func (e *Endpoint) egressWorker(session rt.SessionKey, queue <-chan *buf.Buffer)
 	var cachedConn N.PacketConn
 	var cachedDeadlineConn interface{ SetWriteDeadline(time.Time) error }
 	var deadlineCapKnown bool
+	batch := e.getEgressBatch()
+	defer e.putEgressBatch(batch)
 	for {
 		payload, ok := <-queue
 		if !ok {
 			return
 		}
+		batch.items = append(batch.items, payload)
+		queueClosed := false
+		for len(batch.items) < maxEgressBatchSize {
+			select {
+			case more, ok := <-queue:
+				if !ok {
+					queueClosed = true
+					goto writeBatch
+				}
+				batch.items = append(batch.items, more)
+			default:
+				goto writeBatch
+			}
+		}
+
+	writeBatch:
 		out := e.sessionConn(session)
 		if out == nil {
-			payload.Release()
-			e.dropNoSession.Add(1)
-			e.egressWriteFail.Add(1)
+			for _, p := range batch.items {
+				p.Release()
+			}
+			e.addDropNoSession(uint64(len(batch.items)))
+			e.addEgressWriteFail(uint64(len(batch.items)))
 			cachedConn = nil
 			cachedDeadlineConn = nil
 			deadlineCapKnown = false
+			batch.items = batch.items[:0]
 			continue
 		}
 		if out != cachedConn {
@@ -226,13 +256,18 @@ func (e *Endpoint) egressWorker(session rt.SessionKey, queue <-chan *buf.Buffer)
 			}
 		}
 		// Canonical sing path: sing/common/bufio.WritePacketBuffer — same headroom rules as route/UDP.
-		// Pass-through *buf.Buffer avoids an extra full-datagram copy (previously append([]byte, pkt...)).
-		_, werr := singbufio.WritePacketBuffer(out, payload, e.overlayDest)
-		if werr != nil {
-			if isTimeoutError(werr) {
-				e.writeTimeout.Add(1)
+		for _, p := range batch.items {
+			_, werr := singbufio.WritePacketBuffer(out, p, e.overlayDest)
+			if werr != nil {
+				if isTimeoutError(werr) {
+					e.addWriteTimeout(1)
+				}
+				e.addEgressWriteFail(1)
 			}
-			e.egressWriteFail.Add(1)
+		}
+		batch.items = batch.items[:0]
+		if queueClosed {
+			return
 		}
 	}
 }

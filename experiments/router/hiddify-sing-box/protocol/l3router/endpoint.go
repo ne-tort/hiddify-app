@@ -3,6 +3,7 @@ package l3routerendpoint
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -72,14 +73,30 @@ type Endpoint struct {
 	controlErrors   atomic.Uint64
 
 	telemetryMode atomic.Uint32
+	batchPool     sync.Pool
+	fragmentPolicy fragmentPolicy
+	overflowPolicy overflowPolicy
 }
 
 type telemetryMode uint32
+type fragmentPolicy uint8
+type overflowPolicy uint8
 
 const (
-	telemetryModeBaseline telemetryMode = iota
-	telemetryModeDiagnostic
+	telemetryModeOff telemetryMode = iota
+	telemetryModeMinimal
+	telemetryModeDefault
 	telemetryModeForensic
+)
+
+const (
+	fragmentPolicyAllow fragmentPolicy = iota
+	fragmentPolicyDrop
+)
+
+const (
+	overflowPolicyDropNew overflowPolicy = iota
+	overflowPolicyDropOldest
 )
 
 // Metrics is a snapshot of l3router dataplane counters.
@@ -127,6 +144,11 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		activeOwnerSession: make(map[string]rt.SessionKey),
 		sessions:     make(map[rt.SessionKey]N.PacketConn),
 		egressQueues: make(map[rt.SessionKey]chan *buf.Buffer),
+		fragmentPolicy: fragmentPolicyAllow,
+		overflowPolicy: overflowPolicyDropNew,
+	}
+	e.batchPool.New = func() any {
+		return &egressBatch{items: make([]*buf.Buffer, 0, maxEgressBatchSize)}
 	}
 
 	for _, ro := range options.Routes {
@@ -142,30 +164,142 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 			return nil, E.Cause(err, "l3router route ", ro.ID)
 		}
 	}
-	// Keep default compatibility with existing tests/behavior:
-	// reason-specific counters are enabled unless explicitly switched.
-	e.telemetryMode.Store(uint32(telemetryModeDiagnostic))
+	fp, err := parseFragmentPolicy(options.FragmentPolicy)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	op, err := parseOverflowPolicy(options.OverflowPolicy)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	e.fragmentPolicy = fp
+	e.overflowPolicy = op
+	e.engine.SetACLEnabled(options.ACLEnabled)
+
+	mode, err := parseTelemetryMode(options.TelemetryLevel)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	e.telemetryMode.Store(uint32(mode))
 	return e, nil
 }
 
+type egressBatch struct {
+	items []*buf.Buffer
+}
+
+func (e *Endpoint) getEgressBatch() *egressBatch {
+	return e.batchPool.Get().(*egressBatch)
+}
+
+func (e *Endpoint) putEgressBatch(b *egressBatch) {
+	for i := range b.items {
+		b.items[i] = nil
+	}
+	b.items = b.items[:0]
+	e.batchPool.Put(b)
+}
+
+func parseTelemetryMode(level string) (telemetryMode, error) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "", "default", "diagnostic":
+		return telemetryModeDefault, nil
+	case "off", "disabled":
+		return telemetryModeOff, nil
+	case "minimal", "baseline":
+		return telemetryModeMinimal, nil
+	case "forensic":
+		return telemetryModeForensic, nil
+	default:
+		return telemetryModeDefault, fmt.Errorf("unsupported l3router telemetry_level: %s", level)
+	}
+}
+
+func parseFragmentPolicy(value string) (fragmentPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "allow", "permissive", "minimal":
+		return fragmentPolicyAllow, nil
+	case "drop":
+		return fragmentPolicyDrop, nil
+	default:
+		return fragmentPolicyAllow, fmt.Errorf("unsupported l3router fragment_policy: %s", value)
+	}
+}
+
+func parseOverflowPolicy(value string) (overflowPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "drop_new", "drop-new":
+		return overflowPolicyDropNew, nil
+	case "drop_oldest", "drop-oldest", "evict_oldest":
+		return overflowPolicyDropOldest, nil
+	default:
+		return overflowPolicyDropNew, fmt.Errorf("unsupported l3router overflow_policy: %s", value)
+	}
+}
+
+func (e *Endpoint) coreCountersEnabled() bool {
+	return telemetryMode(e.telemetryMode.Load()) != telemetryModeOff
+}
+
 func (e *Endpoint) detailCountersEnabled() bool {
-	return telemetryMode(e.telemetryMode.Load()) != telemetryModeBaseline
+	mode := telemetryMode(e.telemetryMode.Load())
+	return mode == telemetryModeDefault || mode == telemetryModeForensic
 }
 
 // SetTelemetryMode switches detail counter collection strategy at runtime.
-// Valid modes: baseline, diagnostic, forensic.
+// Valid modes: off, minimal, default, forensic.
 func (e *Endpoint) SetTelemetryMode(mode string) error {
-	switch mode {
-	case "baseline":
-		e.telemetryMode.Store(uint32(telemetryModeBaseline))
-	case "diagnostic":
-		e.telemetryMode.Store(uint32(telemetryModeDiagnostic))
-	case "forensic":
-		e.telemetryMode.Store(uint32(telemetryModeForensic))
-	default:
-		return fmt.Errorf("unsupported telemetry mode: %s", mode)
+	parsed, err := parseTelemetryMode(mode)
+	if err != nil {
+		return err
 	}
+	e.telemetryMode.Store(uint32(parsed))
 	return nil
+}
+
+func (e *Endpoint) addIngressPackets(n uint64) {
+	if e.coreCountersEnabled() {
+		e.ingressPackets.Add(n)
+	}
+}
+
+func (e *Endpoint) addForwardPackets(n uint64) {
+	if e.coreCountersEnabled() {
+		e.forwardPackets.Add(n)
+	}
+}
+
+func (e *Endpoint) addDropPackets(n uint64) {
+	if e.coreCountersEnabled() {
+		e.dropPackets.Add(n)
+	}
+}
+
+func (e *Endpoint) addEgressWriteFail(n uint64) {
+	if e.coreCountersEnabled() {
+		e.egressWriteFail.Add(n)
+	}
+}
+
+func (e *Endpoint) addWriteTimeout(n uint64) {
+	if e.coreCountersEnabled() {
+		e.writeTimeout.Add(n)
+	}
+}
+
+func (e *Endpoint) addQueueOverflow(n uint64) {
+	if e.coreCountersEnabled() {
+		e.queueOverflow.Add(n)
+	}
+}
+
+func (e *Endpoint) addDropNoSession(n uint64) {
+	if e.coreCountersEnabled() {
+		e.dropNoSession.Add(n)
+	}
 }
 
 // Engine exposes the router data plane for protocol integration (ingress path).

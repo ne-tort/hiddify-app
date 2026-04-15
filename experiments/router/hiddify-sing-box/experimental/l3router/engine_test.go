@@ -66,6 +66,61 @@ func TestMemEngineDropBadSrc(t *testing.T) {
 	}
 }
 
+func TestMemEngineACLDisabledAllowsBadSrc(t *testing.T) {
+	e := NewMemEngine()
+	e.SetACLEnabled(false)
+	const (
+		rA RouteID = 1
+		rB RouteID = 2
+	)
+	e.UpsertRoute(Route{
+		ID:               rA,
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	e.UpsertRoute(Route{
+		ID:               rB,
+		AllowedSrc:       []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	e.SetIngressSession(rA, "u1")
+	e.SetEgressSession(rA, "u1")
+	e.SetEgressSession(rB, "u2")
+
+	// Source is outside AllowedSrc of ingress route, but ACL is disabled.
+	pkt := makeIPv4([4]byte{192, 168, 1, 1}, [4]byte{10, 0, 1, 2})
+	d := e.HandleIngress(pkt, "u1")
+	if d.Action != ActionForward || d.EgressSession != "u2" {
+		t.Fatalf("expected forward with ACL disabled, got %+v", d)
+	}
+}
+
+func TestMemEngineACLEnabledEmptyAllowedMeansAllowAll(t *testing.T) {
+	e := NewMemEngine()
+	e.SetACLEnabled(true)
+	const (
+		rA RouteID = 1
+		rB RouteID = 2
+	)
+	e.UpsertRoute(Route{
+		ID:               rA,
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+	})
+	e.UpsertRoute(Route{
+		ID:               rB,
+		ExportedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	e.SetIngressSession(rA, "u1")
+	e.SetEgressSession(rA, "u1")
+	e.SetEgressSession(rB, "u2")
+
+	pkt := makeIPv4([4]byte{203, 0, 113, 10}, [4]byte{10, 0, 1, 2})
+	d := e.HandleIngress(pkt, "u1")
+	if d.Action != ActionForward || d.EgressSession != "u2" {
+		t.Fatalf("expected allow-all behavior on empty Allowed* with ACL enabled, got %+v", d)
+	}
+}
+
 func TestMemEngineDropSelfForwardLoop(t *testing.T) {
 	e := NewMemEngine()
 	const r RouteID = 1

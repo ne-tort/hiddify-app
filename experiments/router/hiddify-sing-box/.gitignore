@@ -12,6 +12,7 @@ _htest/
 /dist/
 /sing-box
 /sing-box.exe
+/sing-box-linux-amd64
 /build/
 /*.jar
 /*.aar
@@ -22,3 +23,12 @@ _htest/
 CLAUDE.md
 AGENTS.md
 /.claude/
+
+# Generated benchmark/runtime artifacts (keep local, don't commit)
+/tmp/*_x1.txt
+/tmp/*_x10.txt
+/tmp/*_bench_10x.txt
+/tmp/*_postopt1280_10x.txt
+/tmp/*_baseline1280_preopt_10x.txt
+/tmp/**/*.tgz
+/tmp/**/runtime/**

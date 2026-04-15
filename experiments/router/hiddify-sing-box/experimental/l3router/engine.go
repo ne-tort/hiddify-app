@@ -1,7 +1,9 @@
 package l3router
 
 import (
+	"encoding/binary"
 	"net/netip"
+	"sort"
 	"sync"
 	"sync/atomic"
 )
@@ -15,7 +17,8 @@ var _ SessionBinding = (*MemEngine)(nil)
 type MemEngine struct {
 	mu sync.Mutex
 
-	state atomic.Pointer[memEngineState]
+	state      atomic.Pointer[memEngineState]
+	aclEnabled atomic.Bool
 }
 
 // NewMemEngine returns an empty router engine.
@@ -26,7 +29,16 @@ func NewMemEngine() *MemEngine {
 		sessionIngress: make(map[SessionKey]RouteID),
 		routeEgress:    make(map[RouteID]SessionKey),
 	})
+	// Keep MemEngine standalone behavior backward-compatible for direct callers/tests.
+	// Endpoint-level JSON config can explicitly disable ACL via SetACLEnabled(false).
+	e.aclEnabled.Store(true)
 	return e
+}
+
+// SetACLEnabled toggles AllowedSrc/AllowedDst checks in HandleIngress.
+// When disabled, dataplane keeps only parse+binding+LPM/no-loop routing checks.
+func (e *MemEngine) SetACLEnabled(enabled bool) {
+	e.aclEnabled.Store(enabled)
 }
 
 func (e *MemEngine) UpsertRoute(r Route) {
@@ -110,11 +122,9 @@ func (e *MemEngine) ClearEgressSession(routeID RouteID) {
 
 // HandleIngress implements [Engine].
 func (e *MemEngine) HandleIngress(packet []byte, ingress SessionKey) Decision {
-	src, dst, ok := packetSrcDst(packet)
-	if !ok {
+	if len(packet) < 1 {
 		return Decision{Action: ActionDrop, DropReason: DropMalformedPacket}
 	}
-
 	state := e.state.Load()
 	ingressRouteID, ok := state.sessionIngress[ingress]
 	if !ok {
@@ -124,20 +134,48 @@ func (e *MemEngine) HandleIngress(packet []byte, ingress SessionKey) Decision {
 	if !ok {
 		return Decision{Action: ActionDrop, DropReason: DropNoIngressRoute}
 	}
-	if !ingressRoute.allowedSrcMatcher.contains(src) {
-		return Decision{Action: ActionDrop, DropReason: DropACLSource}
-	}
-	if ingressRoute.allowedDstMatcher.hasRules() && !ingressRoute.allowedDstMatcher.contains(dst) {
-		return Decision{Action: ActionDrop, DropReason: DropACLDestination}
-	}
-	egressSession, ok := state.fibLookupForwardSession(dst, ingress)
-	if !ok {
-		return Decision{Action: ActionDrop, DropReason: DropNoEgressRoute}
-	}
-
-	return Decision{
-		Action:        ActionForward,
-		EgressSession: egressSession,
+	enforceACL := e.aclEnabled.Load()
+	switch packet[0] >> 4 {
+	case 4:
+		src4, dst4, ok := packetSrcDstV4(packet)
+		if !ok {
+			return Decision{Action: ActionDrop, DropReason: DropMalformedPacket}
+		}
+		if enforceACL && !ingressRoute.allowedSrcMatcher.containsV4(src4) {
+			return Decision{Action: ActionDrop, DropReason: DropACLSource}
+		}
+		if enforceACL && ingressRoute.allowedDstMatcher.hasRules() && !ingressRoute.allowedDstMatcher.containsV4(dst4) {
+			return Decision{Action: ActionDrop, DropReason: DropACLDestination}
+		}
+		egressSession, ok := state.fibLookupForwardSessionV4(dst4, ingress)
+		if !ok {
+			return Decision{Action: ActionDrop, DropReason: DropNoEgressRoute}
+		}
+		return Decision{Action: ActionForward, EgressSession: egressSession}
+	case 6:
+		src, dst, ok := packetSrcDst(packet)
+		if !ok {
+			return Decision{Action: ActionDrop, DropReason: DropMalformedPacket}
+		}
+		src16 := src.As16()
+		dst16 := dst.As16()
+		srcHi := binary.BigEndian.Uint64(src16[:8])
+		srcLo := binary.BigEndian.Uint64(src16[8:])
+		dstHi := binary.BigEndian.Uint64(dst16[:8])
+		dstLo := binary.BigEndian.Uint64(dst16[8:])
+		if enforceACL && !ingressRoute.allowedSrcMatcher.containsV6(srcHi, srcLo) {
+			return Decision{Action: ActionDrop, DropReason: DropACLSource}
+		}
+		if enforceACL && ingressRoute.allowedDstMatcher.hasRules() && !ingressRoute.allowedDstMatcher.containsV6(dstHi, dstLo) {
+			return Decision{Action: ActionDrop, DropReason: DropACLDestination}
+		}
+		egressSession, ok := state.fibLookupForwardSession(dst, ingress)
+		if !ok {
+			return Decision{Action: ActionDrop, DropReason: DropNoEgressRoute}
+		}
+		return Decision{Action: ActionForward, EgressSession: egressSession}
+	default:
+		return Decision{Action: ActionDrop, DropReason: DropMalformedPacket}
 	}
 }
 
@@ -145,7 +183,7 @@ type memEngineState struct {
 	routes         map[RouteID]compiledRoute
 	sessionIngress map[SessionKey]RouteID
 	routeEgress    map[RouteID]SessionKey
-	fib4           *fibTrieNode
+	fib4           *fibTrieNodeV4
 	fib6           *fibTrieNode
 }
 
@@ -206,13 +244,15 @@ func (s *memEngineState) rebuildIndexes() {
 			}
 			if p.Addr().Is4() {
 				ip := p.Addr().As4()
-				s.fib4 = fibInsert(s.fib4, ip[:], p.Bits(), c)
+				s.fib4 = fibInsertV4(s.fib4, binary.BigEndian.Uint32(ip[:]), p.Bits(), c)
 			} else if p.Addr().Is6() {
 				ip := p.Addr().As16()
 				s.fib6 = fibInsert(s.fib6, ip[:], p.Bits(), c)
 			}
 		}
 	}
+	fibFinalizeV4(s.fib4)
+	fibFinalize(s.fib6)
 }
 
 func (s *memEngineState) fibLookupForwardSession(addr netip.Addr, ingress SessionKey) (SessionKey, bool) {
@@ -220,11 +260,19 @@ func (s *memEngineState) fibLookupForwardSession(addr netip.Addr, ingress Sessio
 	bestBits := -1
 	if addr.Is4() {
 		ip := addr.As4()
-		bestBits, _, bestSession = fibLookup(s.fib4, ip[:], ingress)
+		bestBits, _, bestSession = fibLookupV4(s.fib4, binary.BigEndian.Uint32(ip[:]), ingress)
 	} else if addr.Is6() {
 		ip := addr.As16()
 		bestBits, _, bestSession = fibLookup(s.fib6, ip[:], ingress)
 	}
+	if bestBits < 0 {
+		return "", false
+	}
+	return bestSession, true
+}
+
+func (s *memEngineState) fibLookupForwardSessionV4(addr uint32, ingress SessionKey) (SessionKey, bool) {
+	bestBits, _, bestSession := fibLookupV4(s.fib4, addr, ingress)
 	if bestBits < 0 {
 		return "", false
 	}
@@ -335,6 +383,30 @@ func (m prefixMatcher) contains(addr netip.Addr) bool {
 	return false
 }
 
+func (m prefixMatcher) containsV4(v uint32) bool {
+	if m.allowAll {
+		return true
+	}
+	for _, p := range m.v4 {
+		if (v & p.mask) == p.net {
+			return true
+		}
+	}
+	return false
+}
+
+func (m prefixMatcher) containsV6(hi, lo uint64) bool {
+	if m.allowAll {
+		return true
+	}
+	for _, p := range m.v6 {
+		if (hi&p.maskHi) == p.netHi && (lo&p.maskLo) == p.netLo {
+			return true
+		}
+	}
+	return false
+}
+
 type fibCandidate struct {
 	routeID RouteID
 	bits    int
@@ -343,6 +415,11 @@ type fibCandidate struct {
 
 type fibTrieNode struct {
 	child      [2]*fibTrieNode
+	candidates []fibCandidate
+}
+
+type fibTrieNodeV4 struct {
+	child      [2]*fibTrieNodeV4
 	candidates []fibCandidate
 }
 
@@ -355,6 +432,22 @@ func fibInsert(root *fibTrieNode, addr []byte, bits int, c fibCandidate) *fibTri
 		b := fibBitAt(addr, i)
 		if n.child[b] == nil {
 			n.child[b] = &fibTrieNode{}
+		}
+		n = n.child[b]
+	}
+	n.candidates = append(n.candidates, c)
+	return root
+}
+
+func fibInsertV4(root *fibTrieNodeV4, addr uint32, bits int, c fibCandidate) *fibTrieNodeV4 {
+	if root == nil {
+		root = &fibTrieNodeV4{}
+	}
+	n := root
+	for i := 0; i < bits; i++ {
+		b := int((addr >> uint(31-i)) & 1)
+		if n.child[b] == nil {
+			n.child[b] = &fibTrieNodeV4{}
 		}
 		n = n.child[b]
 	}
@@ -396,6 +489,68 @@ func fibLookup(root *fibTrieNode, addr []byte, ingress SessionKey) (int, RouteID
 	return bestBits, bestRoute, bestSession
 }
 
+func fibLookupV4(root *fibTrieNodeV4, addr uint32, ingress SessionKey) (int, RouteID, SessionKey) {
+	if root == nil {
+		return -1, 0, ""
+	}
+	bestBits := -1
+	var bestRoute RouteID
+	var bestSession SessionKey
+	n := root
+	update := func(c fibCandidate) {
+		if c.egress == ingress {
+			return
+		}
+		if c.bits > bestBits || (c.bits == bestBits && c.routeID < bestRoute) {
+			bestBits = c.bits
+			bestRoute = c.routeID
+			bestSession = c.egress
+		}
+	}
+	for _, c := range n.candidates {
+		update(c)
+	}
+	for i := 0; i < 32; i++ {
+		b := int((addr >> uint(31-i)) & 1)
+		n = n.child[b]
+		if n == nil {
+			break
+		}
+		for _, c := range n.candidates {
+			update(c)
+		}
+	}
+	return bestBits, bestRoute, bestSession
+}
+
+func fibFinalize(node *fibTrieNode) {
+	if node == nil {
+		return
+	}
+	sort.Slice(node.candidates, func(i, j int) bool {
+		if node.candidates[i].bits != node.candidates[j].bits {
+			return node.candidates[i].bits > node.candidates[j].bits
+		}
+		return node.candidates[i].routeID < node.candidates[j].routeID
+	})
+	fibFinalize(node.child[0])
+	fibFinalize(node.child[1])
+}
+
+func fibFinalizeV4(node *fibTrieNodeV4) {
+	if node == nil {
+		return
+	}
+	sort.Slice(node.candidates, func(i, j int) bool {
+		if node.candidates[i].bits != node.candidates[j].bits {
+			return node.candidates[i].bits > node.candidates[j].bits
+		}
+		return node.candidates[i].routeID < node.candidates[j].routeID
+	})
+	fibFinalizeV4(node.child[0])
+	fibFinalizeV4(node.child[1])
+}
+
 func fibBitAt(addr []byte, bit int) int {
 	return int((addr[bit/8] >> (7 - uint(bit%8))) & 1)
 }
@@ -422,4 +577,11 @@ func packetSrcDst(b []byte) (src, dst netip.Addr, ok bool) {
 	default:
 		return netip.Addr{}, netip.Addr{}, false
 	}
+}
+
+func packetSrcDstV4(b []byte) (src, dst uint32, ok bool) {
+	if len(b) < 20 || (b[0]>>4) != 4 {
+		return 0, 0, false
+	}
+	return binary.BigEndian.Uint32(b[12:16]), binary.BigEndian.Uint32(b[16:20]), true
 }
