@@ -1,5 +1,7 @@
 .env
 artifacts/
 runtime/*.json
+runtime/iperf-raw/
+configs/*.tmp.json
 __pycache__/
 *.pyc

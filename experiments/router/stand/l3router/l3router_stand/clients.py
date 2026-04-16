@@ -54,7 +54,8 @@ def up_e2e_reality_clients() -> None:
 
 def up_smb_clients(*, build: bool) -> None:
     """SMB e2e client pair (builds smb layer; needs base image)."""
-    args = ["up", "-d"]
+    # Always recreate containers so fresh sing-box image/code is actually applied.
+    args = ["up", "-d", "--force-recreate", "--remove-orphans"]
     if build:
         args.append("--build")
     else:

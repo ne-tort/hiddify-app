@@ -12,34 +12,46 @@ REPORT_FILE="${RUNTIME_DIR}/smb_clients_100mb_latest.json"
 FILE_SIZE_MB="${FILE_SIZE_MB:-100}"
 
 echo "[smb-e2e] up smb clients"
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'l3router-smb-client1' \
-  && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'l3router-smb-client2'; then
-  echo "[smb-e2e] smb clients already running, skip compose up"
+if [[ "${SMB_BUILD_IMAGE:-0}" == "1" ]]; then
+  docker compose -f "${COMPOSE_FILE}" up -d --build --force-recreate --remove-orphans
 else
-  if [[ "${SMB_BUILD_IMAGE:-0}" == "1" ]]; then
-    docker compose -f "${COMPOSE_FILE}" up -d --build
-  else
-    docker compose -f "${COMPOSE_FILE}" up -d --no-build
-  fi
+  docker compose -f "${COMPOSE_FILE}" up -d --no-build --force-recreate --remove-orphans
 fi
 
-echo "[smb-e2e] wait routes/tun (retry ping until overlay is up)"
-wait_peer_ping() {
-  local cont="$1" ip="$2" label="$3"
-  local i=0
-  while [[ "${i}" -lt 90 ]]; do
-    if docker exec "${cont}" ping -c 1 -W 2 "${ip}" >/dev/null 2>&1; then
-      echo "[smb-e2e] ${label}: ping ${ip} ok"
-      return 0
-    fi
-    i=$((i + 1))
-    sleep 2
-  done
-  echo "[smb-e2e] timeout: ${cont} -> ${ip}" >&2
-  return 1
+echo "[smb-e2e] fail-fast SMB readiness check (no retries)"
+SMB_OPEN_TIMEOUT_SEC="${SMB_OPEN_TIMEOUT_SEC:-5}"
+container_running_check() {
+  local cont="$1"
+  local state
+  state="$(docker inspect -f '{{.State.Status}}' "${cont}" 2>/dev/null || true)"
+  if [[ "${state}" != "running" ]]; then
+    echo "[smb-e2e] FAIL: container ${cont} is not running (state=${state:-unknown})" >&2
+    return 1
+  fi
+  echo "[smb-e2e] ${cont} state is running"
 }
-wait_peer_ping l3router-smb-client1 10.0.0.4 "c1->peer3"
-wait_peer_ping l3router-smb-client2 10.0.0.2 "c2->peer1"
+container_singbox_check() {
+  local cont="$1"
+  if ! docker exec "${cont}" sh -lc "pidof sing-box >/dev/null"; then
+    echo "[smb-e2e] FAIL: sing-box process is not running in ${cont}" >&2
+    return 1
+  fi
+  echo "[smb-e2e] ${cont} sing-box process is running"
+}
+smb_open_check() {
+  local cont="$1" share="$2" cred="$3" label="$4"
+  if ! docker exec "${cont}" sh -lc "timeout ${SMB_OPEN_TIMEOUT_SEC} smbclient '${share}' -U '${cred}' -m SMB3 -c 'ls' >/dev/null"; then
+    echo "[smb-e2e] FAIL: ${label} not reachable within ${SMB_OPEN_TIMEOUT_SEC}s" >&2
+    return 1
+  fi
+  echo "[smb-e2e] ${label} reachable"
+}
+container_running_check l3router-smb-client1
+container_running_check l3router-smb-client2
+container_singbox_check l3router-smb-client1
+container_singbox_check l3router-smb-client2
+smb_open_check l3router-smb-client1 "//10.0.0.4/PEER_C3_BETA" "owner_c%owner_c_2026" "c1->c2 share"
+smb_open_check l3router-smb-client2 "//10.0.0.2/PEER_C1_ALPHA" "owner_a%owner_a_2026" "c2->c1 share"
 
 SRC_IN_C1="/tmp/owner-a-${FILE_SIZE_MB}mb.bin"
 DST_IN_C2="/tmp/from-owner-a-${FILE_SIZE_MB}mb.bin"

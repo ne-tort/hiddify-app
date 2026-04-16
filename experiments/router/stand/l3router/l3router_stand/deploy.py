@@ -11,10 +11,34 @@ import os
 import subprocess
 
 import sys
+import tempfile
 
 
 
 from .paths import CONFIGS_DIR
+
+
+def _normalized_config_for_scp(cfg_path: str) -> tuple[str, str | None]:
+    """
+    Return path for scp with UTF-8 BOM stripped if present.
+    Returns (path_to_upload, temp_path_to_cleanup_or_none).
+    """
+    raw = open(cfg_path, "rb").read()
+    bom = b"\xef\xbb\xbf"
+    if not raw.startswith(bom):
+        return cfg_path, None
+    cleaned = raw[len(bom) :]
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="l3router-config-",
+        suffix=".json",
+        delete=False,
+    )
+    try:
+        tmp.write(cleaned)
+        tmp.flush()
+        return tmp.name, tmp.name
+    finally:
+        tmp.close()
 
 
 def _wait_remote_container_running(
@@ -233,9 +257,16 @@ def deploy_server_config(
 
     target = f"{user}@{host}:{remote_config}"
 
-    print(f"[deploy] scp {cfg} -> {target}", file=sys.stderr)
-
-    subprocess.run(["scp", str(cfg), target], check=True)
+    upload_path, cleanup_tmp = _normalized_config_for_scp(str(cfg))
+    print(f"[deploy] scp {upload_path} -> {target}", file=sys.stderr)
+    try:
+        subprocess.run(["scp", upload_path, target], check=True)
+    finally:
+        if cleanup_tmp:
+            try:
+                os.remove(cleanup_tmp)
+            except OSError:
+                pass
 
     _restart_remote(user, host, service=service)
 

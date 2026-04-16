@@ -177,3 +177,46 @@ func TestEndpointLookupBackendOptionValidation(t *testing.T) {
 		t.Fatalf("expected invalid lookup backend error")
 	}
 }
+
+func TestEndpointInterfaceUpdatedResetsVolatileStateIdempotent(t *testing.T) {
+	ep := newEndpointForSurfaceTest(t)
+	if err := ep.Start(adapter.StartStatePostStart); err != nil {
+		t.Fatalf("Start(post-start): %v", err)
+	}
+
+	ep.InterfaceUpdated()
+	ep.InterfaceUpdated()
+
+	if !ep.IsReady() {
+		t.Fatal("endpoint should remain ready after interface updates")
+	}
+	if depth := ep.SnapshotMetrics().QueueDepth; depth != 0 {
+		t.Fatalf("expected queue depth to be reset, got %d", depth)
+	}
+	metrics := ep.SnapshotMetrics()
+	if metrics.NetworkResets != 2 {
+		t.Fatalf("expected NetworkResets=2, got %d", metrics.NetworkResets)
+	}
+}
+
+func TestEndpointTrackerMatchesOnlyOwnOutbound(t *testing.T) {
+	ep := newEndpointForSurfaceTest(t)
+	otherAny, err := NewEndpoint(context.Background(), nil, log.NewNOPFactory().Logger(), "another-l3router", option.L3RouterEndpointOptions{})
+	if err != nil {
+		t.Fatalf("NewEndpoint(other): %v", err)
+	}
+	other := otherAny.(*Endpoint)
+
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	gotOwn := ep.RoutedConnection(context.Background(), local, adapter.InboundContext{}, nil, ep)
+	if gotOwn != local {
+		t.Fatal("tracker should keep original conn for own outbound")
+	}
+	gotOther := ep.RoutedConnection(context.Background(), local, adapter.InboundContext{}, nil, other)
+	if gotOther != local {
+		t.Fatal("tracker should keep original conn for non-matching outbound")
+	}
+}

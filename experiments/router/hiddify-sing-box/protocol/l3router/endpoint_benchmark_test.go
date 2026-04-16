@@ -1,32 +1,39 @@
 package l3routerendpoint
 
 import (
+	"context"
 	"testing"
 
 	rt "github.com/sagernet/sing-box/common/l3router"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
 	N "github.com/sagernet/sing/common/network"
 )
 
 func BenchmarkEndpointSessionConnParallel(b *testing.B) {
+	session := rt.SessionKey("owner-a")
 	e := &Endpoint{
 		sessions: map[rt.SessionKey]N.PacketConn{
-			"owner-a": nil,
+			session: nil,
 		},
 	}
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			_ = e.sessionConn("owner-a")
+			_ = e.sessionConn(session)
 		}
 	})
 }
 
 func BenchmarkEndpointEnqueueEgressQueueHitParallel(b *testing.B) {
-	queue := make(chan *buf.Buffer, 1)
-	e := &Endpoint{
-		egressQueues:   map[rt.SessionKey]chan *buf.Buffer{"owner-a": queue},
-		overflowPolicy: overflowPolicyDropOldest,
+	loggerFactory := log.NewNOPFactory()
+	ep, err := NewEndpoint(context.Background(), nil, loggerFactory.Logger(), "bench", option.L3RouterEndpointOptions{
+		OverflowPolicy: "drop_oldest",
+	})
+	if err != nil {
+		b.Fatalf("NewEndpoint: %v", err)
 	}
+	e := ep.(*Endpoint)
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -39,15 +46,7 @@ func BenchmarkEndpointEnqueueEgressQueueHitParallel(b *testing.B) {
 		}
 	})
 	b.StopTimer()
-
-	for {
-		select {
-		case stale := <-queue:
-			if stale != nil {
-				stale.Release()
-			}
-		default:
-			return
-		}
+	if e.scheduler != nil {
+		e.scheduler.reset(false)
 	}
 }

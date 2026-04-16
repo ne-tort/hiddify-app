@@ -15,17 +15,12 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
-// defaultEgressQueueCap bounds per-peer buffering between ingress and the single egress writer.
-// Too small ⇒ ingress blocks or drops under burst; too large ⇒ memory under attack.
-const defaultEgressQueueCap = 2048
-
 // egressWriteDeadlineMinInterval avoids SetWriteDeadline (typically one syscall per call on TCP) on every
 // forwarded datagram — that capped effective throughput on high-PPS overlays.
 const egressWriteDeadlineMinInterval = 400 * time.Millisecond
 
 // egressWriteBlockBudget is the maximum duration a single blocked WritePacket may wait before the deadline fires.
 const egressWriteBlockBudget = 30 * time.Second
-const maxEgressBatchSize = 32
 
 func (e *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	e.logger.WarnContext(ctx, "[l3router] inbound TCP is unsupported; expected UDP raw IP overlay")
@@ -117,10 +112,16 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingressSes
 			buffer.Release()
 			e.addDropPackets(1)
 			switch dec.DropReason {
+			case rt.DropNoIngressRoute:
+				e.addDropNoIngressRoute(1)
+			case rt.DropNoEgressRoute:
+				e.addDropNoEgressRoute(1)
 			case rt.DropFilterSource:
 				localDropFilterSource++
 			case rt.DropFilterDestination:
 				localDropFilterDest++
+			default:
+				e.addDropDecisionOther(1)
 			}
 			flushDetail(false)
 			continue
@@ -138,9 +139,10 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingressSes
 			buffer.Release()
 			e.addDropPackets(1)
 			if queueFull {
-				e.addQueueOverflow(1)
+				e.addDropQueueOverflow(1)
 			} else {
 				e.addDropNoSession(1)
+				e.addDropQueueNoSession(1)
 			}
 			continue
 		}
@@ -169,13 +171,6 @@ func (e *Endpoint) resolveForwardDecision(packet []byte, ingressSession rt.Sessi
 // On failure, the caller must Release the buffer. Returns queueFull=true only when the egress queue rejected
 // the datagram after an eviction attempt (real overflow).
 func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) (queued bool, queueFull bool) {
-	e.egressMu.RLock()
-	queue, ok := e.egressQueues[session]
-	e.egressMu.RUnlock()
-	if ok {
-		return e.tryEnqueue(queue, payload)
-	}
-
 	// Avoid spawning idle egress workers for unknown SessionKeys: if nobody has ever entered as this user,
 	// there is no transient bind/register window to buffer for.
 	if e.sessionConn(session) == nil {
@@ -186,120 +181,16 @@ func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) (qu
 			return false, false
 		}
 	}
-
-	if !ok {
-		e.egressMu.Lock()
-		queue, ok = e.egressQueues[session]
-		if !ok {
-			queue = make(chan *buf.Buffer, defaultEgressQueueCap)
-			e.egressQueues[session] = queue
-			e.egressWg.Add(1)
-			go e.egressWorker(session, queue)
-		}
-		e.egressMu.Unlock()
-	}
-	return e.tryEnqueue(queue, payload)
-}
-
-func (e *Endpoint) tryEnqueue(queue chan *buf.Buffer, payload *buf.Buffer) (queued bool, queueFull bool) {
-	select {
-	case queue <- payload:
-		return true, false
-	default:
-		if e.overflowPolicy == overflowPolicyDropOldest {
-			select {
-			case stale := <-queue:
-				if stale != nil {
-					stale.Release()
-				}
-			default:
-			}
-			select {
-			case queue <- payload:
-				return true, false
-			default:
-			}
-		}
+	if e.scheduler == nil {
 		return false, true
 	}
+	queued, queueFull, _ = e.scheduler.enqueue(session, payload, e.overflowPolicy)
+	return queued, queueFull
 }
 
-func (e *Endpoint) egressWorker(session rt.SessionKey, queue <-chan *buf.Buffer) {
-	defer e.egressWg.Done()
-	var nextDeadlineExtend time.Time
-	var cachedConn N.PacketConn
-	var cachedDeadlineConn interface{ SetWriteDeadline(time.Time) error }
-	var deadlineCapKnown bool
-	batch := e.getEgressBatch()
-	defer e.putEgressBatch(batch)
-	for {
-		payload, ok := <-queue
-		if !ok {
-			return
-		}
-		batch.items = append(batch.items, payload)
-		queueClosed := false
-		for len(batch.items) < maxEgressBatchSize {
-			select {
-			case more, ok := <-queue:
-				if !ok {
-					queueClosed = true
-					goto writeBatch
-				}
-				batch.items = append(batch.items, more)
-			default:
-				goto writeBatch
-			}
-		}
-
-	writeBatch:
-		out := e.sessionConn(session)
-		if out == nil {
-			for _, p := range batch.items {
-				p.Release()
-			}
-			e.addDropNoSession(uint64(len(batch.items)))
-			e.addEgressWriteFail(uint64(len(batch.items)))
-			cachedConn = nil
-			cachedDeadlineConn = nil
-			deadlineCapKnown = false
-			batch.items = batch.items[:0]
-			continue
-		}
-		if out != cachedConn {
-			cachedConn = out
-			cachedDeadlineConn = nil
-			deadlineCapKnown = false
-		}
-		// Amortize SetWriteDeadline: per-packet calls dominated syscall cost at high PPS (SMB/TCP in tunnel).
-		if !deadlineCapKnown {
-			deadlineCapKnown = true
-			if deadlineConn, hasDeadline := out.(interface{ SetWriteDeadline(time.Time) error }); hasDeadline {
-				cachedDeadlineConn = deadlineConn
-			}
-		}
-		if cachedDeadlineConn != nil {
-			now := time.Now()
-			if now.After(nextDeadlineExtend) {
-				_ = cachedDeadlineConn.SetWriteDeadline(now.Add(egressWriteBlockBudget))
-				nextDeadlineExtend = now.Add(egressWriteDeadlineMinInterval)
-			}
-		}
-		// Canonical sing path: sing/common/bufio.WritePacketBuffer — same headroom rules as route/UDP.
-		for _, p := range batch.items {
-			_, werr := singbufio.WritePacketBuffer(out, p, e.overlayDest)
-			if werr != nil {
-				if isTimeoutError(werr) {
-					e.addWriteTimeout(1)
-				}
-				e.addEgressWriteFail(1)
-			}
-		}
-		batch.items = batch.items[:0]
-		if queueClosed {
-			return
-		}
-	}
+func writePacketBuffer(out N.PacketConn, payload *buf.Buffer, destination M.Socksaddr) (bool, error) {
+	_, err := singbufio.WritePacketBuffer(out, payload, destination)
+	return err == nil, err
 }
 
 func isTimeoutError(err error) bool {

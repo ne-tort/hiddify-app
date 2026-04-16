@@ -30,4 +30,16 @@ type L3RouterEndpointOptions struct {
 	TelemetryLevel string `json:"telemetry_level,omitempty"`
 	// LookupBackend selects routing lookup backend: wg_allowedips.
 	LookupBackend string `json:"lookup_backend,omitempty"`
+	// EgressQueueCapPerSession is a hard cap for buffered packets per egress session.
+	EgressQueueCapPerSession int `json:"egress_queue_cap_per_session,omitempty"`
+	// EgressGlobalQueueBudget limits total buffered packets across all sessions.
+	EgressGlobalQueueBudget int `json:"egress_global_queue_budget,omitempty"`
+	// EgressWorkerCount limits concurrent egress writers.
+	EgressWorkerCount int `json:"egress_worker_count,omitempty"`
+	// EgressBatchSize sets max packets per scheduler dispatch.
+	EgressBatchSize int `json:"egress_batch_size,omitempty"`
+	// AQMTargetMS is target queue delay for latency-aware dropping.
+	AQMTargetMS int `json:"aqm_target_ms,omitempty"`
+	// AQMIntervalMS is the standing delay interval before AQM starts dropping.
+	AQMIntervalMS int `json:"aqm_interval_ms,omitempty"`
 }

@@ -2,7 +2,6 @@ package l3routerendpoint
 
 import (
 	rt "github.com/sagernet/sing-box/common/l3router"
-	"github.com/sagernet/sing/common/buf"
 	N "github.com/sagernet/sing/common/network"
 )
 
@@ -91,21 +90,11 @@ func (e *Endpoint) registerSession(sk rt.SessionKey, conn N.PacketConn) {
 }
 
 func (e *Endpoint) unregisterSession(sk rt.SessionKey, conn N.PacketConn) {
-	var queue chan *buf.Buffer
 	e.sessMu.Lock()
 	if c, ok := e.sessions[sk]; ok && c == conn {
 		delete(e.sessions, sk)
 	}
 	e.sessMu.Unlock()
-	e.egressMu.Lock()
-	if q, ok := e.egressQueues[sk]; ok {
-		queue = q
-		delete(e.egressQueues, sk)
-	}
-	e.egressMu.Unlock()
-	if queue != nil {
-		close(queue)
-	}
 }
 
 func (e *Endpoint) sessionConn(sk rt.SessionKey) N.PacketConn {

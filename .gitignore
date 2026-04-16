@@ -85,3 +85,10 @@ windows/sign.cer
 
 # Local reference clones for l3router research
 /experiments/router/reference-projects/
+
+# l3router local diagnostics artifacts
+/experiments/router/history-snapshots/
+/l3_before.json
+/l3_after.json
+/runtime_configs_vps.json
+/runtime_proxy_metrics.json

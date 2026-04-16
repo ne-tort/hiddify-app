@@ -67,11 +67,8 @@ func TestEgressPhantomSessionUsesFastPath(t *testing.T) {
 		}
 		b.Release()
 	}
-	e.egressMu.Lock()
-	nQ := len(e.egressQueues)
-	e.egressMu.Unlock()
-	if nQ != 0 {
-		t.Fatalf("expected no egress queues for phantom session, got %d", nQ)
+	if depth := e.SnapshotMetrics().QueueDepth; depth != 0 {
+		t.Fatalf("expected zero queue depth for phantom session, got %d", depth)
 	}
 	if e.queueOverflow.Load() != 0 {
 		t.Fatalf("queueOverflow should be 0, got %d", e.queueOverflow.Load())

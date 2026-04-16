@@ -107,6 +107,11 @@ func collectL3RouterMetrics(endpoints []adapter.Endpoint) ([]l3RouterEndpointMet
 		totals.IngressPackets += metrics.IngressPackets
 		totals.ForwardPackets += metrics.ForwardPackets
 		totals.DropPackets += metrics.DropPackets
+		totals.DropNoIngressRoute += metrics.DropNoIngressRoute
+		totals.DropNoEgressRoute += metrics.DropNoEgressRoute
+		totals.DropDecisionOther += metrics.DropDecisionOther
+		totals.DropQueueOverflow += metrics.DropQueueOverflow
+		totals.DropQueueNoSession += metrics.DropQueueNoSession
 		totals.EgressWriteFail += metrics.EgressWriteFail
 		totals.WriteTimeout += metrics.WriteTimeout
 		totals.QueueOverflow += metrics.QueueOverflow
@@ -119,6 +124,22 @@ func collectL3RouterMetrics(endpoints []adapter.Endpoint) ([]l3RouterEndpointMet
 		totals.ControlUpsertOK += metrics.ControlUpsertOK
 		totals.ControlRemoveOK += metrics.ControlRemoveOK
 		totals.ControlErrors += metrics.ControlErrors
+		totals.NetworkResets += metrics.NetworkResets
+		totals.SchedulerDrops += metrics.SchedulerDrops
+		totals.AQMDrops += metrics.AQMDrops
+		totals.QueueDepth += metrics.QueueDepth
+		if metrics.QueueDepthHigh > totals.QueueDepthHigh {
+			totals.QueueDepthHigh = metrics.QueueDepthHigh
+		}
+		if metrics.QueueDelayMicrosP50 > totals.QueueDelayMicrosP50 {
+			totals.QueueDelayMicrosP50 = metrics.QueueDelayMicrosP50
+		}
+		if metrics.QueueDelayMicrosP95 > totals.QueueDelayMicrosP95 {
+			totals.QueueDelayMicrosP95 = metrics.QueueDelayMicrosP95
+		}
+		if metrics.QueueDelayMicrosP99 > totals.QueueDelayMicrosP99 {
+			totals.QueueDelayMicrosP99 = metrics.QueueDelayMicrosP99
+		}
 	}
 	return result, totals
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
@@ -14,7 +15,6 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -24,6 +24,8 @@ import (
 var (
 	_ adapter.ConnectionHandlerEx       = (*Endpoint)(nil)
 	_ adapter.PacketConnectionHandlerEx = (*Endpoint)(nil)
+	_ adapter.InterfaceUpdateListener   = (*Endpoint)(nil)
+	_ adapter.ConnectionTracker         = (*Endpoint)(nil)
 )
 
 func RegisterEndpoint(registry *endpoint.Registry) {
@@ -55,13 +57,16 @@ type Endpoint struct {
 	sessions map[rt.SessionKey]N.PacketConn
 	bindings atomic.Pointer[sessionBindingSnapshot]
 
-	egressMu     sync.RWMutex
-	egressQueues map[rt.SessionKey]chan *buf.Buffer
-	egressWg     sync.WaitGroup
+	scheduler *egressScheduler
 
 	ingressPackets   atomic.Uint64
 	forwardPackets   atomic.Uint64
 	dropPackets      atomic.Uint64
+	dropNoIngressRoute atomic.Uint64
+	dropNoEgressRoute  atomic.Uint64
+	dropDecisionOther  atomic.Uint64
+	dropQueueOverflow  atomic.Uint64
+	dropQueueNoSession atomic.Uint64
 	egressWriteFail  atomic.Uint64
 	writeTimeout     atomic.Uint64
 	queueOverflow    atomic.Uint64
@@ -74,11 +79,21 @@ type Endpoint struct {
 	controlUpsertOK  atomic.Uint64
 	controlRemoveOK  atomic.Uint64
 	controlErrors    atomic.Uint64
+	networkResets    atomic.Uint64
+	schedulerDrops   atomic.Uint64
+	aqmDrops         atomic.Uint64
+	queueDepth       atomic.Uint64
+	queueDepthHigh   atomic.Uint64
+	queueDelayCount  atomic.Uint64
+	queueDelayTotal  atomic.Uint64
+	queueDelayP50    atomic.Uint64
+	queueDelayP95    atomic.Uint64
+	queueDelayP99    atomic.Uint64
 
 	telemetryMode  atomic.Uint32
-	batchPool      sync.Pool
 	fragmentPolicy fragmentPolicy
 	overflowPolicy overflowPolicy
+	queueCfg       queueConfig
 }
 
 type telemetryMode uint32
@@ -108,6 +123,11 @@ type Metrics struct {
 	// ForwardPackets counts packets accepted into the egress queue (after fragment filter), not wire writes.
 	ForwardPackets        uint64
 	DropPackets           uint64
+	DropNoIngressRoute    uint64
+	DropNoEgressRoute     uint64
+	DropDecisionOther     uint64
+	DropQueueOverflow     uint64
+	DropQueueNoSession    uint64
 	EgressWriteFail       uint64
 	WriteTimeout          uint64
 	QueueOverflow         uint64
@@ -120,6 +140,14 @@ type Metrics struct {
 	ControlUpsertOK       uint64
 	ControlRemoveOK       uint64
 	ControlErrors         uint64
+	NetworkResets         uint64
+	SchedulerDrops        uint64
+	AQMDrops              uint64
+	QueueDepth            uint64
+	QueueDepthHigh        uint64
+	QueueDelayMicrosP50   uint64
+	QueueDelayMicrosP95   uint64
+	QueueDelayMicrosP99   uint64
 }
 
 // sessionDecision is a compatibility view used by tests to validate session-level expectations
@@ -162,13 +190,18 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 		sessionIngressPeer: make(map[rt.SessionKey]rt.PeerID),
 		peerEgressSession:  make(map[rt.PeerID]rt.SessionKey),
 		sessions:           make(map[rt.SessionKey]N.PacketConn),
-		egressQueues:       make(map[rt.SessionKey]chan *buf.Buffer),
 		fragmentPolicy:     fragmentPolicyAllow,
 		overflowPolicy:     overflowPolicyDropNew,
 	}
-	e.batchPool.New = func() any {
-		return &egressBatch{items: make([]*buf.Buffer, 0, maxEgressBatchSize)}
-	}
+	e.queueCfg = normalizeQueueConfig(queueConfig{
+		perSessionCap: options.EgressQueueCapPerSession,
+		globalBudget:  options.EgressGlobalQueueBudget,
+		workerCount:   options.EgressWorkerCount,
+		batchSize:     options.EgressBatchSize,
+		aqmTarget:     time.Duration(options.AQMTargetMS) * time.Millisecond,
+		aqmInterval:   time.Duration(options.AQMIntervalMS) * time.Millisecond,
+	})
+	e.scheduler = newEgressScheduler(e, e.queueCfg)
 	e.publishBindingSnapshotLocked()
 
 	for _, ro := range options.Peers {
@@ -217,19 +250,7 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 }
 
 type egressBatch struct {
-	items []*buf.Buffer
-}
-
-func (e *Endpoint) getEgressBatch() *egressBatch {
-	return e.batchPool.Get().(*egressBatch)
-}
-
-func (e *Endpoint) putEgressBatch(b *egressBatch) {
-	for i := range b.items {
-		b.items[i] = nil
-	}
-	b.items = b.items[:0]
-	e.batchPool.Put(b)
+	items []*packetEnvelope
 }
 
 func parseTelemetryMode(level string) (telemetryMode, error) {
@@ -316,6 +337,36 @@ func (e *Endpoint) addDropPackets(n uint64) {
 	}
 }
 
+func (e *Endpoint) addDropNoIngressRoute(n uint64) {
+	if e.coreCountersEnabled() {
+		e.dropNoIngressRoute.Add(n)
+	}
+}
+
+func (e *Endpoint) addDropNoEgressRoute(n uint64) {
+	if e.coreCountersEnabled() {
+		e.dropNoEgressRoute.Add(n)
+	}
+}
+
+func (e *Endpoint) addDropDecisionOther(n uint64) {
+	if e.coreCountersEnabled() {
+		e.dropDecisionOther.Add(n)
+	}
+}
+
+func (e *Endpoint) addDropQueueOverflow(n uint64) {
+	if e.coreCountersEnabled() {
+		e.dropQueueOverflow.Add(n)
+	}
+}
+
+func (e *Endpoint) addDropQueueNoSession(n uint64) {
+	if e.coreCountersEnabled() {
+		e.dropQueueNoSession.Add(n)
+	}
+}
+
 func (e *Endpoint) addEgressWriteFail(n uint64) {
 	if e.coreCountersEnabled() {
 		e.egressWriteFail.Add(n)
@@ -338,6 +389,46 @@ func (e *Endpoint) addDropNoSession(n uint64) {
 	if e.coreCountersEnabled() {
 		e.dropNoSession.Add(n)
 	}
+}
+
+func (e *Endpoint) addNetworkResets(n uint64) {
+	e.networkResets.Add(n)
+}
+
+func (e *Endpoint) addSchedulerOverflowDrops(n uint64) {
+	e.schedulerDrops.Add(n)
+}
+
+func (e *Endpoint) addAQMDrops(n uint64) {
+	e.aqmDrops.Add(n)
+}
+
+func (e *Endpoint) setQueueDepth(n uint64) {
+	e.queueDepth.Store(n)
+}
+
+func (e *Endpoint) observeQueueDelay(delay time.Duration) {
+	if delay < 0 {
+		delay = 0
+	}
+	// Lightweight EMA-style quantiles for always-on telemetry.
+	micros := uint64(delay / time.Microsecond)
+	const (
+		p50A = 8
+		p95A = 32
+		p99A = 64
+	)
+	blend := func(old, sample uint64, alpha uint64) uint64 {
+		if old == 0 {
+			return sample
+		}
+		return (old*(alpha-1) + sample) / alpha
+	}
+	e.queueDelayP50.Store(blend(e.queueDelayP50.Load(), micros, p50A))
+	e.queueDelayP95.Store(blend(e.queueDelayP95.Load(), micros, p95A))
+	e.queueDelayP99.Store(blend(e.queueDelayP99.Load(), micros, p99A))
+	e.queueDelayCount.Add(1)
+	e.queueDelayTotal.Add(micros)
 }
 
 func (e *Endpoint) handleIngressSession(packet []byte, ingress rt.SessionKey) sessionDecision {
@@ -404,6 +495,11 @@ func (e *Endpoint) SnapshotMetrics() Metrics {
 		IngressPackets:        e.ingressPackets.Load(),
 		ForwardPackets:        e.forwardPackets.Load(),
 		DropPackets:           e.dropPackets.Load(),
+		DropNoIngressRoute:    e.dropNoIngressRoute.Load(),
+		DropNoEgressRoute:     e.dropNoEgressRoute.Load(),
+		DropDecisionOther:     e.dropDecisionOther.Load(),
+		DropQueueOverflow:     e.dropQueueOverflow.Load(),
+		DropQueueNoSession:    e.dropQueueNoSession.Load(),
 		EgressWriteFail:       e.egressWriteFail.Load(),
 		WriteTimeout:          e.writeTimeout.Load(),
 		QueueOverflow:         e.queueOverflow.Load(),
@@ -416,12 +512,21 @@ func (e *Endpoint) SnapshotMetrics() Metrics {
 		ControlUpsertOK:       e.controlUpsertOK.Load(),
 		ControlRemoveOK:       e.controlRemoveOK.Load(),
 		ControlErrors:         e.controlErrors.Load(),
+		NetworkResets:         e.networkResets.Load(),
+		SchedulerDrops:        e.schedulerDrops.Load(),
+		AQMDrops:              e.aqmDrops.Load(),
+		QueueDepth:            e.queueDepth.Load(),
+		QueueDepthHigh:        e.queueDepthHigh.Load(),
+		QueueDelayMicrosP50:   e.queueDelayP50.Load(),
+		QueueDelayMicrosP95:   e.queueDelayP95.Load(),
+		QueueDelayMicrosP99:   e.queueDelayP99.Load(),
 	}
 }
 
 func (e *Endpoint) Start(stage adapter.StartStage) error {
 	if stage == adapter.StartStatePostStart {
 		e.started.Store(true)
+		e.scheduler.Start()
 		e.logger.InfoContext(context.Background(), "[l3router] MemEngine ready; overlay=", e.overlayDest.String())
 	}
 	return nil
@@ -441,13 +546,9 @@ func (e *Endpoint) DisplayType() string {
 
 func (e *Endpoint) Close() error {
 	e.cancel()
-	e.egressMu.Lock()
-	for sk, q := range e.egressQueues {
-		close(q)
-		delete(e.egressQueues, sk)
+	if e.scheduler != nil {
+		e.scheduler.Stop()
 	}
-	e.egressMu.Unlock()
-	e.egressWg.Wait()
 	e.sessMu.Lock()
 	for sk, c := range e.sessions {
 		c.Close()
