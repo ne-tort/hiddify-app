@@ -29,7 +29,6 @@ import (
 
 	"github.com/sagernet/sing-box/protocol/hiddify/xray"
 	"github.com/sagernet/sing-box/protocol/http"
-	l3routerendpoint "github.com/sagernet/sing-box/protocol/l3router"
 	"github.com/sagernet/sing-box/protocol/mieru"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/naive"
@@ -123,7 +122,7 @@ func EndpointRegistry() *endpoint.Registry {
 
 	tunnel.RegisterServerEndpoint(registry)
 	tunnel.RegisterClientEndpoint(registry)
-	l3routerendpoint.RegisterEndpoint(registry)
+	registerL3RouterEndpoint(registry)
 
 	registerWireGuardEndpoint(registry)
 	registerTailscaleEndpoint(registry)

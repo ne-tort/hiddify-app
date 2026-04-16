@@ -10,8 +10,8 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	rt "github.com/sagernet/sing-box/common/l3router"
 	C "github.com/sagernet/sing-box/constant"
-	rt "github.com/sagernet/sing-box/experimental/l3router"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
@@ -41,39 +41,42 @@ type Endpoint struct {
 
 	overlayDest M.Socksaddr
 
-	routeOwners map[rt.RouteID]string
-	ownerRoutes map[string]map[rt.RouteID]struct{}
+	peerUser  map[rt.RouteID]string
+	userPeers map[string]map[rt.RouteID]struct{}
 
 	refMu   sync.Mutex
 	userRef map[rt.SessionKey]int
-	// Tracks one active session per owner for fast applyRoute binding.
-	activeOwnerSession map[string]rt.SessionKey
+	// Tracks one active session per sing-box user string.
+	activeUserSession  map[string]rt.SessionKey
+	sessionIngressPeer map[rt.SessionKey]rt.PeerID
+	peerEgressSession  map[rt.PeerID]rt.SessionKey
 
 	sessMu   sync.RWMutex
 	sessions map[rt.SessionKey]N.PacketConn
+	bindings atomic.Pointer[sessionBindingSnapshot]
 
 	egressMu     sync.RWMutex
 	egressQueues map[rt.SessionKey]chan *buf.Buffer
 	egressWg     sync.WaitGroup
 
-	ingressPackets  atomic.Uint64
-	forwardPackets  atomic.Uint64
-	dropPackets     atomic.Uint64
-	egressWriteFail atomic.Uint64
-	writeTimeout    atomic.Uint64
-	queueOverflow   atomic.Uint64
-	dropNoSession   atomic.Uint64
-	dropACLSource   atomic.Uint64
-	dropACLDest     atomic.Uint64
-	fragmentDrops   atomic.Uint64
-	staticLoadOK    atomic.Uint64
-	staticLoadError atomic.Uint64
-	controlUpsertOK atomic.Uint64
-	controlRemoveOK atomic.Uint64
-	controlErrors   atomic.Uint64
+	ingressPackets   atomic.Uint64
+	forwardPackets   atomic.Uint64
+	dropPackets      atomic.Uint64
+	egressWriteFail  atomic.Uint64
+	writeTimeout     atomic.Uint64
+	queueOverflow    atomic.Uint64
+	dropNoSession    atomic.Uint64
+	dropFilterSource atomic.Uint64
+	dropFilterDest   atomic.Uint64
+	fragmentDrops    atomic.Uint64
+	staticLoadOK     atomic.Uint64
+	staticLoadError  atomic.Uint64
+	controlUpsertOK  atomic.Uint64
+	controlRemoveOK  atomic.Uint64
+	controlErrors    atomic.Uint64
 
-	telemetryMode atomic.Uint32
-	batchPool     sync.Pool
+	telemetryMode  atomic.Uint32
+	batchPool      sync.Pool
 	fragmentPolicy fragmentPolicy
 	overflowPolicy overflowPolicy
 }
@@ -101,22 +104,36 @@ const (
 
 // Metrics is a snapshot of l3router dataplane counters.
 type Metrics struct {
-	IngressPackets  uint64
+	IngressPackets uint64
 	// ForwardPackets counts packets accepted into the egress queue (after fragment filter), not wire writes.
-	ForwardPackets uint64
-	DropPackets     uint64
-	EgressWriteFail uint64
-	WriteTimeout    uint64
-	QueueOverflow   uint64
-	DropNoSession   uint64
-	DropACLSource   uint64
-	DropACLDest     uint64
-	FragmentDrops   uint64
-	StaticLoadOK    uint64
-	StaticLoadError uint64
-	ControlUpsertOK uint64
-	ControlRemoveOK uint64
-	ControlErrors   uint64
+	ForwardPackets        uint64
+	DropPackets           uint64
+	EgressWriteFail       uint64
+	WriteTimeout          uint64
+	QueueOverflow         uint64
+	DropNoSession         uint64
+	DropFilterSource      uint64
+	DropFilterDestination uint64
+	FragmentDrops         uint64
+	StaticLoadOK          uint64
+	StaticLoadError       uint64
+	ControlUpsertOK       uint64
+	ControlRemoveOK       uint64
+	ControlErrors         uint64
+}
+
+// sessionDecision is a compatibility view used by tests to validate session-level expectations
+// while dataplane routing remains peer-only in MemEngine.
+type sessionDecision struct {
+	Action        rt.Action
+	EgressSession rt.SessionKey
+	EgressPeerID  rt.PeerID
+	DropReason    rt.DropReason
+}
+
+type sessionBindingSnapshot struct {
+	ingress map[rt.SessionKey]rt.PeerID
+	egress  map[rt.PeerID]rt.SessionKey
 }
 
 func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger, tag string, options option.L3RouterEndpointOptions) (adapter.Endpoint, error) {
@@ -132,36 +149,39 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 	}
 
 	e := &Endpoint{
-		Adapter:      outbound.NewAdapter(C.TypeL3Router, tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
-		ctx:          ctx,
-		cancel:       cancel,
-		logger:       logger,
-		engine:       rt.NewMemEngine(),
-		overlayDest:  overlayDest,
-		routeOwners:  make(map[rt.RouteID]string),
-		ownerRoutes:  make(map[string]map[rt.RouteID]struct{}),
-		userRef:      make(map[rt.SessionKey]int),
-		activeOwnerSession: make(map[string]rt.SessionKey),
-		sessions:     make(map[rt.SessionKey]N.PacketConn),
-		egressQueues: make(map[rt.SessionKey]chan *buf.Buffer),
-		fragmentPolicy: fragmentPolicyAllow,
-		overflowPolicy: overflowPolicyDropNew,
+		Adapter:            outbound.NewAdapter(C.TypeL3Router, tag, []string{N.NetworkTCP, N.NetworkUDP}, nil),
+		ctx:                ctx,
+		cancel:             cancel,
+		logger:             logger,
+		engine:             rt.NewMemEngine(),
+		overlayDest:        overlayDest,
+		peerUser:           make(map[rt.RouteID]string),
+		userPeers:          make(map[string]map[rt.RouteID]struct{}),
+		userRef:            make(map[rt.SessionKey]int),
+		activeUserSession:  make(map[string]rt.SessionKey),
+		sessionIngressPeer: make(map[rt.SessionKey]rt.PeerID),
+		peerEgressSession:  make(map[rt.PeerID]rt.SessionKey),
+		sessions:           make(map[rt.SessionKey]N.PacketConn),
+		egressQueues:       make(map[rt.SessionKey]chan *buf.Buffer),
+		fragmentPolicy:     fragmentPolicyAllow,
+		overflowPolicy:     overflowPolicyDropNew,
 	}
 	e.batchPool.New = func() any {
 		return &egressBatch{items: make([]*buf.Buffer, 0, maxEgressBatchSize)}
 	}
+	e.publishBindingSnapshotLocked()
 
-	for _, ro := range options.Routes {
+	for _, ro := range options.Peers {
 		r, err := ParseRouteOptions(ro)
 		if err != nil {
 			e.staticLoadError.Add(1)
 			cancel()
-			return nil, E.Cause(err, "l3router route ", ro.ID)
+			return nil, E.Cause(err, "l3router peer ", ro.PeerID)
 		}
 		if err := e.LoadStaticRoute(r); err != nil {
 			e.staticLoadError.Add(1)
 			cancel()
-			return nil, E.Cause(err, "l3router route ", ro.ID)
+			return nil, E.Cause(err, "l3router peer ", ro.PeerID)
 		}
 	}
 	fp, err := parseFragmentPolicy(options.FragmentPolicy)
@@ -176,7 +196,16 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, logger log.ContextLogger
 	}
 	e.fragmentPolicy = fp
 	e.overflowPolicy = op
-	e.engine.SetACLEnabled(options.ACLEnabled)
+	e.engine.SetPacketFilter(options.PacketFilter)
+	lookupBackend, err := parseLookupBackend(options.LookupBackend)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if err := e.engine.SetLookupBackend(lookupBackend); err != nil {
+		cancel()
+		return nil, err
+	}
 
 	mode, err := parseTelemetryMode(options.TelemetryLevel)
 	if err != nil {
@@ -237,6 +266,15 @@ func parseOverflowPolicy(value string) (overflowPolicy, error) {
 		return overflowPolicyDropOldest, nil
 	default:
 		return overflowPolicyDropNew, fmt.Errorf("unsupported l3router overflow_policy: %s", value)
+	}
+}
+
+func parseLookupBackend(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "wg_allowedips", "wg-allowedips":
+		return "wg_allowedips", nil
+	default:
+		return "", fmt.Errorf("unsupported l3router lookup_backend: %s", value)
 	}
 }
 
@@ -302,27 +340,82 @@ func (e *Endpoint) addDropNoSession(n uint64) {
 	}
 }
 
+func (e *Endpoint) handleIngressSession(packet []byte, ingress rt.SessionKey) sessionDecision {
+	dec, egressSession, hasForward := e.resolveForwardDecision(packet, ingress)
+	out := sessionDecision{
+		Action:       dec.Action,
+		EgressPeerID: dec.EgressPeerID,
+		DropReason:   dec.DropReason,
+	}
+	if hasForward {
+		out.EgressSession = egressSession
+	}
+	return out
+}
+
+func (e *Endpoint) setIngressSessionForTesting(routeID rt.RouteID, session rt.SessionKey) {
+	e.sessMu.Lock()
+	defer e.sessMu.Unlock()
+	e.sessionIngressPeer[session] = rt.PeerID(routeID)
+	e.publishBindingSnapshotLocked()
+}
+
+func (e *Endpoint) clearIngressSessionForTesting(session rt.SessionKey) {
+	e.sessMu.Lock()
+	defer e.sessMu.Unlock()
+	delete(e.sessionIngressPeer, session)
+	e.publishBindingSnapshotLocked()
+}
+
+func (e *Endpoint) setEgressSessionForTesting(routeID rt.RouteID, session rt.SessionKey) {
+	e.sessMu.Lock()
+	defer e.sessMu.Unlock()
+	e.peerEgressSession[rt.PeerID(routeID)] = session
+	e.publishBindingSnapshotLocked()
+}
+
+func (e *Endpoint) clearEgressSessionForTesting(routeID rt.RouteID) {
+	e.sessMu.Lock()
+	defer e.sessMu.Unlock()
+	delete(e.peerEgressSession, rt.PeerID(routeID))
+	e.publishBindingSnapshotLocked()
+}
+
+func (e *Endpoint) publishBindingSnapshotLocked() {
+	snapshot := &sessionBindingSnapshot{
+		ingress: make(map[rt.SessionKey]rt.PeerID, len(e.sessionIngressPeer)),
+		egress:  make(map[rt.PeerID]rt.SessionKey, len(e.peerEgressSession)),
+	}
+	for session, peer := range e.sessionIngressPeer {
+		snapshot.ingress[session] = peer
+	}
+	for peer, session := range e.peerEgressSession {
+		snapshot.egress[peer] = session
+	}
+	e.bindings.Store(snapshot)
+}
+
 // Engine exposes the router data plane for protocol integration (ingress path).
 func (e *Endpoint) Engine() *rt.MemEngine { return e.engine }
 
 // SnapshotMetrics returns current dataplane counters.
 func (e *Endpoint) SnapshotMetrics() Metrics {
 	return Metrics{
-		IngressPackets:  e.ingressPackets.Load(),
-		ForwardPackets:  e.forwardPackets.Load(),
-		DropPackets:     e.dropPackets.Load(),
-		EgressWriteFail: e.egressWriteFail.Load(),
-		WriteTimeout:    e.writeTimeout.Load(),
-		QueueOverflow:   e.queueOverflow.Load(),
-		DropNoSession:   e.dropNoSession.Load(),
-		DropACLSource:   e.dropACLSource.Load(),
-		DropACLDest:     e.dropACLDest.Load(),
-		FragmentDrops:   e.fragmentDrops.Load(),
-		StaticLoadOK:    e.staticLoadOK.Load(),
-		StaticLoadError: e.staticLoadError.Load(),
-		ControlUpsertOK: e.controlUpsertOK.Load(),
-		ControlRemoveOK: e.controlRemoveOK.Load(),
-		ControlErrors:   e.controlErrors.Load(),
+		IngressPackets:        e.ingressPackets.Load(),
+		ForwardPackets:        e.forwardPackets.Load(),
+		DropPackets:           e.dropPackets.Load(),
+		EgressWriteFail:       e.egressWriteFail.Load(),
+		WriteTimeout:          e.writeTimeout.Load(),
+		QueueOverflow:         e.queueOverflow.Load(),
+		DropNoSession:         e.dropNoSession.Load(),
+		DropFilterSource:      e.dropFilterSource.Load(),
+		DropFilterDestination: e.dropFilterDest.Load(),
+		FragmentDrops:         e.fragmentDrops.Load(),
+		StaticLoadOK:          e.staticLoadOK.Load(),
+		StaticLoadError:       e.staticLoadError.Load(),
+		ControlUpsertOK:       e.controlUpsertOK.Load(),
+		ControlRemoveOK:       e.controlRemoveOK.Load(),
+		ControlErrors:         e.controlErrors.Load(),
 	}
 }
 

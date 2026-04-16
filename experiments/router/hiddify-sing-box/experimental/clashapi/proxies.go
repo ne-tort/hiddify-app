@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	rt "github.com/sagernet/sing-box/common/l3router"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
-	rt "github.com/sagernet/sing-box/experimental/l3router"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
 	l3routerendpoint "github.com/sagernet/sing-box/protocol/l3router"
@@ -246,13 +246,13 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 }
 
 type l3RouterRouteRequest struct {
-	option.L3RouterRouteOptions
+	option.L3RouterPeerOptions
 }
 
 type l3RouterControlResponse struct {
 	Status string `json:"status"`
 	Tag    string `json:"tag"`
-	ID     uint64 `json:"id,omitempty"`
+	PeerID uint64 `json:"peer_id,omitempty"`
 }
 
 type l3RouterMetricsProvider interface {
@@ -311,7 +311,7 @@ func upsertProxyRoute(server *Server) func(w http.ResponseWriter, r *http.Reques
 			render.JSON(w, r, newError(err.Error()))
 			return
 		}
-		route, err := l3routerendpoint.ParseRouteOptions(req.L3RouterRouteOptions)
+		route, err := l3routerendpoint.ParseRouteOptions(req.L3RouterPeerOptions)
 		if err != nil {
 			render.Status(r, http.StatusBadRequest)
 			render.JSON(w, r, newError(err.Error()))
@@ -325,7 +325,7 @@ func upsertProxyRoute(server *Server) func(w http.ResponseWriter, r *http.Reques
 		render.JSON(w, r, l3RouterControlResponse{
 			Status: "ok",
 			Tag:    proxy.Tag(),
-			ID:     req.ID,
+			PeerID: req.PeerID,
 		})
 	}
 }
@@ -343,14 +343,14 @@ func removeProxyRoute(_ *Server) func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseUint(idText, 10, 64)
 		if err != nil || id == 0 {
 			render.Status(r, http.StatusBadRequest)
-			render.JSON(w, r, newError("route id must be a non-zero unsigned integer"))
+			render.JSON(w, r, newError("peer id must be a non-zero unsigned integer"))
 			return
 		}
 		routeController.RemoveRoute(rt.RouteID(id))
 		render.JSON(w, r, l3RouterControlResponse{
 			Status: "ok",
 			Tag:    proxy.Tag(),
-			ID:     id,
+			PeerID: id,
 		})
 	}
 }

@@ -1,28 +1,33 @@
 package option
 
-// L3RouterRouteOptions is one peer-like static route in l3router JSON config.
-type L3RouterRouteOptions struct {
-	ID               uint64   `json:"id"`
-	Owner            string   `json:"owner,omitempty"`
-	AllowedSrc       []string `json:"allowed_src,omitempty"`
-	AllowedDst       []string `json:"allowed_dst,omitempty"`
-	ExportedPrefixes []string `json:"exported_prefixes,omitempty"`
+// L3RouterPeerOptions is one WireGuard-like peer in l3router JSON config.
+type L3RouterPeerOptions struct {
+	PeerID uint64 `json:"peer_id"`
+	// User matches inbound metadata.User (e.g. vless user name).
+	User string `json:"user,omitempty"`
+	// AllowedIPs are prefixes installed into the LPM FIB for this peer (WireGuard AllowedIPs semantics).
+	AllowedIPs []string `json:"allowed_ips,omitempty"`
+	// FilterSourceIPs restricts acceptable source addresses on ingress when endpoint packet_filter is true.
+	FilterSourceIPs []string `json:"filter_source_ips,omitempty"`
+	// FilterDestinationIPs restricts acceptable destination addresses when endpoint packet_filter is true (optional).
+	FilterDestinationIPs []string `json:"filter_destination_ips,omitempty"`
 }
 
-// L3RouterEndpointOptions configures the L3 Router endpoint data-plane and static routes.
+// L3RouterEndpointOptions configures the L3 Router endpoint data-plane and static peers.
 type L3RouterEndpointOptions struct {
-	// Routes are registered into MemEngine at startup (static bootstrap path).
-	Routes []L3RouterRouteOptions `json:"routes,omitempty"`
+	// Peers are registered into MemEngine at startup (static bootstrap path).
+	Peers []L3RouterPeerOptions `json:"peers,omitempty"`
 	// OverlayDestination is the UDP destination used when writing forwarded raw IP packets to a peer session
 	// (must match what clients use for the IP-in-UDP tunnel, e.g. 198.18.0.1:33333).
 	OverlayDestination string `json:"overlay_destination,omitempty"`
-	// ACLEnabled toggles AllowedSrc/AllowedDst enforcement in dataplane.
-	// Default false for minimal routing path.
-	ACLEnabled bool `json:"acl_enabled,omitempty"`
+	// PacketFilter enables filter_source_ips / filter_destination_ips in the dataplane (default false).
+	PacketFilter bool `json:"packet_filter,omitempty"`
 	// FragmentPolicy controls IPv4 fragment handling: allow|drop.
 	FragmentPolicy string `json:"fragment_policy,omitempty"`
 	// OverflowPolicy controls egress queue overflow behavior: drop_new|drop_oldest.
 	OverflowPolicy string `json:"overflow_policy,omitempty"`
 	// TelemetryLevel controls per-packet metric overhead: off|minimal|default|forensic.
 	TelemetryLevel string `json:"telemetry_level,omitempty"`
+	// LookupBackend selects routing lookup backend: wg_allowedips.
+	LookupBackend string `json:"lookup_backend,omitempty"`
 }

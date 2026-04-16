@@ -82,3 +82,6 @@ windows/sign.cer
 # Local reference clones for mieru comparison
 /mbox/
 /mieru/
+
+# Local reference clones for l3router research
+/experiments/router/reference-projects/

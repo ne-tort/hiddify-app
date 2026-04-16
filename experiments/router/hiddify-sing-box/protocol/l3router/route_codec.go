@@ -5,27 +5,27 @@ import (
 	"net/netip"
 	"strings"
 
-	rt "github.com/sagernet/sing-box/experimental/l3router"
+	rt "github.com/sagernet/sing-box/common/l3router"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-func ParseRouteOptions(ro option.L3RouterRouteOptions) (rt.Route, error) {
+func ParseRouteOptions(ro option.L3RouterPeerOptions) (rt.Route, error) {
 	var r rt.Route
-	r.ID = rt.RouteID(ro.ID)
-	r.Owner = ro.Owner
+	r.PeerID = rt.RouteID(ro.PeerID)
+	r.User = ro.User
 	var err error
-	r.AllowedSrc, err = ParsePrefixes(ro.AllowedSrc)
+	r.FilterSourceIPs, err = ParsePrefixes(ro.FilterSourceIPs)
 	if err != nil {
-		return rt.Route{}, fmt.Errorf("allowed_src: %w", err)
+		return rt.Route{}, fmt.Errorf("filter_source_ips: %w", err)
 	}
-	r.AllowedDst, err = ParsePrefixes(ro.AllowedDst)
+	r.FilterDestinationIPs, err = ParsePrefixes(ro.FilterDestinationIPs)
 	if err != nil {
-		return rt.Route{}, fmt.Errorf("allowed_dst: %w", err)
+		return rt.Route{}, fmt.Errorf("filter_destination_ips: %w", err)
 	}
-	r.ExportedPrefixes, err = ParsePrefixes(ro.ExportedPrefixes)
+	r.AllowedIPs, err = ParsePrefixes(ro.AllowedIPs)
 	if err != nil {
-		return rt.Route{}, fmt.Errorf("exported_prefixes: %w", err)
+		return rt.Route{}, fmt.Errorf("allowed_ips: %w", err)
 	}
 	return r, nil
 }
@@ -52,14 +52,14 @@ func ParsePrefixes(items []string) ([]netip.Prefix, error) {
 }
 
 func ValidateRoute(r rt.Route) error {
-	if r.ID == 0 {
-		return E.New("route id must be non-zero")
+	if r.PeerID == 0 {
+		return E.New("peer_id must be non-zero")
 	}
-	if strings.TrimSpace(r.Owner) == "" {
-		return E.New("route owner must be non-empty")
+	if strings.TrimSpace(r.User) == "" {
+		return E.New("user must be non-empty")
 	}
-	if len(r.ExportedPrefixes) == 0 {
-		return E.New("route exported_prefixes must not be empty")
+	if len(r.AllowedIPs) == 0 {
+		return E.New("allowed_ips must not be empty")
 	}
 	return nil
 }

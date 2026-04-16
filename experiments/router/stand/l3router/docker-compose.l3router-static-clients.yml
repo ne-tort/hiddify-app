@@ -1,0 +1,32 @@
+# Build: pack artifacts/sing-box-linux-amd64 (run `python run.py build` first).
+# Alternate in-tree build: ../../hiddify-sing-box/docker/l3router-stand.Dockerfile
+
+services:
+  l3router-client-a:
+    build:
+      context: .
+      dockerfile: docker/l3router-from-artifact.Dockerfile
+    image: sing-box-l3router:local
+    container_name: l3router-client-a
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/client-a.static.json:/etc/sing-box/config.json:ro
+    command: run -c /etc/sing-box/config.json
+
+  l3router-client-b:
+    image: sing-box-l3router:local
+    container_name: l3router-client-b
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/client-b.static.json:/etc/sing-box/config.json:ro
+    command: run -c /etc/sing-box/config.json

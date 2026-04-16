@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	rt "github.com/sagernet/sing-box/experimental/l3router"
+	rt "github.com/sagernet/sing-box/common/l3router"
 	"github.com/sagernet/sing/common/buf"
 	singbufio "github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
@@ -32,6 +32,8 @@ func (e *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, metadata 
 	N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
 }
 
+// NewPacketConnectionEx is the only entry that ties sing-box inbound identity to l3router:
+// metadata.User → SessionKey → bindUserSession (Route.user). common/l3router never sees User.
 func (e *Endpoint) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	if metadata.User == "" {
 		e.logger.WarnContext(ctx, "[l3router] missing inbound user/session; drop")
@@ -44,40 +46,45 @@ func (e *Endpoint) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn,
 	sk := rt.SessionKey(metadata.User)
 	e.enterSession(sk)
 	e.registerSession(sk, conn)
+	ingressPeer, hasIngressPeer := e.ingressPeerForSession(sk)
 	go func() {
 		defer e.leaveSession(sk)
 		defer e.unregisterSession(sk, conn)
-		e.runOverlay(ctx, conn, sk, onClose)
+		if !hasIngressPeer {
+			e.runOverlay(ctx, conn, sk, 0, onClose)
+			return
+		}
+		e.runOverlay(ctx, conn, sk, ingressPeer, onClose)
 	}()
 }
 
-func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt.SessionKey, onClose N.CloseHandlerFunc) {
+func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingressSession rt.SessionKey, ingress rt.PeerID, onClose N.CloseHandlerFunc) {
 	const detailFlushEvery = 64
-	var localDropACLSource uint64
-	var localDropACLDest uint64
+	var localDropFilterSource uint64
+	var localDropFilterDest uint64
 	var localFragmentDrops uint64
 	flushDetail := func(force bool) {
 		if !e.detailCountersEnabled() {
-			localDropACLSource = 0
-			localDropACLDest = 0
+			localDropFilterSource = 0
+			localDropFilterDest = 0
 			localFragmentDrops = 0
 			return
 		}
-		total := localDropACLSource + localDropACLDest + localFragmentDrops
+		total := localDropFilterSource + localDropFilterDest + localFragmentDrops
 		if !force && total < detailFlushEvery {
 			return
 		}
-		if localDropACLSource > 0 {
+		if localDropFilterSource > 0 {
 			if e.detailCountersEnabled() {
-				e.dropACLSource.Add(localDropACLSource)
+				e.dropFilterSource.Add(localDropFilterSource)
 			}
-			localDropACLSource = 0
+			localDropFilterSource = 0
 		}
-		if localDropACLDest > 0 {
+		if localDropFilterDest > 0 {
 			if e.detailCountersEnabled() {
-				e.dropACLDest.Add(localDropACLDest)
+				e.dropFilterDest.Add(localDropFilterDest)
 			}
-			localDropACLDest = 0
+			localDropFilterDest = 0
 		}
 		if localFragmentDrops > 0 {
 			if e.detailCountersEnabled() {
@@ -105,15 +112,15 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 		}
 		e.addIngressPackets(1)
 
-		dec := e.engine.HandleIngress(pkt, ingress)
-		if dec.Action != rt.ActionForward {
+		dec, egressSession, hasForward := e.resolveForwardDecision(pkt, ingressSession)
+		if !hasForward {
 			buffer.Release()
 			e.addDropPackets(1)
 			switch dec.DropReason {
-			case rt.DropACLSource:
-				localDropACLSource++
-			case rt.DropACLDestination:
-				localDropACLDest++
+			case rt.DropFilterSource:
+				localDropFilterSource++
+			case rt.DropFilterDestination:
+				localDropFilterDest++
 			}
 			flushDetail(false)
 			continue
@@ -125,7 +132,7 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 			flushDetail(false)
 			continue
 		}
-		queued, queueFull := e.enqueueEgress(dec.EgressSession, buffer)
+		queued, queueFull := e.enqueueEgress(egressSession, buffer)
 		if !queued {
 			// enqueueEgress does not Release on failure; caller owns payload.
 			buffer.Release()
@@ -142,10 +149,33 @@ func (e *Endpoint) runOverlay(ctx context.Context, conn N.PacketConn, ingress rt
 	}
 }
 
+func (e *Endpoint) resolveForwardDecision(packet []byte, ingressSession rt.SessionKey) (rt.Decision, rt.SessionKey, bool) {
+	ingressPeer, ok := e.ingressPeerForSession(ingressSession)
+	if !ok {
+		return rt.Decision{Action: rt.ActionDrop, DropReason: rt.DropNoIngressRoute}, "", false
+	}
+	dec := e.engine.HandleIngressPeer(packet, ingressPeer)
+	if dec.Action != rt.ActionForward {
+		return dec, "", false
+	}
+	session, ok := e.egressSessionForPeer(dec.EgressPeerID)
+	if ok && session != ingressSession {
+		return dec, session, true
+	}
+	return rt.Decision{Action: rt.ActionDrop, DropReason: rt.DropNoEgressRoute}, "", false
+}
+
 // enqueueEgress queues payload for the egress session writer. On success, ownership moves to the worker.
 // On failure, the caller must Release the buffer. Returns queueFull=true only when the egress queue rejected
 // the datagram after an eviction attempt (real overflow).
 func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) (queued bool, queueFull bool) {
+	e.egressMu.RLock()
+	queue, ok := e.egressQueues[session]
+	e.egressMu.RUnlock()
+	if ok {
+		return e.tryEnqueue(queue, payload)
+	}
+
 	// Avoid spawning idle egress workers for unknown SessionKeys: if nobody has ever entered as this user,
 	// there is no transient bind/register window to buffer for.
 	if e.sessionConn(session) == nil {
@@ -157,9 +187,6 @@ func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) (qu
 		}
 	}
 
-	e.egressMu.RLock()
-	queue, ok := e.egressQueues[session]
-	e.egressMu.RUnlock()
 	if !ok {
 		e.egressMu.Lock()
 		queue, ok = e.egressQueues[session]
@@ -171,7 +198,10 @@ func (e *Endpoint) enqueueEgress(session rt.SessionKey, payload *buf.Buffer) (qu
 		}
 		e.egressMu.Unlock()
 	}
+	return e.tryEnqueue(queue, payload)
+}
 
+func (e *Endpoint) tryEnqueue(queue chan *buf.Buffer, payload *buf.Buffer) (queued bool, queueFull bool) {
 	select {
 	case queue <- payload:
 		return true, false

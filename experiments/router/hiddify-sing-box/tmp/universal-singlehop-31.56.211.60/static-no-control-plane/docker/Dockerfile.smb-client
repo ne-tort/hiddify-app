@@ -1,5 +1,0 @@
-FROM sing-box-l3router:local
-RUN apk add --no-cache samba samba-client shadow
-COPY docker/entrypoint-smb-client.sh /entrypoint-smb-client.sh
-RUN chmod +x /entrypoint-smb-client.sh
-ENTRYPOINT ["/entrypoint-smb-client.sh"]

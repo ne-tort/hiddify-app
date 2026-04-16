@@ -1,7 +1,7 @@
 package l3routerendpoint
 
 import (
-	rt "github.com/sagernet/sing-box/experimental/l3router"
+	rt "github.com/sagernet/sing-box/common/l3router"
 	"github.com/sagernet/sing/common/buf"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -9,13 +9,22 @@ import (
 func (e *Endpoint) enterSession(sk rt.SessionKey) {
 	e.refMu.Lock()
 	defer e.refMu.Unlock()
-	if e.activeOwnerSession == nil {
-		e.activeOwnerSession = make(map[string]rt.SessionKey)
+	if e.activeUserSession == nil {
+		e.activeUserSession = make(map[string]rt.SessionKey)
+	}
+	if e.sessionIngressPeer == nil {
+		e.sessionIngressPeer = make(map[rt.SessionKey]rt.PeerID)
+	}
+	if e.peerEgressSession == nil {
+		e.peerEgressSession = make(map[rt.PeerID]rt.SessionKey)
 	}
 	e.userRef[sk]++
 	if e.userRef[sk] == 1 {
-		e.activeOwnerSession[string(sk)] = sk
-		e.bindUserSessions(sk)
+		user := string(sk)
+		e.sessMu.Lock()
+		e.activeUserSession[user] = sk
+		e.sessMu.Unlock()
+		e.bindUserSession(user, sk)
 	}
 }
 
@@ -24,37 +33,48 @@ func (e *Endpoint) leaveSession(sk rt.SessionKey) {
 	defer e.refMu.Unlock()
 	e.userRef[sk]--
 	if e.userRef[sk] == 0 {
+		user := string(sk)
 		delete(e.userRef, sk)
-		delete(e.activeOwnerSession, string(sk))
-		e.unbindUserSessions(sk)
+		e.sessMu.Lock()
+		delete(e.activeUserSession, user)
+		e.sessMu.Unlock()
+		e.unbindUserSession(user, sk)
 	}
 }
 
-func (e *Endpoint) bindUserSessions(sk rt.SessionKey) {
-	user := string(sk)
+func (e *Endpoint) bindUserSession(user string, sk rt.SessionKey) {
 	e.sessMu.Lock()
 	defer e.sessMu.Unlock()
-	if e.ownerRoutes == nil {
+	if e.userPeers == nil {
 		return
 	}
-	routeIDs := e.ownerRoutes[user]
-	for rid := range routeIDs {
-		e.engine.SetIngressSession(rid, sk)
-		e.engine.SetEgressSession(rid, sk)
+	peerIDs := e.userPeers[user]
+	if len(peerIDs) == 0 {
+		delete(e.sessionIngressPeer, sk)
+		e.publishBindingSnapshotLocked()
+		return
 	}
+	for rid := range peerIDs {
+		e.sessionIngressPeer[sk] = rt.PeerID(rid)
+		e.peerEgressSession[rt.PeerID(rid)] = sk
+	}
+	e.publishBindingSnapshotLocked()
 }
 
-func (e *Endpoint) unbindUserSessions(sk rt.SessionKey) {
+func (e *Endpoint) unbindUserSession(user string, sk rt.SessionKey) {
 	e.sessMu.Lock()
 	defer e.sessMu.Unlock()
-	if e.ownerRoutes == nil {
-		return
+	peerIDs := e.userPeers[user]
+	for rid := range peerIDs {
+		if ingress, ok := e.sessionIngressPeer[sk]; ok && ingress == rt.PeerID(rid) {
+			delete(e.sessionIngressPeer, sk)
+		}
+		peer := rt.PeerID(rid)
+		if mapped, ok := e.peerEgressSession[peer]; ok && mapped == sk {
+			delete(e.peerEgressSession, peer)
+		}
 	}
-	routeIDs := e.ownerRoutes[string(sk)]
-	for rid := range routeIDs {
-		e.engine.ClearIngressSessionRoute(rid, sk)
-		e.engine.ClearEgressSession(rid)
-	}
+	e.publishBindingSnapshotLocked()
 }
 
 func (e *Endpoint) registerSession(sk rt.SessionKey, conn N.PacketConn) {
@@ -92,4 +112,22 @@ func (e *Endpoint) sessionConn(sk rt.SessionKey) N.PacketConn {
 	e.sessMu.RLock()
 	defer e.sessMu.RUnlock()
 	return e.sessions[sk]
+}
+
+func (e *Endpoint) ingressPeerForSession(sk rt.SessionKey) (rt.PeerID, bool) {
+	snapshot := e.bindings.Load()
+	if snapshot == nil {
+		return 0, false
+	}
+	peer, ok := snapshot.ingress[sk]
+	return peer, ok
+}
+
+func (e *Endpoint) egressSessionForPeer(peer rt.PeerID) (rt.SessionKey, bool) {
+	snapshot := e.bindings.Load()
+	if snapshot == nil {
+		return "", false
+	}
+	session, ok := snapshot.egress[peer]
+	return session, ok
 }

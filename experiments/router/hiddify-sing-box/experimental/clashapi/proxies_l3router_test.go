@@ -80,11 +80,11 @@ func TestL3RouterControlAPIPayloadValidationAndUpsert(t *testing.T) {
 	if emptyRec.Code != http.StatusBadRequest {
 		t.Fatalf("empty payload must fail with 400, got %d (%s)", emptyRec.Code, emptyRec.Body.String())
 	}
-	if !strings.Contains(emptyRec.Body.String(), "route id must be non-zero") {
+	if !strings.Contains(emptyRec.Body.String(), "peer_id must be non-zero") {
 		t.Fatalf("expected detailed validation message, got %s", emptyRec.Body.String())
 	}
 
-	validReq := httptest.NewRequest(http.MethodPost, "/l3-test/routes", strings.NewReader(`{"id":101,"owner":"owner-a","allowed_src":["10.201.0.0/24"],"exported_prefixes":["10.201.0.0/24"]}`))
+	validReq := httptest.NewRequest(http.MethodPost, "/l3-test/routes", strings.NewReader(`{"peer_id":101,"user":"owner-a","filter_source_ips":["10.201.0.0/24"],"allowed_ips":["10.201.0.0/24"]}`))
 	validReq = withProxyRouteContext(validReq, "l3-test")
 	validReq.Header.Set("Content-Type", "application/json")
 	validRec := httptest.NewRecorder()
@@ -108,7 +108,7 @@ func TestL3RouterControlAPIStrictValidationRejectsUnknownFields(t *testing.T) {
 	}
 	router := proxyRouter(server, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/l3-test/routes", strings.NewReader(`{"id":101,"owner":"owner-a","exported_prefixes":["10.201.0.0/24"],"unknown_field":true}`))
+	req := httptest.NewRequest(http.MethodPost, "/l3-test/routes", strings.NewReader(`{"peer_id":101,"user":"owner-a","allowed_ips":["10.201.0.0/24"],"unknown_field":true}`))
 	req = withProxyRouteContext(req, "l3-test")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

@@ -1,0 +1,9 @@
+FROM sing-box-l3router:local
+# dl-cdn occasionally flakes from Docker build; retry a few times.
+RUN i=1; while [ "$i" -le 8 ]; do \
+  apk update && apk add --no-cache samba samba-client shadow && exit 0; \
+  i=$((i+1)); sleep 6; \
+done; echo "apk add failed after retries" >&2; exit 1
+COPY docker/entrypoint-smb-client.sh /entrypoint-smb-client.sh
+RUN chmod +x /entrypoint-smb-client.sh
+ENTRYPOINT ["/entrypoint-smb-client.sh"]

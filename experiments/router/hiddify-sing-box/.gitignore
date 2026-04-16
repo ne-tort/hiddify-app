@@ -24,6 +24,10 @@ CLAUDE.md
 AGENTS.md
 /.claude/
 
+# Local Go test binaries and bench output (Windows / profiling)
+*.test.exe
+replace/wireguard-go/device/runtime*.out
+
 # Generated benchmark/runtime artifacts (keep local, don't commit)
 /tmp/*_x1.txt
 /tmp/*_x10.txt

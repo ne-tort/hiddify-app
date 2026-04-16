@@ -1,0 +1,5 @@
+.env
+artifacts/
+runtime/*.json
+__pycache__/
+*.pyc

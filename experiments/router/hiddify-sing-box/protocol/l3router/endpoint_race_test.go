@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	rt "github.com/sagernet/sing-box/experimental/l3router"
+	rt "github.com/sagernet/sing-box/common/l3router"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
@@ -20,10 +20,10 @@ func TestEndpointConcurrentRouteAndSessionChurn(t *testing.T) {
 	}
 	e := endpointAny.(*Endpoint)
 	route := rt.Route{
-		ID:               9,
-		Owner:            "owner-a",
-		AllowedSrc:       mustPrefixes(t, "10.0.0.0/24"),
-		ExportedPrefixes: mustPrefixes(t, "10.9.0.0/24"),
+		PeerID:          9,
+		User:            "owner-a",
+		FilterSourceIPs: mustPrefixes(t, "10.0.0.0/24"),
+		AllowedIPs:      mustPrefixes(t, "10.9.0.0/24"),
 	}
 
 	var wg sync.WaitGroup
@@ -33,7 +33,7 @@ func TestEndpointConcurrentRouteAndSessionChurn(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
 				_ = e.UpsertRoute(route)
-				e.RemoveRoute(route.ID)
+				e.RemoveRoute(route.PeerID)
 			}
 		}()
 	}

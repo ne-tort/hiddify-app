@@ -2,91 +2,95 @@
 
 ## Цель по `l3router`
 
-Проектировать и доводить endpoint `l3router` для sing-box как **звезду (hub-and-spoke)** на базе практик `wg-go`, но без криптографии в самом L3-движке:
+Довести `l3router` до WG-подобной peer-архитектуры (Variant B), где:
 
-- **пиры WG = маршруты l3router** (концептуально),
-- **один user = один пир/маршрут**,
-- маршруты в базовом сценарии **статичны** (как peer-конфиг в WG),
-- dataplane выбирает egress по IP (`dst`/LPM) и anti-spoof по `src`.
+- dataplane идентифицирует ingress только через `PeerID`,
+- сопоставление transport identity -> `PeerID` делается один раз на сессию в server endpoint,
+- внутри `common/l3router` (ядро) нет зависимости от user/session модели transport-протоколов.
 
-Mesh-модель и обязательный runtime control-plane для базового режима не требуются.
-Режимов `legacy`, fallback-логики и «compatibility layer» для старых подходов в целевой системе быть не должно.
+`l3router` остается L3-роутером без криптографии, а крипто-идентификация выполняется inbound-слоем sing-box.
 
-Приоритет текущего этапа: **снижение CPU-потребления `l3router`**, в первую очередь single-thread fast-path при нагрузке `1280+`, без потери стабильности и корректности маршрутизации.
+## Архитектурные инварианты (обязательно)
+
+- В hot path запрещены `SessionKey`/string identity и per-packet lookup по user/session.
+- WG-подобная семантика маршрутизации: `AllowedSrc`/anti-spoof + `dst` LPM + no-loop.
+- Базовый эксплуатационный режим — static-first (`routes` в JSON).
+- Runtime route API допустим только как ops-инструмент, не как обязательный control-plane.
+- Клиентский UX сохраняется: vanilla sing-box client (`tun+address`) работает без дополнительных клиентских изменений.
+
+## KPI и регрессионные границы
+
+- Основной KPI: сокращение single-thread hot path (`plain`, `x1`, `1280+`) относительно актуального baseline.
+- Основной KPI-ориентир: сближение с `wg-go` по single-thread lookup (`BenchmarkAllowedIPsLookupSingleFlowLikeL3Router`) и `plain` e2e профилю.
+- Anti-regression: parallel/fairness (`ManyFlowsOneOwnerParallel`, transport parallel) не деградируют сверх согласованных порогов.
+- ACL off остается минимально дорогим путем.
+- ACL on сохраняет корректность и предсказуемый overhead.
+- Memory-gates: `allocs/op` и `B/op` не растут относительно последнего green baseline.
 
 ## Обязательные инженерные принципы
 
-- Сохранять архитектурные подходы `wg-go` там, где это оправдано стабильностью: чёткие границы lifecycle, аккуратная работа с буферами/очередями, предсказуемый dataplane.
-- Поддерживать совместимость с протоколами sing-box (VLESS/REALITY и др.): использовать канонические механизмы буферизации/пакетизации sing (`WritePacketBuffer`, headroom/rear-headroom), не ломать контракт `PacketWriter`.
-- Не вводить лишние нестабильные runtime-зависимости, если задачу можно решить статической маршрутизацией peer-like.
+- Держать дисциплину `wg-go`: узкий hot path, read-mostly структуры, precompute на control path.
+- Не нарушать packetization-контракт sing-box (`WritePacketBuffer`, headroom/rear-headroom, `PacketWriter`).
+- Крупные изменения dataplane сопровождать измеримым baseline и откатом по git; отдельные «dual path» в коде не держать.
+- Избегать лишних runtime зависимостей, если задача решается статической peer-моделью.
 
 ## Проверка по коду (важно)
 
-`clashapi` умеет добавлять/обновлять и удалять маршруты l3router **без рестарта** endpoint:
+`clashapi` умеет runtime upsert/remove маршрутов:
 
 - `POST /proxies/{name}/routes` -> `UpsertRoute`,
 - `DELETE /proxies/{name}/routes/{id}` -> `RemoveRoute`.
 
-Это есть в `experimental/clashapi/proxies.go`. Для целевой модели это только опциональный ops-инструмент, а не обязательный путь работы dataplane.
+Это не отменяет static-first модель и не должно утяжелять dataplane.
 
 ## Сценарий тестирования (обязательный)
 
-- Реальный VPS-деплой сервера + обновление Docker-клиентов.
-- Обязательная проверка: передача **>=100MB** с проверкой целостности (sha256) и временем/скоростью.
+- Локальные синтетические бенчмарки (`x1`) для быстрого сравнения итераций.
+- При существенных изменениях — повторяемые прогоны `x10` для стабилизации baseline/дельты.
+- E2E на VPS: передача `>=100MB` с проверкой `sha256`.
 
 ### Синтаксис локальных performance-запусков
 
-- `x1` (быстрый снимок):
-`cd experiments/router/hiddify-sing-box && GOWORK=off go test -count=1 ./experimental/l3router -run "^$" -bench "^BenchmarkMemEngineHandleIngress$|^BenchmarkMemEngineHandleIngressManyFlowsOneOwnerParallel$|^BenchmarkL3RouterEndToEndSyntheticTransport$|^BenchmarkL3RouterEndToEndSyntheticTransportParallel$" -benchmem`
+- `x1` для `l3router`:
+`cd experiments/router/hiddify-sing-box && GOWORK=off go test -count=1 ./common/l3router -run "^$" -bench "^BenchmarkMemEngineHandleIngress$|^BenchmarkMemEngineHandleIngressACLEnabled$|^BenchmarkMemEngineHandleIngressWGAllowedIPs$|^BenchmarkMemEngineHandleIngressNoLoopDrop$|^BenchmarkMemEngineHandleIngressManyFlowsOneOwnerParallel$|^BenchmarkL3RouterEndToEndSyntheticTransport$|^BenchmarkL3RouterEndToEndSyntheticTransportParallel$|^BenchmarkL3RouterEndToEndSyntheticTransportManyFlowsOneOwnerParallel$|^BenchmarkSyntheticTransportOnly$" -benchmem`  
+  (внутри e2e и `BenchmarkSyntheticTransportOnly` — под-бенчи `plain_l3router_baseline`, `vless_reality_vision_synthetic`, `hy2_synthetic`, `tuic_synthetic`, `mieru_synthetic`; сравнивать с wg-go по тем же именам.)
 
-- `x1` сравнение с `wg-go`:
-`cd experiments/router/hiddify-sing-box/replace/wireguard-go && GOWORK=off go test -count=1 ./device -run "^$" -bench "^BenchmarkWireGuardAllowedIPsEndToEndSyntheticTransport$|^BenchmarkWireGuardAllowedIPsEndToEndSyntheticTransportParallel$" -benchmem`
-
-- `x10` использовать только для предварительной стабилизации baseline/дельты; в текущих итерациях по умолчанию работать с `x1`, если отдельно не оговорено обратное.
+- `x1` для `wg-go`:
+`cd experiments/router/hiddify-sing-box/replace/wireguard-go && GOWORK=off go test -count=1 ./device -run "^$" -bench "^BenchmarkWireGuardAllowedIPsEndToEndSyntheticTransport$|^BenchmarkWireGuardAllowedIPsEndToEndSyntheticTransportParallel$|^BenchmarkAllowedIPsLookupSingleFlowLikeL3Router$|^BenchmarkAllowedIPsLookupManyFlowsOneOwnerParallelLikeL3Router$" -benchmem`
 
 ## Короткий operational-runbook
 
-- Сборка Linux-бинаря:  
-`cd experiments/router/hiddify-sing-box && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags with_gvisor,with_clash_api,with_utls -o sing-box-linux-amd64 ./cmd/sing-box`
-- Деплой сервера (static-only): `tmp/universal-singlehop-31.56.211.60/static-no-control-plane/scripts/deploy_l3router_server_static.sh`
-- Подъём/обновление клиентов: `tmp/universal-singlehop-31.56.211.60/static-no-control-plane/docker-compose.l3router-static-clients.yml`.
-- Smoke/100MB (без route API): `tmp/universal-singlehop-31.56.211.60/static-no-control-plane/scripts/smoke_l3router_static.ps1` и `smb_transfer_100mb_static.sh`.
+- Сборка Linux-бинаря:
+`cd experiments/router/hiddify-sing-box && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags with_gvisor,with_clash_api,with_utls,with_l3router -o sing-box-linux-amd64 ./cmd/sing-box`
+- Интеграционный стенд (build / deploy / docker / SMB 100 MiB): `experiments/router/stand/l3router/` — `python run.py` (см. README там).
+- Деплой конфига на VPS (как раньше): `experiments/router/stand/l3router/scripts/deploy_l3router_server_static.sh`
+- Синтетические бенчи (PowerShell): `experiments/router/bench/collect_phase0_baseline.ps1`
 
-## Документ архитектуры
+## Документы истины
 
-Целевая спецификация: `experiments/router/docs/router-architecture.md`.
+- Точка входа в документацию: `experiments/router/docs/README.md`.
+- Оперативные задачи и трекинг: `experiments/router/AGENTS.md`.
 
-## Ожидаемый результат и смысл проекта
+## Текущий фокус работ
 
-- В `sing-box` трудно получить стабильный L3-сценарий peer-to-peer между клиентами.
-- Через WireGuard это достигается, но приносит собственные ограничения и операционные проблемы.
-- Поэтому цель: новая сущность `l3router` в `sing-box` как универсальный L3-маршрутизатор на базе устойчивых примитивов `wg-go` (очереди, lifecycle, дисциплина dataplane), но **без криптографии**, в том числе архитектурно.
-- Семантика идентичности: **1 клиент = 1 user (любого поддерживаемого протокола sing-box) = 1 peer `l3router`**.
-- В терминологии `l3router` peer называется «маршрутом», но по сути это peer-модель как в WG, только без ключей/Noise.
-- Peer существует только внутри `l3router`: принимает трафик от одного peer и передаёт другому через dataplane `sing-box`.
-- `l3router` размещается только на сервере (топология звезда, hub-and-spoke).
-- Клиенту не обязательно знать внутренние детали `l3router`: для клиента это обычный туннель/маршрут до VPN-подсети, а сервер уже выполняет peer-like L3-коммутацию. Клиенту достаточно корректной конфигурации своего протокола/overlay до сервера.
+- CPU-first оптимизация dataplane против `wg-go`: single-thread `plain` и lookup hot path.
+- Поиск и снятие тяжелых блокировщиков в `PeerID` path (retry/branching/map-lock overhead).
+- Инкапсуляция session/transport bind только в `protocol/l3router` (эндпоинт sing-box), без user/session identity в `common/l3router`.
+- Сужение hot path до WG-подобного уровня (lookup/branching/alloc pressure) без ослабления no-loop/ACL/LPM semantics.
+- Сохранение стабильности и совместимости с packet path sing-box.
+- Систематическая проверка fairness/parallel после каждой оптимизации.
 
-## Текущее состояние `l3router` (зафиксировать явно)
+## Требования к отчетности
 
-- Базовая эксплуатация должна идти через статический JSON-конфиг `l3router` (server hub + peer-like routes).
-- Runtime route API допустим только как сервисное действие оператора и не должен требоваться для штатной передачи трафика.
-- Целевая модель проекта: **WG-go-подобная звезда как маршрутизатор пиров** (hub-and-spoke), без tailscale/mesh-парадигмы, без обязательных динамических peer-сущностей на каждое подключение, без зависимости от сложного внешнего control-plane контура.
+Результаты публиковать только в формате:
 
-## Текущий фокус работ (изучение и доводка)
+- `Single-thread (x1)` с блоком `было -> стало`,
+- `Parallel (x1)` с блоком `было -> стало`,
+- `Engine-синтетика` с блоком `было -> стало`.
+- В каждой строке обязательно указывать `l3router vs wg-go` (relative delta по `ns/op`, и при наличии `allocs/op`, `B/op`).
+- Relative delta считать строго как: `((l3router_ns/op - wg_go_ns/op) / wg_go_ns/op) * 100%`.
+- Для зачета single-thread улучшения на `x1` требуется минимум `>= 3%` (меньшие изменения считать шумом и не засчитывать).
+- Если single-thread улучшение `>= 8%` по anchor-метрике, прогон `x10` обязателен; improvement считается подтвержденным при медиане `x10 >= 5%`.
+- Семантический gate блокирующий: любой регресс по `ACL/no-loop/LPM/tie-break/drop reason` делает итерацию незачетной вне зависимости от CPU-дельты.
 
-- **Глубокое изучение `l3router`**: endpoint, `MemEngine`, сессии, очереди egress, интеграция с inbound/outbound sing-box.
-- **Поиск проблемных мест**: узкие места по CPU/аллокациям/локам, дропы (`DropACL*`, `DropNoSession`, очереди), регрессии при нагрузке и при множестве одновременных потоков.
-- **Оптимизации**: удешевление hot path (буферы, headroom, переиспользование, меньше копий), согласование с каноническим packet path sing-box.
-- **Соответствие сценариям и эталону `wg-go`**: поведение как у стабильного peer-маршрутизатора — в том числе **множество соединений и параллельный трафик на одного пира** (несколько сокетов/потоков за одним `user`/маршрутом), предсказуемая дисциплина dataplane при конкуренции, отсутствие лишней сериализации там, где в WG допускается параллелизм.
-- **Валидация**: синтетические бенчмарки в `experimental/l3router`, стенд `static-no-control-plane`, при необходимости — повторяемые E2E на VPS (пропускная способность, `>=100MB` с hash).
-
-Базовый режим по-прежнему: **static-first** (`routes` в JSON), без обязательного runtime control plane; `clashapi` — только ops.
-
-## Конфиг `l3router` и peer-маршрутов (требование)
-
-- Явно описать, как в конфиге `sing-box` задаются:
-  - сам endpoint `l3router` на сервере,
-  - peer-like маршруты (`route` как аналог WG peer: owner/user, allowed/exported prefixes, привязка сессии).
-- Конфигурация должна быть в духе `sing-box` и `wg-go` по смыслу, но в формате **JSON** (без перехода на ini как основной интерфейс).
-- Документация по конфигу должна быть практичной: минимальный рабочий пример + расширенный пример для нескольких пиров.
+Другие форматы отчетов не использовать.
