@@ -56,7 +56,10 @@ def up_smb_clients(*, build: bool) -> None:
     """SMB e2e client pair (builds smb layer; needs base image)."""
     # Always recreate containers so fresh sing-box image/code is actually applied.
     args = ["up", "-d", "--force-recreate", "--remove-orphans"]
-    if build:
+    # Default to --build to guarantee client image picks up latest base binary.
+    force_build = os.environ.get("L3ROUTER_SMB_FORCE_BUILD", "1").strip().lower()
+    force_build_enabled = force_build not in ("0", "false", "no", "off")
+    if build or force_build_enabled:
         args.append("--build")
     else:
         args.append("--no-build")

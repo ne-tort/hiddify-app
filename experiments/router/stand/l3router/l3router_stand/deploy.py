@@ -12,10 +12,32 @@ import subprocess
 
 import sys
 import tempfile
+import hashlib
 
 
 
 from .paths import CONFIGS_DIR
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _ssh_output(user: str, host: str, command: str) -> str:
+    proc = subprocess.run(
+        ["ssh", f"{user}@{host}", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
 
 
 def _normalized_config_for_scp(cfg_path: str) -> tuple[str, str | None]:
@@ -56,9 +78,13 @@ def _wait_remote_container_running(
         f"i=0; while [ $i -lt {t} ]; do "
         f"s=$(docker inspect -f '{{{{.State.Status}}}}' {container} 2>/dev/null "
         f"|| echo unknown); "
-        f"[ \"$s\" = \"running\" ] && exit 0; "
+        f"r=$(docker inspect -f '{{{{.State.Restarting}}}}' {container} 2>/dev/null || echo false); "
+        f"[ \"$s\" = \"running\" ] && [ \"$r\" = \"false\" ] && exit 0; "
         f"sleep 1; i=$((i+1)); done; "
-        f"echo 'timeout waiting for docker container {container}'; exit 1"
+        f"echo 'timeout waiting healthy docker container {container}'; "
+        f"docker inspect -f 'status={{{{.State.Status}}}} restarting={{{{.State.Restarting}}}} error={{{{.State.Error}}}}' {container} 2>/dev/null || true; "
+        f"docker logs --tail 80 {container} 2>/dev/null || true; "
+        f"exit 1"
     )
     print(
         f"[deploy] ssh {user}@{host} wait docker status=running ({container}, up to {t}s)",
@@ -256,17 +282,33 @@ def deploy_server_config(
     _ensure_remote_parent_dir(user, host, remote_config)
 
     target = f"{user}@{host}:{remote_config}"
+    remote_tmp = f"{remote_config}.tmp-upload"
 
     upload_path, cleanup_tmp = _normalized_config_for_scp(str(cfg))
+    local_cfg_sha = _sha256_file(upload_path)
     print(f"[deploy] scp {upload_path} -> {target}", file=sys.stderr)
     try:
-        subprocess.run(["scp", upload_path, target], check=True)
+        subprocess.run(["scp", upload_path, f"{user}@{host}:{remote_tmp}"], check=True)
+        subprocess.run(
+            ["ssh", f"{user}@{host}", f"mv {remote_tmp} {remote_config}"],
+            check=True,
+        )
     finally:
         if cleanup_tmp:
             try:
                 os.remove(cleanup_tmp)
             except OSError:
                 pass
+
+    remote_cfg_sha = _ssh_output(
+        user,
+        host,
+        f"sha256sum {remote_config} | awk '{{print $1}}'",
+    )
+    if local_cfg_sha != remote_cfg_sha:
+        raise RuntimeError(
+            f"deployed config sha mismatch: local={local_cfg_sha} remote={remote_cfg_sha}"
+        )
 
     _restart_remote(user, host, service=service)
 
@@ -336,7 +378,9 @@ def deploy_server_binary(
 
         subprocess.run(["ssh", f"{user}@{host}", stop_cmd], check=False)
 
-        subprocess.run(["scp", str(local_binary), target], check=True)
+        local_bin = str(local_binary)
+        local_bin_sha = _sha256_file(local_bin)
+        subprocess.run(["scp", local_bin, target], check=True)
 
         push_cmd = (
 
@@ -349,6 +393,22 @@ def deploy_server_binary(
         print(f"[deploy] ssh {user}@{host} {push_cmd!r}", file=sys.stderr)
 
         subprocess.run(["ssh", f"{user}@{host}", push_cmd], check=True)
+
+        verify_tmp = os.environ.get(
+            "L3ROUTER_SERVER_DOCKER_BINARY_VERIFY_TMP", "/tmp/sing-box.verify"
+        )
+        remote_bin_sha = _ssh_output(
+            user,
+            host,
+            (
+                f"docker cp {container}:/usr/local/bin/sing-box {verify_tmp} && "
+                f"sha256sum {verify_tmp} | awk '{{print $1}}'"
+            ),
+        )
+        if remote_bin_sha != local_bin_sha:
+            raise RuntimeError(
+                f"deployed binary sha mismatch: local={local_bin_sha} remote={remote_bin_sha}"
+            )
 
         start_cmd = f"docker start {container}"
 
@@ -370,11 +430,23 @@ def deploy_server_binary(
 
     print(f"[deploy] scp binary -> {target}", file=sys.stderr)
 
-    subprocess.run(["scp", str(local_binary), target], check=True)
+    local_bin = str(local_binary)
+    local_bin_sha = _sha256_file(local_bin)
+    subprocess.run(["scp", local_bin, target], check=True)
 
     chmod_cmd = f"chmod +x {remote_path}"
 
     subprocess.run(["ssh", f"{user}@{host}", chmod_cmd], check=True)
+
+    remote_bin_sha = _ssh_output(
+        user,
+        host,
+        f"sha256sum {remote_path} | awk '{{print $1}}'",
+    )
+    if remote_bin_sha != local_bin_sha:
+        raise RuntimeError(
+            f"deployed binary sha mismatch: local={local_bin_sha} remote={remote_bin_sha}"
+        )
 
     _restart_remote(user, host, service=service)
 
