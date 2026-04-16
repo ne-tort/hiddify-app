@@ -39,7 +39,13 @@ function Run-IperfCase(
   $cmd = "iperf3 -c $serverIp -p $Port $clientArgs -J"
   try {
     $raw = docker exec $clientContainer sh -lc $cmd
+    if ($LASTEXITCODE -ne 0) {
+      throw "docker exec failed with exit code $LASTEXITCODE"
+    }
     $jsonText = ($raw -join "`n")
+    if (-not $jsonText.TrimStart().StartsWith("{")) {
+      throw "iperf3 did not return JSON output"
+    }
     $obj = $jsonText | ConvertFrom-Json
     $rawPath = Join-Path $rawDir ("$name.json")
     Set-Content -Path $rawPath -Value $jsonText -Encoding UTF8
@@ -56,16 +62,22 @@ function Run-IperfCase(
       status = $status
     }
 
+    if (-not $proto) {
+      throw "missing protocol in iperf3 JSON"
+    }
+
     if ($proto -eq "TCP") {
       $sumRecv = $obj.end.sum_received
       $sumSent = $obj.end.sum_sent
       $bps = if ($sumRecv.bits_per_second) { $sumRecv.bits_per_second } else { $sumSent.bits_per_second }
+      if (-not $bps) { throw "missing throughput in TCP result" }
       $result.throughput_mbit_per_sec = [Math]::Round($bps / 1000000.0, 2)
       $result.retransmits = if ($sumSent.retransmits -ne $null) { $sumSent.retransmits } else { 0 }
     } else {
       $sum = $obj.end.sum
       if (-not $sum) { $sum = $obj.end.sum_received }
       $bps = $sum.bits_per_second
+      if (-not $bps) { throw "missing throughput in UDP result" }
       $result.throughput_mbit_per_sec = [Math]::Round($bps / 1000000.0, 2)
       $result.jitter_ms = if ($sum.jitter_ms -ne $null) { [double]$sum.jitter_ms } else { 0.0 }
       $result.lost_percent = if ($sum.lost_percent -ne $null) { [double]$sum.lost_percent } else { 0.0 }

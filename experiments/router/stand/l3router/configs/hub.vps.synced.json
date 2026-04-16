@@ -20,6 +20,11 @@
       "type": "l3router",
       "tag": "l3router",
       "overlay_destination": "198.18.0.1:33333",
+      "packet_filter": true,
+      "telemetry_level": "forensic",
+      "fragment_policy": "allow",
+      "overflow_policy": "drop_new",
+      "lookup_backend": "wg_allowedips",
       "peers": [
         {
           "peer_id": 1,

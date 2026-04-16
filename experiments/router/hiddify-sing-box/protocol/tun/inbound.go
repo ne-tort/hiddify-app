@@ -9,7 +9,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -483,6 +485,9 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 			udpAddr := t.l3OverlayUDPDest
 			l3Prefixes = t.l3OverlayPrefixes
 			rewriteSrc := t.l3OverlayRewriteSrc
+			var overlayConn atomic.Value // stores net.PacketConn
+			overlayConn.Store(pConn)
+			var reconnectMu sync.Mutex
 			var overlaySendErrors atomic.Uint64
 			var lastOverlaySendLog atomic.Int64
 			l3Send = func(packet []byte) error {
@@ -491,8 +496,42 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 					rewriteL3OverlayEgressIPv4(b, rewriteSrc)
 					packet = b
 				}
-				_, err := pConn.WriteTo(packet, udpAddr)
-				return err
+				connAny := overlayConn.Load()
+				conn, _ := connAny.(net.PacketConn)
+				if conn == nil {
+					return net.ErrClosed
+				}
+				_, err := conn.WriteTo(packet, udpAddr)
+				if err == nil {
+					return nil
+				}
+				if !isOverlayWriteRecoverable(err) {
+					return err
+				}
+				reconnectMu.Lock()
+				defer reconnectMu.Unlock()
+				latestAny := overlayConn.Load()
+				latestConn, _ := latestAny.(net.PacketConn)
+				if latestConn != nil && latestConn != conn {
+					if _, retryErr := latestConn.WriteTo(packet, udpAddr); retryErr == nil {
+						return nil
+					}
+				}
+				newConn, connErr := ob.ListenPacket(pctx, t.l3OverlaySocksDest)
+				if connErr != nil {
+					return err
+				}
+				if latestConn != nil {
+					_ = latestConn.Close()
+				}
+				overlayConn.Store(newConn)
+				t.l3OverlayPacketConn = newConn
+				go t.l3OverlayReceiveLoop(newConn)
+				_, retryErr := newConn.WriteTo(packet, udpAddr)
+				if retryErr == nil {
+					return nil
+				}
+				return retryErr
 			}
 			l3SendErr = func(err error) {
 				count := overlaySendErrors.Add(1)
@@ -549,6 +588,17 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 		t.routeExcludeAddressSet = nil
 	}
 	return nil
+}
+
+func isOverlayWriteRecoverable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "use of closed network connection")
 }
 
 func (t *Inbound) updateRouteAddressSet(it adapter.RuleSet) {
