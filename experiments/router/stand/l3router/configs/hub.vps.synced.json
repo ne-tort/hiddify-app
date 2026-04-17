@@ -82,6 +82,106 @@
           "short_id": ["a1b2c3d4"]
         }
       }
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": 9441,
+      "users": [
+        {
+          "name": "client1",
+          "password": "hy2-client1-pass-2026"
+        },
+        {
+          "name": "client2",
+          "password": "hy2-client2-pass-2026"
+        },
+        {
+          "name": "client3",
+          "password": "hy2-client3-pass-2026"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/certs/selfsigned.crt",
+        "key_path": "/etc/sing-box/certs/selfsigned.key"
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "tuic-in",
+      "listen": "::",
+      "listen_port": 9442,
+      "users": [
+        {
+          "name": "client1",
+          "uuid": "b1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a101",
+          "password": "tuic-client1-pass-2026"
+        },
+        {
+          "name": "client2",
+          "uuid": "b2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a202",
+          "password": "tuic-client2-pass-2026"
+        },
+        {
+          "name": "client3",
+          "uuid": "b3a3a3a3-a3a3-a3a3-a3a3-a3a3a3a3a303",
+          "password": "tuic-client3-pass-2026"
+        }
+      ],
+      "zero_rtt_handshake": false,
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/certs/selfsigned.crt",
+        "key_path": "/etc/sing-box/certs/selfsigned.key"
+      }
+    },
+    {
+      "type": "mieru",
+      "tag": "mieru-in",
+      "listen": "::",
+      "listen_port": 9443,
+      "transport": "TCP",
+      "users": [
+        {
+          "name": "client1",
+          "password": "mieru-client1-pass-2026"
+        },
+        {
+          "name": "client2",
+          "password": "mieru-client2-pass-2026"
+        },
+        {
+          "name": "client3",
+          "password": "mieru-client3-pass-2026"
+        }
+      ]
+    },
+    {
+      "type": "trojan",
+      "tag": "trojan-in",
+      "listen": "::",
+      "listen_port": 9444,
+      "users": [
+        {
+          "name": "client1",
+          "password": "trojan-client1-pass-2026"
+        },
+        {
+          "name": "client2",
+          "password": "trojan-client2-pass-2026"
+        },
+        {
+          "name": "client3",
+          "password": "trojan-client3-pass-2026"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/certs/selfsigned.crt",
+        "key_path": "/etc/sing-box/certs/selfsigned.key"
+      }
     }
   ],
   "outbounds": [
@@ -96,6 +196,38 @@
     "rules": [
       {
         "inbound": ["vless-re-in"],
+        "ip_cidr": ["198.18.0.1/32"],
+        "port": [33333],
+        "network": ["udp"],
+        "action": "route",
+        "outbound": "l3router"
+      },
+      {
+        "inbound": ["hy2-in"],
+        "ip_cidr": ["198.18.0.1/32"],
+        "port": [33333],
+        "network": ["udp"],
+        "action": "route",
+        "outbound": "l3router"
+      },
+      {
+        "inbound": ["tuic-in"],
+        "ip_cidr": ["198.18.0.1/32"],
+        "port": [33333],
+        "network": ["udp"],
+        "action": "route",
+        "outbound": "l3router"
+      },
+      {
+        "inbound": ["mieru-in"],
+        "ip_cidr": ["198.18.0.1/32"],
+        "port": [33333],
+        "network": ["udp"],
+        "action": "route",
+        "outbound": "l3router"
+      },
+      {
+        "inbound": ["trojan-in"],
         "ip_cidr": ["198.18.0.1/32"],
         "port": [33333],
         "network": ["udp"],
@@ -121,7 +253,95 @@
         "outbound": "direct"
       },
       {
+        "inbound": ["hy2-in"],
+        "auth_user": ["client1"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["hy2-in"],
+        "auth_user": ["client2"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["hy2-in"],
+        "auth_user": ["client3"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["tuic-in"],
+        "auth_user": ["client1"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["tuic-in"],
+        "auth_user": ["client2"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["tuic-in"],
+        "auth_user": ["client3"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["mieru-in"],
+        "auth_user": ["client1"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["mieru-in"],
+        "auth_user": ["client2"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["mieru-in"],
+        "auth_user": ["client3"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["trojan-in"],
+        "auth_user": ["client1"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["trojan-in"],
+        "auth_user": ["client2"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "inbound": ["trojan-in"],
+        "auth_user": ["client3"],
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
         "inbound": ["vless-re-in"],
+        "action": "reject"
+      },
+      {
+        "inbound": ["hy2-in"],
+        "action": "reject"
+      },
+      {
+        "inbound": ["tuic-in"],
+        "action": "reject"
+      },
+      {
+        "inbound": ["mieru-in"],
+        "action": "reject"
+      },
+      {
+        "inbound": ["trojan-in"],
         "action": "reject"
       }
     ],

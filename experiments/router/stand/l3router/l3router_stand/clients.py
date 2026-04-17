@@ -30,9 +30,10 @@ def _compose(
 
 def build_base_image() -> None:
     """Build sing-box-l3router:local (needed for SMB client image)."""
-    artifact = build_mod.ARTIFACTS_DIR / "sing-box-linux-amd64"
-    if not artifact.is_file():
-        build_mod.build_linux_amd64()
+    # Always rebuild from the canonical source tree before docker build.
+    # This guarantees stand clients use hiddify-core/hiddify-sing-box and not
+    # a stale/foreign artifact that may have been left in artifacts/.
+    build_mod.build_linux_amd64()
     _compose(
         "docker-compose.l3router-static-clients.yml",
         ["build"],

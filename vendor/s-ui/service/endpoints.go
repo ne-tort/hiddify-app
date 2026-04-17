@@ -3,8 +3,10 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
@@ -15,6 +17,14 @@ import (
 
 type EndpointService struct {
 	WarpService
+}
+
+type EndpointRuntimeAction struct {
+	Action     string
+	EndpointID uint
+	OldTag     string
+	Tag        string
+	NeedsReload bool
 }
 
 const (
@@ -68,120 +78,136 @@ func (o *EndpointService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 	return endpointsJson, nil
 }
 
-func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) error {
+func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*EndpointRuntimeAction, error) {
 	var err error
+	var runtimeAction *EndpointRuntimeAction
 
 	switch act {
 	case "new", "edit":
 		var endpoint model.Endpoint
 		err = endpoint.UnmarshalJSON(data)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if endpoint.Type == "warp" {
 			if act == "new" {
 				err = s.WarpService.RegisterWarp(&endpoint)
 				if err != nil {
-					return err
+					return nil, err
 				}
 			} else {
 				var old_license string
 				err = tx.Model(model.Endpoint{}).Select("json_extract(ext, '$.license_key')").Where("id = ?", endpoint.Id).Find(&old_license).Error
 				if err != nil {
-					return err
+					return nil, err
 				}
 				err = s.WarpService.SetWarpLicense(old_license, &endpoint)
 				if err != nil {
-					return err
+					return nil, err
 				}
+			}
+		}
+		oldTag := ""
+		if act == "edit" {
+			err = tx.Model(model.Endpoint{}).Select("tag").Where("id = ?", endpoint.Id).Find(&oldTag).Error
+			if err != nil {
+				return nil, err
 			}
 		}
 		if endpoint.Type == l3RouterType {
 			_, err = s.syncSingleL3RouterEndpoint(tx, &endpoint)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
-
-		if corePtr.IsRunning() {
-			configData, err := endpoint.MarshalJSON()
-			if err != nil {
-				return err
-			}
-			if act == "edit" {
-				var oldTag string
-				err = tx.Model(model.Endpoint{}).Select("tag").Where("id = ?", endpoint.Id).Find(&oldTag).Error
-				if err != nil {
-					return err
-				}
-				err = corePtr.RemoveEndpoint(oldTag)
-				if err != nil && err != os.ErrInvalid {
-					return err
-				}
-			}
-			err = corePtr.AddEndpoint(configData)
-			if err != nil {
-				return err
-			}
-		}
-
 		err = tx.Save(&endpoint).Error
 		if err != nil {
-			return err
+			return nil, err
+		}
+		runtimeAction = &EndpointRuntimeAction{
+			Action:     act,
+			EndpointID: endpoint.Id,
+			OldTag:     oldTag,
+			Tag:        endpoint.Tag,
+			NeedsReload: endpoint.Type == l3RouterType,
 		}
 	case "del":
 		var tag string
 		err = json.Unmarshal(data, &tag)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if corePtr.IsRunning() {
-			err = corePtr.RemoveEndpoint(tag)
-			if err != nil && err != os.ErrInvalid {
-				return err
-			}
-		}
+		var endpointType string
+		_ = tx.Model(model.Endpoint{}).Where("tag = ?", tag).Select("type").Find(&endpointType).Error
 		err = tx.Where("tag = ?", tag).Delete(model.Endpoint{}).Error
 		if err != nil {
-			return err
+			return nil, err
 		}
+		runtimeAction = &EndpointRuntimeAction{Action: act, Tag: tag, NeedsReload: endpointType == l3RouterType}
 	default:
-		return common.NewErrorf("unknown action: %s", act)
+		return nil, common.NewErrorf("unknown action: %s", act)
 	}
-	return nil
+	return runtimeAction, nil
 }
 
-func (s *EndpointService) SyncAllL3RouterPeers(tx *gorm.DB) error {
+func (s *EndpointService) SyncAllL3RouterPeers(tx *gorm.DB) (bool, error) {
+	changedAny := false
 	var endpoints []model.Endpoint
 	if err := tx.Model(model.Endpoint{}).Where("type = ?", l3RouterType).Find(&endpoints).Error; err != nil {
-		return err
+		return false, err
 	}
 	for i := range endpoints {
 		changed, err := s.syncSingleL3RouterEndpoint(tx, &endpoints[i])
 		if err != nil {
-			return err
+			return false, err
 		}
 		if !changed {
 			continue
 		}
+		changedAny = true
 		if err := tx.Model(model.Endpoint{}).Where("id = ?", endpoints[i].Id).Update("options", endpoints[i].Options).Error; err != nil {
-			return err
-		}
-		if corePtr.IsRunning() {
-			configData, err := endpoints[i].MarshalJSON()
-			if err != nil {
-				return err
-			}
-			if err := corePtr.RemoveEndpoint(endpoints[i].Tag); err != nil && err != os.ErrInvalid {
-				return err
-			}
-			if err := corePtr.AddEndpoint(configData); err != nil {
-				return err
-			}
+			return false, err
 		}
 	}
-	return nil
+	return changedAny, nil
+}
+
+func (s *EndpointService) ApplyRuntimeAction(action *EndpointRuntimeAction) error {
+	if action == nil || !corePtr.IsRunning() {
+		return nil
+	}
+	switch action.Action {
+	case "new", "edit":
+		var endpoint model.Endpoint
+		if err := database.GetDB().Where("id = ?", action.EndpointID).First(&endpoint).Error; err != nil {
+			return err
+		}
+		configData, err := endpoint.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		if action.Action == "edit" {
+			removeTag := action.OldTag
+			if removeTag == "" {
+				removeTag = action.Tag
+			}
+			if err := corePtr.RemoveEndpoint(removeTag); err != nil && err != os.ErrInvalid {
+				return err
+			}
+		}
+		return corePtr.AddEndpoint(configData)
+	case "del":
+		if action.Tag == "" {
+			return nil
+		}
+		if err := corePtr.RemoveEndpoint(action.Tag); err != nil && err != os.ErrInvalid {
+			return err
+		}
+		return nil
+	default:
+		return common.NewErrorf("unknown runtime action: %s", action.Action)
+	}
 }
 
 func (s *EndpointService) syncSingleL3RouterEndpoint(tx *gorm.DB, endpoint *model.Endpoint) (bool, error) {
@@ -221,7 +247,7 @@ func (s *EndpointService) syncSingleL3RouterEndpoint(tx *gorm.DB, endpoint *mode
 		if user, _ := peer["user"].(string); user != "" {
 			byUser[user] = peer
 		}
-		if id, ok := parsePeerID(peer["peer_id"]); ok {
+		if id, ok, _ := parsePeerID(peer["peer_id"]); ok {
 			byID[id] = peer
 		}
 	}
@@ -244,6 +270,10 @@ func (s *EndpointService) syncSingleL3RouterEndpoint(tx *gorm.DB, endpoint *mode
 		if src != nil {
 			allowed = toStringSlice(src["allowed_ips"])
 		}
+		if len(allowed) == 0 {
+			allowed = []string{defaultL3RouterCIDR(identity.PeerID)}
+		}
+		allowed = sanitizeL3RouterAllowedIPs(allowed)
 		if len(allowed) == 0 {
 			allowed = []string{defaultL3RouterCIDR(identity.PeerID)}
 		}
@@ -297,7 +327,10 @@ func (s *EndpointService) collectL3RouterClientIdentities(tx *gorm.DB) ([]l3Rout
 		if !ok {
 			continue
 		}
-		peerID, ok := parsePeerID(l3cfg["peer_id"])
+		peerID, ok, err := parsePeerID(l3cfg["peer_id"])
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
 			continue
 		}
@@ -355,4 +388,30 @@ func peersEqual(existing []map[string]interface{}, generated []map[string]interf
 		return false
 	}
 	return string(oldJSON) == string(newJSON)
+}
+
+func sanitizeL3RouterAllowedIPs(values []string) []string {
+	uniq := make(map[string]struct{}, len(values))
+	clean := make([]string, 0, len(values))
+	for _, value := range values {
+		cidr := strings.TrimSpace(value)
+		if cidr == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			continue
+		}
+		addr := prefix.Addr()
+		// Guard against obvious self-route/loopback mistakes from manual payload edits.
+		if addr.IsLoopback() || addr.IsLinkLocalUnicast() {
+			continue
+		}
+		if _, exists := uniq[cidr]; exists {
+			continue
+		}
+		uniq[cidr] = struct{}{}
+		clean = append(clean, cidr)
+	}
+	return clean
 }

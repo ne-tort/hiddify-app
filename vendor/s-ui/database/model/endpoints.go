@@ -2,6 +2,8 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 )
 
 type Endpoint struct {
@@ -24,11 +26,26 @@ func (o *Endpoint) UnmarshalJSON(data []byte) error {
 		o.Id = uint(val)
 	}
 	delete(raw, "id")
-	o.Type, _ = raw["type"].(string)
+	endpointType, ok := raw["type"].(string)
+	if !ok || strings.TrimSpace(endpointType) == "" {
+		return fmt.Errorf("invalid endpoint payload: missing string field `type`")
+	}
+	o.Type = strings.TrimSpace(endpointType)
 	delete(raw, "type")
-	o.Tag = raw["tag"].(string)
+	tag, ok := raw["tag"].(string)
+	if !ok || strings.TrimSpace(tag) == "" {
+		return fmt.Errorf("invalid endpoint payload: missing string field `tag`")
+	}
+	o.Tag = strings.TrimSpace(tag)
 	delete(raw, "tag")
-	o.Ext, _ = json.MarshalIndent(raw["ext"], "", "  ")
+	if _, exists := raw["ext"]; exists {
+		o.Ext, err = json.MarshalIndent(raw["ext"], "", "  ")
+		if err != nil {
+			return fmt.Errorf("invalid endpoint payload: failed to marshal `ext`: %w", err)
+		}
+	} else {
+		o.Ext = nil
+	}
 	delete(raw, "ext")
 
 	// Remaining fields

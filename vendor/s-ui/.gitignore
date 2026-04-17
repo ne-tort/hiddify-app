@@ -10,7 +10,6 @@ main
 tmp
 .sync*
 *.tar.gz
-frontend/
 
 # local env files
 .env.local
@@ -19,6 +18,9 @@ frontend/
 # Log files
 *.log*
 .cache
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
 
 # Windows build artifacts
 *.exe

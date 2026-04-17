@@ -18,7 +18,7 @@ python run.py all --smb-build
 
 | Команда | Действие |
 |---------|----------|
-| `build` | `go build` из `experiments/router/hiddify-sing-box` → `artifacts/sing-box-linux-amd64` |
+| `build` | `go build` из `hiddify-core/hiddify-sing-box` → `artifacts/sing-box-linux-amd64` |
 | `deploy` | `scp` серверного JSON + `ssh systemctl restart`; `--with-binary` — ещё бинарь |
 | `clients` | `docker compose`; по умолчанию стек **smb** (нужен предварительно собранный базовый образ) |
 | `test` | SMB 100 MiB; `--legacy-local-disk` — только offline dd/cp (`scripts/legacy/`) |
@@ -28,7 +28,8 @@ python run.py all --smb-build
 
 ## Сборка образа sing-box (Docker)
 
-Dockerfile канона: [`../../hiddify-sing-box/docker/l3router-stand.Dockerfile`](../../hiddify-sing-box/docker/l3router-stand.Dockerfile) (контекст — корень форка sing-box). Теги: `with_gvisor,with_clash_api,with_utls,with_l3router`.
+Source of truth для сборки стенда: `hiddify-core/hiddify-sing-box` (через `l3router_stand/paths.py` -> `SING_BOX_ROOT`).
+Контейнеры клиентов собираются из локального артефакта `artifacts/sing-box-linux-amd64`.
 
 Локально:
 
@@ -65,4 +66,4 @@ docker compose -f docker-compose.l3router-static-clients.yml build
 
 ## Устаревшие пути
 
-Каталог `experiments/router/hiddify-sing-box/tmp/` больше не содержит стенда; см. [`tmp/README.md`](../../hiddify-sing-box/tmp/README.md).
+Старая копия `experiments/router/hiddify-sing-box` не используется в build/deploy цепочке стенда.

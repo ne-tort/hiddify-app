@@ -1,20 +1,39 @@
 {
-  "log": { "level": "info" },
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "dns-local"
+      }
+    ],
+    "final": "dns-local"
+  },
   "inbounds": [
     {
       "type": "tun",
       "tag": "tun-in",
-      "interface_name": "tun0",
+      "mtu": 9000,
+      "auto_route": true,
+      "strict_route": true,
       "inet4_address": "10.0.0.4/24",
       "inet4_route_address": ["10.0.0.0/24"],
-      "l3_overlay_outbound": "to-hub",
+      "l3_overlay_outbound": "to-tuic",
       "l3_overlay_destination": "198.18.0.1:33333",
       "l3_overlay_route_address": ["10.0.0.0/24"],
-      "auto_route": true,
-      "strict_route": true
+      "stack": "gvisor"
     }
   ],
   "outbounds": [
+    {
+      "type": "selector",
+      "tag": "select",
+      "outbounds": ["to-hub", "to-hy2", "to-tuic", "to-mieru", "to-trojan"],
+      "default": "to-trojan",
+      "interrupt_exist_connections": true
+    },
     {
       "type": "vless",
       "tag": "to-hub",
@@ -25,7 +44,10 @@
       "tls": {
         "enabled": true,
         "server_name": "www.heise.de",
-        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
         "reality": {
           "enabled": true,
           "public_key": "6UthLd4-BuUwP01B6dLpF7qxTpXrx-oLkI5RDOt8hHg",
@@ -33,10 +55,70 @@
         }
       }
     },
-    { "type": "direct", "tag": "direct" }
+    {
+      "type": "hysteria2",
+      "tag": "to-hy2",
+      "server": "31.56.211.60",
+      "server_port": 9441,
+      "password": "hy2-client3-pass-2026",
+      "tls": {
+        "enabled": true,
+        "insecure": true
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "to-tuic",
+      "server": "31.56.211.60",
+      "server_port": 9442,
+      "uuid": "b3a3a3a3-a3a3-a3a3-a3a3-a3a3a3a3a303",
+      "password": "tuic-client3-pass-2026",
+      "udp_over_stream": true,
+      "zero_rtt_handshake": false,
+      "tls": {
+        "enabled": true,
+        "insecure": true
+      }
+    },
+    {
+      "type": "mieru",
+      "tag": "to-mieru",
+      "server": "31.56.211.60",
+      "server_port": 9443,
+      "transport": "TCP",
+      "username": "client3",
+      "password": "mieru-client3-pass-2026",
+      "multiplexing": "MULTIPLEXING_LOW"
+    },
+    {
+      "type": "trojan",
+      "tag": "to-trojan",
+      "server": "31.56.211.60",
+      "server_port": 9444,
+      "password": "trojan-client3-pass-2026",
+      "tls": {
+        "enabled": true,
+        "insecure": true
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
   ],
   "route": {
-    "rules": [{ "inbound": ["tun-in"], "outbound": "to-hub" }],
-    "final": "direct"
+    "rules": [
+      {
+        "protocol": ["dns"],
+        "outbound": "direct"
+      }
+    ],
+    "final": "select",
+    "auto_detect_interface": true
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": false
+    }
   }
 }

@@ -6,7 +6,10 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alireza0/s-ui/database"
@@ -19,6 +22,8 @@ import (
 )
 
 type ClientService struct{}
+
+var l3RouterPeerIDMu sync.Mutex
 
 func (s *ClientService) Get(id string) (*[]model.Client, error) {
 	if id == "" {
@@ -50,7 +55,7 @@ func (s *ClientService) GetAll() (*[]model.Client, error) {
 	return &clients, nil
 }
 
-func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, hostname string) ([]uint, error) {
+func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, hostname string) ([]uint, bool, error) {
 	var err error
 	var inboundIds []uint
 
@@ -59,70 +64,70 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		var client model.Client
 		err = json.Unmarshal(data, &client)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		err = s.ensureL3RouterIdentity(tx, &client)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		err = s.updateLinksWithFixedInbounds(tx, []*model.Client{&client}, hostname)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if act == "edit" {
 			// Find changed inbounds
 			inboundIds, err = s.findInboundsChanges(tx, &client, false)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		} else {
 			err = json.Unmarshal(client.Inbounds, &inboundIds)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		err = tx.Save(&client).Error
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	case "addbulk":
 		var clients []*model.Client
 		err = json.Unmarshal(data, &clients)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, client := range clients {
 			err = s.ensureL3RouterIdentity(tx, client)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		err = json.Unmarshal(clients[0].Inbounds, &inboundIds)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		err = s.updateLinksWithFixedInbounds(tx, clients, hostname)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		err = tx.Save(clients).Error
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	case "editbulk":
 		var clients []*model.Client
 		err = json.Unmarshal(data, &clients)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, client := range clients {
 			err = s.ensureL3RouterIdentity(tx, client)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			changedInboundIds, err := s.findInboundsChanges(tx, client, true)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if len(changedInboundIds) > 0 {
 				inboundIds = common.UnionUintArray(inboundIds, changedInboundIds)
@@ -131,64 +136,65 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if len(inboundIds) > 0 {
 			err = s.updateLinksWithFixedInbounds(tx, clients, hostname)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		err = tx.Save(clients).Error
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	case "delbulk":
 		var ids []uint
 		err = json.Unmarshal(data, &ids)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, id := range ids {
 			var client model.Client
 			err = tx.Where("id = ?", id).First(&client).Error
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			var clientInbounds []uint
 			err = json.Unmarshal(client.Inbounds, &clientInbounds)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			inboundIds = common.UnionUintArray(inboundIds, clientInbounds)
 		}
 		err = tx.Where("id in ?", ids).Delete(model.Client{}).Error
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	case "del":
 		var id uint
 		err = json.Unmarshal(data, &id)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		var client model.Client
 		err = tx.Where("id = ?", id).First(&client).Error
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		err = json.Unmarshal(client.Inbounds, &inboundIds)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		err = tx.Where("id = ?", id).Delete(model.Client{}).Error
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	default:
-		return nil, common.NewErrorf("unknown action: %s", act)
+		return nil, false, common.NewErrorf("unknown action: %s", act)
 	}
 
-	if err = (&EndpointService{}).SyncAllL3RouterPeers(tx); err != nil {
-		return nil, err
+	l3PeersChanged, err := (&EndpointService{}).SyncAllL3RouterPeers(tx)
+	if err != nil {
+		return nil, false, err
 	}
 
-	return inboundIds, nil
+	return inboundIds, l3PeersChanged, nil
 }
 
 func (s *ClientService) updateLinksWithFixedInbounds(tx *gorm.DB, clients []*model.Client, hostname string) error {
@@ -612,10 +618,15 @@ func (s *ClientService) ensureL3RouterIdentityWithResult(tx *gorm.DB, client *mo
 	}
 
 	changed := false
-	peerID, hasPeerID := parsePeerID(l3Config["peer_id"])
+	peerID, hasPeerID, parseErr := parsePeerID(l3Config["peer_id"])
+	if parseErr != nil {
+		return false, parseErr
+	}
 	if !hasPeerID {
+		l3RouterPeerIDMu.Lock()
 		var err error
 		peerID, err = s.allocateL3RouterPeerID(tx, client.Id)
+		l3RouterPeerIDMu.Unlock()
 		if err != nil {
 			return false, err
 		}
@@ -665,7 +676,7 @@ func (s *ClientService) allocateL3RouterPeerID(tx *gorm.DB, excludeClientID uint
 			continue
 		}
 		if l3Config, ok := configs["l3router"]; ok {
-			if id, ok := parsePeerID(l3Config["peer_id"]); ok {
+			if id, ok, _ := parsePeerID(l3Config["peer_id"]); ok {
 				used[id] = struct{}{}
 			}
 		}
@@ -695,29 +706,50 @@ func randomL3RouterPeerID(max uint64) (uint64, error) {
 	return (binary.BigEndian.Uint64(buf[:]) % (max - 1)) + 1, nil
 }
 
-func parsePeerID(raw interface{}) (uint64, bool) {
+func parsePeerID(raw interface{}) (uint64, bool, error) {
 	switch v := raw.(type) {
 	case float64:
-		if v > 0 {
-			return uint64(v), true
+		if v <= 0 {
+			return 0, false, nil
 		}
+		if math.Trunc(v) != v {
+			return 0, false, fmt.Errorf("invalid l3router peer_id: fractional numbers are not allowed")
+		}
+		return uint64(v), true, nil
 	case int:
 		if v > 0 {
-			return uint64(v), true
+			return uint64(v), true, nil
 		}
 	case int64:
 		if v > 0 {
-			return uint64(v), true
+			return uint64(v), true, nil
 		}
 	case uint64:
 		if v > 0 {
-			return v, true
+			return v, true, nil
 		}
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return 0, false, nil
+		}
+		id, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+		if err != nil || id == 0 {
+			return 0, false, fmt.Errorf("invalid l3router peer_id string: %q", v)
+		}
+		return id, true, nil
 	case json.Number:
-		id, err := v.Int64()
-		if err == nil && id > 0 {
-			return uint64(id), true
+		if strings.Contains(v.String(), ".") {
+			return 0, false, fmt.Errorf("invalid l3router peer_id: fractional numbers are not allowed")
 		}
+		id, err := v.Int64()
+		if err != nil || id <= 0 {
+			return 0, false, fmt.Errorf("invalid l3router peer_id: %v", err)
+		}
+		return uint64(id), true, nil
+	case nil:
+		return 0, false, nil
+	default:
+		return 0, false, fmt.Errorf("invalid l3router peer_id type: %T", raw)
 	}
-	return 0, false
+	return 0, false, nil
 }

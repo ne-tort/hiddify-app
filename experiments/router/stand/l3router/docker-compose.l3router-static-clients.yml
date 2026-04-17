@@ -1,5 +1,5 @@
 # Build: pack artifacts/sing-box-linux-amd64 (run `python run.py build` first).
-# Alternate in-tree build: ../../hiddify-sing-box/docker/l3router-stand.Dockerfile
+# Source tree for artifact build: ../../../../hiddify-core/hiddify-sing-box (see l3router_stand/paths.py)
 
 services:
   l3router-client-a:

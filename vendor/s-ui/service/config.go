@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,14 +119,9 @@ func injectL3RouterRouteRules(routeRaw json.RawMessage, endpoints []json.RawMess
 	if rules, ok := route["rules"].([]interface{}); ok {
 		existingRules = append(existingRules, rules...)
 	}
-	existing := make(map[string]struct{})
-	for _, rule := range existingRules {
-		if key := l3routerRuleKey(rule); key != "" {
-			existing[key] = struct{}{}
-		}
-	}
 
-	changed := false
+	l3RouterTags := make(map[string]struct{})
+	desiredRules := make(map[string]map[string]interface{})
 	for _, endpointRaw := range endpoints {
 		var endpoint map[string]interface{}
 		if err := json.Unmarshal(endpointRaw, &endpoint); err != nil {
@@ -139,6 +135,7 @@ func injectL3RouterRouteRules(routeRaw json.RawMessage, endpoints []json.RawMess
 		if tag == "" {
 			continue
 		}
+		l3RouterTags[strings.TrimSpace(tag)] = struct{}{}
 		peersRaw, _ := endpoint["peers"].([]interface{})
 		for _, rawPeer := range peersRaw {
 			peer, ok := rawPeer.(map[string]interface{})
@@ -147,31 +144,61 @@ func injectL3RouterRouteRules(routeRaw json.RawMessage, endpoints []json.RawMess
 			}
 			for _, cidr := range toStringSlice(peer["allowed_ips"]) {
 				key := strings.TrimSpace(tag) + "|" + strings.TrimSpace(cidr)
-				if key == "|" {
+				if key == "|" || !isValidRoutableCIDR(cidr) {
 					continue
 				}
-				if _, exists := existing[key]; exists {
-					continue
-				}
-				existingRules = append(existingRules, map[string]interface{}{
+				desiredRules[key] = map[string]interface{}{
 					"ip_cidr":  []string{cidr},
 					"outbound": tag,
-				})
-				existing[key] = struct{}{}
-				changed = true
+					"l3router_managed": true,
+				}
 			}
 		}
 	}
 
-	if !changed {
-		return routeRaw, nil
+	filteredRules := make([]interface{}, 0, len(existingRules)+len(desiredRules))
+	for _, rawRule := range existingRules {
+		if isL3RouterManagedRule(rawRule, l3RouterTags) {
+			continue
+		}
+		filteredRules = append(filteredRules, rawRule)
 	}
-	route["rules"] = existingRules
+	for _, rule := range desiredRules {
+		filteredRules = append(filteredRules, rule)
+	}
+	route["rules"] = filteredRules
 	updatedRoute, err := json.MarshalIndent(route, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return updatedRoute, nil
+}
+
+func isL3RouterManagedRule(rawRule interface{}, l3RouterTags map[string]struct{}) bool {
+	rule, ok := rawRule.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if managed, ok := rule["l3router_managed"].(bool); ok && managed {
+		return true
+	}
+	outbound, _ := rule["outbound"].(string)
+	if _, isL3 := l3RouterTags[strings.TrimSpace(outbound)]; !isL3 {
+		return false
+	}
+	ipCIDR := toStringSlice(rule["ip_cidr"])
+	return len(ipCIDR) == 1
+}
+
+func isValidRoutableCIDR(cidr string) bool {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+	if err != nil {
+		return false
+	}
+	if prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() {
+		return false
+	}
+	return true
 }
 
 func l3routerRuleKey(rawRule interface{}) string {
@@ -292,31 +319,26 @@ func (s *ConfigService) CheckOutbound(tag string, link string) core.CheckOutboun
 func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initUsers string, loginUser string, hostname string) ([]string, error) {
 	var err error
 	var objs []string = []string{obj}
+	var endpointRuntimeAction *EndpointRuntimeAction
+	needsCoreReload := false
 
 	db := database.GetDB()
 	tx := db.Begin()
-	defer func() {
-		if err == nil {
-			tx.Commit()
-			// Try to start core if it is not running
-			if !corePtr.IsRunning() {
-				s.StartCore()
-			}
-		} else {
-			tx.Rollback()
-		}
-	}()
 
 	switch obj {
 	case "clients":
 		var inboundIds []uint
-		inboundIds, err = s.ClientService.Save(tx, act, data, hostname)
+		var l3PeersChanged bool
+		inboundIds, l3PeersChanged, err = s.ClientService.Save(tx, act, data, hostname)
 		if err == nil && len(inboundIds) > 0 {
 			objs = append(objs, "inbounds")
 			err = s.InboundService.RestartInbounds(tx, inboundIds)
 			if err != nil {
 				return nil, common.NewErrorf("failed to update users for inbounds: %v", err)
 			}
+		}
+		if l3PeersChanged {
+			needsCoreReload = true
 		}
 	case "tls":
 		err = s.TlsService.Save(tx, act, data, hostname)
@@ -329,7 +351,10 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 	case "services":
 		err = s.ServicesService.Save(tx, act, data)
 	case "endpoints":
-		err = s.EndpointService.Save(tx, act, data)
+		endpointRuntimeAction, err = s.EndpointService.Save(tx, act, data)
+		if err == nil && endpointRuntimeAction != nil && endpointRuntimeAction.NeedsReload {
+			needsCoreReload = true
+		}
 	case "config":
 		err = s.SettingService.SaveConfig(tx, data)
 		if err != nil {
@@ -344,6 +369,7 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		return nil, common.NewError("unknown object: ", obj)
 	}
 	if err != nil {
+		tx.Rollback()
 		return nil, err
 	}
 
@@ -356,7 +382,27 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		Obj:      data,
 	}).Error
 	if err != nil {
+		tx.Rollback()
 		return nil, err
+	}
+
+	if err = tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	if needsCoreReload && corePtr.IsRunning() {
+		if restartErr := s.RestartCore(); restartErr != nil {
+			return nil, restartErr
+		}
+	} else if endpointRuntimeAction != nil && corePtr.IsRunning() {
+		if runtimeErr := s.EndpointService.ApplyRuntimeAction(endpointRuntimeAction); runtimeErr != nil {
+			return nil, runtimeErr
+		}
+	}
+	// Try to start core if it is not running
+	if !corePtr.IsRunning() {
+		s.StartCore()
 	}
 
 	LastUpdate = time.Now().Unix()
