@@ -132,6 +132,14 @@
                   <v-btn variant="tonal" @click="shuffle()">{{ $t('reset') + ' - ' + $t('all') }}<v-icon icon="mdi-refresh" /></v-btn>
                 </v-col>
               </v-row>
+              <v-row>
+                <v-col cols="12" md="3" align="end" align-self="center">wireguard</v-col>
+                <v-col>
+                  <v-text-field :label="$t('types.wg.privKey')" v-model="wgPrivateKey" hide-details />
+                  <v-text-field class="mt-2" :label="$t('tls.pubKey')" v-model="wgPublicKey" hide-details />
+                  <v-btn class="mt-2" size="small" variant="tonal" @click="rotateWgIdentity"><v-icon icon="mdi-refresh" class="mr-1" />{{ $t('reset') }}</v-btn>
+                </v-col>
+              </v-row>
               <v-row v-for="key in Object.keys(clientConfig)">
                 <v-col cols="12" md="3" align="end" align-self="center">
                     {{ key }}
@@ -235,6 +243,7 @@ import { HumanReadable } from '@/plugins/utils'
 import Data from '@/store/modules/data'
 import { locale } from '@/locales'
 import GroupMultiSelect from '@/components/GroupMultiSelect.vue'
+import HttpUtils from '@/plugins/httputil'
 
 export default {
   props: ['visible', 'id', 'inboundTags'],
@@ -303,6 +312,18 @@ export default {
     },
     shuffle(k?:string) {
       shuffleConfigs(this.clientConfig, k)
+    },
+    async rotateWgIdentity() {
+      const msg = await HttpUtils.get('api/keypairs', { k: 'wireguard' })
+      if (!msg.success) return
+      let priv = ''
+      let pub = ''
+      msg.obj.forEach((line: string) => {
+        if (line.startsWith('PrivateKey')) priv = line.substring(12)
+        if (line.startsWith('PublicKey')) pub = line.substring(11)
+      })
+      this.wgPrivateKey = priv
+      this.wgPublicKey = pub
     },
     resetUsage(){
       this.client.totalUp = (this.client.totalUp ?? 0) + this.client.up
@@ -374,6 +395,26 @@ export default {
     },
     percent() :number { return this.client.volume>0 ? Math.round((this.client.up + this.client.down) *100 / this.client.volume) : 0 },
     percentColor() :string { return (this.client.up+this.client.down) >= this.client.volume ? 'error' : this.percent>90 ? 'warning' : 'success' },
+    wgPrivateKey: {
+      get() {
+        if (!this.clientConfig.wireguard) this.clientConfig.wireguard = {}
+        return this.clientConfig.wireguard.private_key ?? ''
+      },
+      set(v: string) {
+        if (!this.clientConfig.wireguard) this.clientConfig.wireguard = {}
+        this.clientConfig.wireguard.private_key = v
+      },
+    },
+    wgPublicKey: {
+      get() {
+        if (!this.clientConfig.wireguard) this.clientConfig.wireguard = {}
+        return this.clientConfig.wireguard.public_key ?? ''
+      },
+      set(v: string) {
+        if (!this.clientConfig.wireguard) this.clientConfig.wireguard = {}
+        this.clientConfig.wireguard.public_key = v
+      },
+    },
   },
   watch: {
     visible(newValue) {

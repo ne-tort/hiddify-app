@@ -35,6 +35,12 @@
             </v-row>
             <v-row>
               <v-col style="text-align: center;">
+                <v-chip>{{ $t('setting.jsonSubWG') }}</v-chip><br />
+                <QrcodeVue :value="clientSub + '?format=json-wg'" :size="size" @click="copyToClipboard(clientSub + '?format=json-wg')" :margin="1" style="border-radius: 1rem; cursor: copy;" />
+              </v-col>
+            </v-row>
+            <v-row>
+              <v-col style="text-align: center;">
                 <v-chip>{{ $t('setting.sub') }}</v-chip><br />
                 <QrcodeVue :value="clientSub" :size="size" @click="copyToClipboard(clientSub)" :margin="1" style="border-radius: 1rem; cursor: copy;" />
               </v-col>

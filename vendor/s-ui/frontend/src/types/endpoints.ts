@@ -19,10 +19,16 @@ export interface WgPeer {
   address: string
   port: number
   public_key: string
+  private_key?: string
   pre_shared_key?: string
   allowed_ips?: string[]
   persistent_keepalive_interval?: number
   reserved?: number[]
+  client_id?: number
+  client_name?: string
+  group_id?: number
+  managed?: boolean
+  user?: string
 }
 
 export interface WireGuard extends EndpointBasics, Dial {
@@ -33,6 +39,8 @@ export interface WireGuard extends EndpointBasics, Dial {
   private_key: string
   listen_port: number
   peers: WgPeer[]
+  member_group_ids?: number[]
+  member_client_ids?: number[]
   udp_timeout?: string
   workers?: number
   ext: any
@@ -97,7 +105,7 @@ export type Endpoint = InterfaceMap[keyof InterfaceMap]
 
 // Create defaultValues object dynamically
 const defaultValues: Record<EpType, Endpoint> = {
-  wireguard: { type: EpTypes.Wireguard, address: ['10.0.0.2/32','fe80::2/128'], private_key: '', listen_port: 0 },
+  wireguard: { type: EpTypes.Wireguard, address: ['10.0.0.2/32','fe80::2/128'], private_key: '', listen_port: 0, peers: [], member_group_ids: [], member_client_ids: [] },
   warp: { type: EpTypes.Warp, address: [], private_key: '', listen_port: 0, mtu: 1420, peers: [{ address: '', port: 0, public_key: ''}] },
   tailscale: { type: EpTypes.Tailscale, domain_resolver: 'local' },
   l3router: { type: EpTypes.L3Router, peers: [], private_subnet: '', overlay_destination: '198.18.0.1:33333', packet_filter: false },

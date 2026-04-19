@@ -22,12 +22,12 @@
       "address": [
         "10.0.0.2/32"
       ],
-      "private_key": "eE1IqQ54uiC8olmqni8t9paA+UD2pj0xZFPvr2/LZV4=",
+      "private_key": "+FHdBPYtIBVmFyzZvM/zswG0OQtGLVIuoiWnAXlZr2U=",
       "peers": [
         {
           "address": "work.ai-qwerty.ru",
-          "port": 14290,
-          "public_key": "I86trMlP7Oyv7SP9ETqZ0aDe2bnNAu4/KClxykIP7wo=",
+          "port": 59148,
+          "public_key": "LI+dmecUxqYj3ohXLhUVTax8qBDN9RSST+vyPDy6wE4=",
           "allowed_ips": [
             "10.0.0.0/24",
             "fe80::40/128"

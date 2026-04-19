@@ -32,11 +32,10 @@
         </v-row>
         <Wireguard v-if="endpoint.type == epTypes.Wireguard"
           :data="endpoint"
+          :user-groups="userGroups"
+          :clients="clients"
           @getWgPubKey="getWgPubKey"
-          @newWgKey="newWgKey"
-          @addPeer="addWgPeer"
-          @delPeer="delWgPeer"
-          @refreshPeerKey="refreshWgPeerKey" />
+          @newWgKey="newWgKey" />
         <Warp v-if="endpoint.type == epTypes.Warp" :data="endpoint" />
         <TailscaleVue v-if="endpoint.type == epTypes.Tailscale" :data="endpoint" />
         <L3Router v-if="endpoint.type == epTypes.L3Router" :data="endpoint" :user-groups="userGroups" :clients="clients" :is-new="Number(id) === 0" />
@@ -121,13 +120,15 @@ export default {
       switch (this.endpoint.type) {
         case EpTypes.Wireguard:
           const wgKeys = (await this.genWgKey())
-          const randomIPoctet = RandomUtil.randomIntRange(1, 255)
+          const wgSubnet = this.nextWireguardSubnet()
           prevConfig = {
             tag: tag,
             listen_port: this.endpoint.listen_port ?? RandomUtil.randomIntRange(10000, 60000),
-            address: ['10.0.0.'+ randomIPoctet.toString() +'/32','fe80::'+ randomIPoctet.toString(16) +'/128'],
+            address: [`10.0.${wgSubnet}.1/24`, 'fe80::1/128'],
             private_key: wgKeys.private_key,
             peers: [],
+            member_group_ids: [],
+            member_client_ids: [],
             ext: {
               public_key: wgKeys.public_key,
               keys: []
@@ -158,6 +159,35 @@ export default {
       if (this.endpoint.type === EpTypes.L3Router && this.$props.id === 0) {
         await this.fetchNextL3PrivateSubnet()
       }
+    },
+    nextWireguardSubnet(): number {
+      const used = new Set<number>()
+      const endpoints = Data().endpoints ?? []
+      endpoints.forEach((ep: any) => {
+        if (ep?.type !== EpTypes.Wireguard) return
+        if (Number(ep?.id ?? 0) === Number(this.$props.id ?? 0)) return
+        let addrs: string[] = []
+        if (Array.isArray(ep?.address)) {
+          addrs = ep.address
+        } else if (typeof ep?.address === 'string') {
+          try {
+            const parsed = JSON.parse(ep.address)
+            if (Array.isArray(parsed)) addrs = parsed
+          } catch {
+            addrs = []
+          }
+        }
+        addrs.forEach((addr: string) => {
+          const m = String(addr).trim().match(/^10\.0\.(\d{1,3})\.\d{1,3}\/\d+$/)
+          if (!m) return
+          const oct = Number(m[1])
+          if (Number.isInteger(oct) && oct >= 0 && oct <= 254) used.add(oct)
+        })
+      })
+      for (let i = 0; i <= 254; i += 1) {
+        if (!used.has(i)) return i
+      }
+      return 0
     },
     async fetchNextL3PrivateSubnet() {
       const excludeId = this.$props.id > 0 ? this.$props.id : 0
@@ -228,40 +258,6 @@ export default {
       if (msg.success) {
         this.endpoint.ext.public_key = msg.obj[0]
       }
-      this.loading = false
-    },
-    async addWgPeer(){
-      if (this.endpoint.type != EpTypes.Wireguard) return
-      this.loading = true
-      const newKeys = await this.genWgKey()
-      if (!this.endpoint.ext) this.endpoint.ext = {keys: []}
-      this.endpoint.ext.keys.push(newKeys)
-      this.endpoint.peers.push({
-        public_key: newKeys.public_key,
-        allowed_ips: [this.findFreeIP()]
-      })
-      this.loading = false
-    },
-    findFreeIP(): string{
-      const peerAllowedIPs = this.endpoint.peers.map((peer: any) => peer.allowed_ips).flat()
-      for (let i = 2; i < 255; i++) {
-        const newIP = '10.0.1.'+ i.toString() +'/32'
-        if (!peerAllowedIPs.includes(newIP)) return newIP
-      }
-      return '0.0.0.0/0'
-    },
-    delWgPeer(index: number){
-      if (this.endpoint.type != EpTypes.Wireguard) return
-      this.endpoint.ext.keys = this.endpoint.ext.keys.filter((key: any) => key.public_key != this.endpoint.peers[index].public_key)
-      this.endpoint.peers.splice(index, 1)
-    },
-    async refreshWgPeerKey(index: number) {
-      this.loading = true
-      const newKeys = await this.genWgKey()
-      if (!this.endpoint.ext) this.endpoint.ext = {keys: []}
-      const indexKeys = this.endpoint.ext.keys.findIndex((key: any) => key.public_key == this.endpoint.peers[index].public_key)
-      this.endpoint.ext.keys[indexKeys == -1 ? this.endpoint.ext.keys.length : indexKeys] = newKeys
-      this.endpoint.peers[index].public_key = newKeys.public_key
       this.loading = false
     },
   },

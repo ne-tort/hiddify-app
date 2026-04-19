@@ -1,26 +1,44 @@
 # Два sing-box-клиента к удалённому хабу work.ai-qwerty.ru (WG через VLESS).
+# Сборка: на Docker Desktop (Windows) BuildKit часто даёт apk «DNS: transient error» —
+# тогда: $env:DOCKER_BUILDKIT='0'; docker compose build
+# SMB: шара [wgshare] на каталоге /smbshare (см. smbshare/client*), пользователь wguser/wgpass
+# (как в stand-mini-hy2-wg-hub-smb-prod). Доступ с другого пира: //10.0.0.2/wgshare или //10.0.0.3/wgshare.
 name: work-ai-qwerty-remote-clients
 services:
   client1:
-    image: ghcr.io/sagernet/sing-box:latest
+    build: .
     container_name: work-ai-qwerty-client1
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
     volumes:
       - ./client1.json:/etc/sing-box/config.json:ro
+      - ./smbshare/client1:/smbshare
     command: ["run", "-c", "/etc/sing-box/config.json"]
 
   client2:
-    image: ghcr.io/sagernet/sing-box:latest
+    build: .
     container_name: work-ai-qwerty-client2
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
     volumes:
       - ./client2.json:/etc/sing-box/config.json:ro
+      - ./smbshare/client2:/smbshare
     command: ["run", "-c", "/etc/sing-box/config.json"]

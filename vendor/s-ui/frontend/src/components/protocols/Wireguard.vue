@@ -2,144 +2,127 @@
   <v-card subtitle="Wireguard">
     <v-row>
       <v-col cols="12" sm="8">
-        <v-text-field
-          v-model="data.private_key"
-          :label="$t('types.wg.privKey')"
-          append-icon="mdi-key-star"
-          @click:append="newKey()"
-          hide-details>
-        </v-text-field>
+        <v-text-field v-model="data.private_key" :label="$t('types.wg.privKey')" append-icon="mdi-key-star" @click:append="newKey()" hide-details />
       </v-col>
       <v-col cols="12" sm="8">
-        <v-text-field
-          v-model="public_key"
-          readonly
-          :label="$t('tls.pubKey')"
-          append-icon="mdi-refresh"
-          @click:append="getWgPubKey()"
-          hide-details>
-        </v-text-field>
+        <v-text-field v-model="public_key" readonly :label="$t('tls.pubKey')" append-icon="mdi-refresh" @click:append="getWgPubKey()" hide-details />
       </v-col>
       <v-col cols="12" sm="8">
-        <v-text-field v-model="address" :label="$t('types.wg.localIp') + ' ' + $t('commaSeparated')" hide-details></v-text-field>
+        <v-text-field v-model="address" :label="$t('types.wg.localIp') + ' ' + $t('commaSeparated')" hide-details />
+      </v-col>
+      <v-col cols="12" sm="6">
+        <GroupMultiSelect v-model="data.member_group_ids" :user-groups="userGroups" :label="$t('l3router.groups')" />
+      </v-col>
+      <v-col cols="12" sm="6">
+        <v-select v-model="data.member_client_ids" :items="clientItems" item-title="title" item-value="value" multiple chips closable-chips :label="$t('l3router.clients')" density="compact" />
       </v-col>
     </v-row>
     <v-row>
       <v-col cols="12" sm="6" md="4">
-        <v-text-field
-          :label="$t('in.port')"
-          hide-details
-          type="number"
-          min=1
-          v-model.number="data.listen_port">
-        </v-text-field>
+        <v-text-field :label="$t('in.port')" hide-details type="number" min="1" v-model.number="data.listen_port" />
       </v-col>
       <v-col cols="12" sm="6" md="4" v-if="data.udp_timeout != undefined">
-        <v-text-field
-          label="UDP Timeout"
-          hide-details
-          type="number"
-          min=0
-          :suffix="$t('date.m')"
-          v-model.number="udp_timeout">
-        </v-text-field>
+        <v-text-field label="UDP Timeout" hide-details type="number" min="0" :suffix="$t('date.m')" v-model.number="udp_timeout" />
       </v-col>
     </v-row>
     <v-row>
       <v-col cols="12" sm="6" md="4" v-if="data.workers != undefined">
-        <v-text-field
-        :label="$t('types.wg.worker')"
-          hide-details
-          type="number"
-          min=1
-          v-model.number="data.workers">
-        </v-text-field>
+        <v-text-field :label="$t('types.wg.worker')" hide-details type="number" min="1" v-model.number="data.workers" />
       </v-col>
       <v-col cols="12" sm="6" md="4" v-if="data.mtu != undefined">
-        <v-text-field
-          label="MTU"
-          hide-details
-          type="number"
-          min=0
-          v-model.number="data.mtu">
-        </v-text-field>
+        <v-text-field label="MTU" hide-details type="number" min="0" v-model.number="data.mtu" />
       </v-col>
     </v-row>
     <v-row>
       <v-col cols="12" sm="8">
-        <v-text-field v-model="data.ext.dns" :label="$t('dns.title') + ' ' + $t('commaSeparated')" hide-details></v-text-field>
+        <v-text-field v-model="data.ext.dns" :label="$t('dns.title') + ' ' + $t('commaSeparated')" hide-details />
       </v-col>
     </v-row>
     <v-row>
       <v-col cols="12" sm="6" md="4">
-        <v-switch v-model="data.system" color="primary" :label="$t('types.wg.sysIf')" hide-details></v-switch>
+        <v-switch v-model="data.system" color="primary" :label="$t('types.wg.sysIf')" hide-details />
       </v-col>
       <v-col cols="12" sm="6" md="4" v-if="data.system">
-        <v-text-field
-          :label="$t('types.wg.ifName')"
-          hide-details
-          v-model="ifName">
-        </v-text-field>
+        <v-text-field :label="$t('types.wg.ifName')" hide-details v-model="ifName" />
       </v-col>
     </v-row>
     <v-card-actions>
-      <v-spacer></v-spacer>
+      <v-btn color="primary" variant="tonal" @click="addPeer">{{ $t('actions.add') }}</v-btn>
+      <v-spacer />
       <v-menu v-model="menu" :close-on-content-click="false" location="start">
-        <template v-slot:activator="{ props }">
+        <template #activator="{ props }">
           <v-btn v-bind="props" hide-details variant="tonal">{{ $t('types.wg.options') }}</v-btn>
         </template>
         <v-card>
           <v-list>
-            <v-list-item>
-              <v-switch v-model="optionUdp" color="primary" label="UDP Timeout" hide-details></v-switch>
-            </v-list-item>
-            <v-list-item>
-              <v-switch v-model="optionWorker" color="primary" :label="$t('types.wg.worker')" hide-details></v-switch>
-            </v-list-item>
-            <v-list-item>
-              <v-switch v-model="optionMtu" color="primary" label="MTU" hide-details></v-switch>
-            </v-list-item>
+            <v-list-item><v-switch v-model="optionUdp" color="primary" label="UDP Timeout" hide-details /></v-list-item>
+            <v-list-item><v-switch v-model="optionWorker" color="primary" :label="$t('types.wg.worker')" hide-details /></v-list-item>
+            <v-list-item><v-switch v-model="optionMtu" color="primary" label="MTU" hide-details /></v-list-item>
           </v-list>
         </v-card>
       </v-menu>
     </v-card-actions>
   </v-card>
   <v-card v-if="data.peers != undefined">
-    <v-card-subtitle>
-      {{ $t('types.wg.peers') }}
-      <v-chip color="primary" density="compact" variant="elevated" @click="addPeer"><v-icon icon="mdi-plus" /></v-chip>
-    </v-card-subtitle>
-    <template v-for="(p, index) in data.peers">
-      <v-card style="margin-top: 1rem;">
-        <v-card-subtitle>
-          {{ $t('types.wg.peer') + ' ' + (Number(index)+1) }} <v-icon color="error" icon="mdi-delete" @click="delPeer(Number(index))" />
-        </v-card-subtitle>
-        <Peer :data="p" :ext="data.ext" @refreshPeerKey="$emit('refreshPeerKey', index)" />
-      </v-card>
-    </template>
+    <v-card-subtitle>{{ $t('types.wg.peers') }}</v-card-subtitle>
+    <v-data-table :headers="peerHeaders" :items="data.peers" density="comfortable" class="elevation-2 rounded">
+      <template #item.row_id="{ index }">{{ index + 1 }}</template>
+      <template #item.allowed_ips="{ item }">
+        <v-text-field :model-value="joinArray(peerRow(item).allowed_ips)" @update:model-value="setAllowed(peerRow(item), $event)" density="compact" hide-details />
+      </template>
+      <template #item.client_name="{ item }">{{ peerRow(item).client_name || '-' }}</template>
+      <template #item.private_key="{ item }">
+        <v-tooltip :text="$t('copyToClipboard')" location="top">
+          <template #activator="{ props }">
+            <v-btn v-bind="props" icon="mdi-content-copy" size="small" variant="text" :disabled="!peerRow(item).private_key" @click="copyValue(peerRow(item).private_key)" />
+          </template>
+        </v-tooltip>
+      </template>
+      <template #item.public_key="{ item }">
+        <v-tooltip :text="$t('copyToClipboard')" location="top">
+          <template #activator="{ props }">
+            <v-btn v-bind="props" icon="mdi-content-copy" size="small" variant="text" :disabled="!peerRow(item).public_key" @click="copyValue(peerRow(item).public_key)" />
+          </template>
+        </v-tooltip>
+      </template>
+      <template #item.managed="{ item }">
+        <v-chip size="small" :color="peerRow(item).managed ? 'primary' : 'grey'">
+          {{ peerRow(item).managed ? $t('types.wg.modeManaged') : $t('types.wg.modeManual') }}
+        </v-chip>
+      </template>
+      <template #item.actions="{ index, item }">
+        <v-btn icon="mdi-delete" variant="text" color="error" :disabled="peerRow(item).managed" @click="delPeer(Number(index))" />
+      </template>
+    </v-data-table>
   </v-card>
 </template>
 
 <script lang="ts">
-import Peer from '@/components/WgPeer.vue'
+import GroupMultiSelect from '@/components/GroupMultiSelect.vue'
+import HttpUtils from '@/plugins/httputil'
+import { push } from 'notivue'
 
 export default {
-  props: ['data'],
-  emits: ['newWgKey', 'getWgPubKey', 'addPeer', 'delPeer', 'refreshPeerKey'],
+  props: ['data', 'userGroups', 'clients'],
+  emits: ['newWgKey', 'getWgPubKey'],
   data() {
     return {
       menu: false,
     }
   },
   methods: {
-    addPeer() {
-      this.$emit('addPeer')
+    async addPeer() {
+      const nextIp = this.findLowestFreePeerIP()
+      const newKeys = await this.genWgKeySafe()
+      this.$props.data.peers.push({
+        public_key: newKeys.public_key,
+        private_key: newKeys.private_key,
+        allowed_ips: nextIp ? [nextIp] : [],
+        managed: false,
+      })
     },
     delPeer(id: number) {
-      this.$emit('delPeer', id)
-    },
-    refreshPeerKey(id: number) {
-      this.$emit('refreshPeerKey', id)
+      this.$props.data.peers.splice(id, 1)
     },
     newKey() {
       this.$emit('newWgKey')
@@ -149,8 +132,74 @@ export default {
       if (privKey.length == 0) return
       this.$emit('getWgPubKey', privKey)
     },
+    copyValue(v: string) {
+      if (!v) return
+      navigator.clipboard.writeText(v)
+      push.success({ message: this.$t('copyToClipboard') as string })
+    },
+    peerRow(item: any) {
+      return item?.raw ?? item
+    },
+    joinArray(v: unknown) {
+      return Array.isArray(v) ? v.join(',') : ''
+    },
+    setAllowed(item: any, value: string) {
+      item.allowed_ips = String(value ?? '').trim().length > 0 ? String(value).split(',').map((x) => x.trim()) : []
+    },
+    async genWgKeySafe() {
+      const fallback = { private_key: '', public_key: '' }
+      const msg = await HttpUtils.get('api/keypairs', { k: 'wireguard' })
+      if (!msg.success || !Array.isArray(msg.obj)) return fallback
+      const out = { ...fallback }
+      msg.obj.forEach((line: string) => {
+        if (line.startsWith('PrivateKey')) out.private_key = line.substring(12)
+        if (line.startsWith('PublicKey')) out.public_key = line.substring(11)
+      })
+      return out
+    },
+    peerSubnetOctet(): number {
+      const list = Array.isArray(this.$props.data.address) ? this.$props.data.address : []
+      for (const raw of list) {
+        const m = String(raw).trim().match(/^10\.0\.(\d{1,3})\.\d{1,3}\/\d+$/)
+        if (!m) continue
+        const oct = Number(m[1])
+        if (Number.isInteger(oct) && oct >= 0 && oct <= 254) return oct
+      }
+      return 1
+    },
+    findLowestFreePeerIP(): string {
+      const subnet = this.peerSubnetOctet()
+      const used = new Set<string>()
+      const serverAddrs = Array.isArray(this.$props.data.address) ? this.$props.data.address : []
+      serverAddrs.forEach((a: string) => used.add(String(a).trim()))
+      const peers = Array.isArray(this.$props.data.peers) ? this.$props.data.peers : []
+      peers.forEach((p: any) => {
+        const arr = Array.isArray(p?.allowed_ips) ? p.allowed_ips : []
+        arr.forEach((x: string) => used.add(String(x).trim()))
+      })
+      for (let host = 2; host < 255; host += 1) {
+        const ip = `10.0.${subnet}.${host}/32`
+        if (!used.has(ip)) return ip
+      }
+      return ''
+    },
   },
   computed: {
+    peerHeaders() {
+      return [
+        { title: this.$t('types.wg.colId'), key: 'row_id' },
+        { title: this.$t('types.wg.colIP'), key: 'allowed_ips' },
+        { title: this.$t('types.wg.colUser'), key: 'client_name' },
+        { title: this.$t('types.wg.colPrivKey'), key: 'private_key', sortable: false },
+        { title: this.$t('types.wg.colPubKey'), key: 'public_key', sortable: false },
+        { title: this.$t('types.wg.colMode'), key: 'managed' },
+        { title: '', key: 'actions', sortable: false, width: 48 },
+      ]
+    },
+    clientItems() {
+      const cl = this.$props.clients ?? []
+      return cl.map((c: any) => ({ title: c.name, value: c.id }))
+    },
     optionUdp: {
       get(): boolean { return this.$props.data.udp_timeout != undefined },
       set(v:boolean) { this.$props.data.udp_timeout = v ? "5m" : undefined }
@@ -192,6 +241,26 @@ export default {
       set(v:string) { this.$props.data.ext.public_key = v }
     }
   },
-  components: { Peer }
+  watch: {
+    'data.member_group_ids': {
+      immediate: true,
+      handler(v: unknown) {
+        if (!Array.isArray(v)) this.$props.data.member_group_ids = []
+      },
+    },
+    'data.member_client_ids': {
+      immediate: true,
+      handler(v: unknown) {
+        if (!Array.isArray(v)) this.$props.data.member_client_ids = []
+      },
+    },
+    'data.peers': {
+      immediate: true,
+      handler(v: unknown) {
+        if (!Array.isArray(v)) this.$props.data.peers = []
+      },
+    },
+  },
+  components: { GroupMultiSelect },
 }
 </script>

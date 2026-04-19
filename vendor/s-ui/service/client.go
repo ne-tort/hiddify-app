@@ -17,6 +17,7 @@ import (
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/util"
 	"github.com/alireza0/s-ui/util/common"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"gorm.io/gorm"
 )
@@ -282,11 +283,15 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 	if err != nil {
 		return nil, false, err
 	}
+	wgPeersChanged, err := (&EndpointService{}).SyncAllWireGuardPeers(tx)
+	if err != nil {
+		return nil, false, err
+	}
 	if err := PersistL3RouterRouteRules(tx); err != nil {
 		return nil, false, err
 	}
 
-	return inboundIds, l3PeersChanged, nil
+	return inboundIds, l3PeersChanged || wgPeersChanged, nil
 }
 
 func (s *ClientService) updateLinksWithFixedInbounds(tx *gorm.DB, clients []*model.Client, hostname string) error {
@@ -895,4 +900,78 @@ func parsePeerID(raw interface{}) (uint64, bool, error) {
 		return 0, false, fmt.Errorf("invalid l3router peer_id type: %T", raw)
 	}
 	return 0, false, nil
+}
+
+func (s *ClientService) ensureWGIdentityWithResult(client *model.Client) (bool, error) {
+	configs, err := decodeClientConfig(client.Config)
+	if err != nil {
+		return false, err
+	}
+	wgCfg, ok := configs["wireguard"]
+	if !ok || wgCfg == nil {
+		wgCfg = make(map[string]interface{})
+		configs["wireguard"] = wgCfg
+	}
+	privateKey, _ := wgCfg["private_key"].(string)
+	publicKey, _ := wgCfg["public_key"].(string)
+	if strings.TrimSpace(privateKey) != "" && strings.TrimSpace(publicKey) != "" {
+		return false, nil
+	}
+	keys, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return false, err
+	}
+	wgCfg["private_key"] = keys.String()
+	wgCfg["public_key"] = keys.PublicKey().String()
+	raw, err := json.MarshalIndent(configs, "", " ")
+	if err != nil {
+		return false, err
+	}
+	client.Config = raw
+	return true, nil
+}
+
+func (s *ClientService) RotateWGIdentity(tx *gorm.DB, clientID uint) error {
+	var client model.Client
+	if err := tx.Model(model.Client{}).Where("id = ?", clientID).First(&client).Error; err != nil {
+		return err
+	}
+	configs, err := decodeClientConfig(client.Config)
+	if err != nil {
+		return err
+	}
+	wgCfg, ok := configs["wireguard"]
+	if !ok || wgCfg == nil {
+		wgCfg = make(map[string]interface{})
+		configs["wireguard"] = wgCfg
+	}
+	keys, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return err
+	}
+	wgCfg["private_key"] = keys.String()
+	wgCfg["public_key"] = keys.PublicKey().String()
+	raw, err := json.MarshalIndent(configs, "", " ")
+	if err != nil {
+		return err
+	}
+	if err := tx.Model(model.Client{}).Where("id = ?", clientID).Update("config", raw).Error; err != nil {
+		return err
+	}
+	_, err = (&EndpointService{}).SyncAllWireGuardPeers(tx)
+	return err
+}
+
+func decodeClientConfig(raw json.RawMessage) (map[string]map[string]interface{}, error) {
+	if len(raw) == 0 {
+		return map[string]map[string]interface{}{}, nil
+	}
+	var configs map[string]map[string]interface{}
+	if err := json.Unmarshal(raw, &configs); err != nil {
+		return nil, err
+	}
+	if configs == nil {
+		configs = map[string]map[string]interface{}{}
+	}
+	return configs, nil
 }

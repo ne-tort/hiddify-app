@@ -1,6 +1,9 @@
 package sub
 
 import (
+	"net"
+	"strings"
+
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/service"
 
@@ -17,6 +20,26 @@ type SubHandler struct {
 func NewSubHandler(g *gin.RouterGroup) {
 	a := &SubHandler{}
 	a.initRouter(g)
+}
+
+// subscriptionRequestHost is the hostname clients use to reach the subscription endpoint
+// (no port), for filling WireGuard "server" when subDomain/subURI omit a host.
+func subscriptionRequestHost(c *gin.Context) string {
+	h := strings.TrimSpace(c.GetHeader("X-Forwarded-Host"))
+	if h != "" {
+		if i := strings.IndexByte(h, ','); i >= 0 {
+			h = strings.TrimSpace(h[:i])
+		}
+	} else {
+		h = strings.TrimSpace(c.Request.Host)
+	}
+	if h == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	return h
 }
 
 func (s *SubHandler) initRouter(g *gin.RouterGroup) {
@@ -36,6 +59,8 @@ func (s *SubHandler) subs(c *gin.Context) {
 			result, headers, err = s.JsonService.GetJson(subId, format)
 		case "json-l3router":
 			result, headers, err = s.JsonService.GetJsonL3Router(subId)
+		case "json-wg":
+			result, headers, err = s.JsonService.GetJsonWG(subId, subscriptionRequestHost(c))
 		case "clash":
 			result, headers, err = s.ClashService.GetClash(subId)
 		}

@@ -1,25 +1,42 @@
+# Удалённые sing-box-клиенты. Сборка: при apk «DNS: transient error» (BuildKit/Win):
+# $env:DOCKER_BUILDKIT='0'; docker compose build
+# SMB: шара [wgshare] на /smbshare, wguser/wgpass (как stand-mini-hy2-wg-hub-smb-prod).
 name: stand-hiddify-remote-clients
 services:
   client1:
-    image: ghcr.io/sagernet/sing-box:latest
+    build: .
     container_name: stand-hiddify-remote-client1
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
     volumes:
       - ./client1.json:/etc/sing-box/config.json:ro
+      - ./smbshare/client1:/smbshare
     command: ["run", "-c", "/etc/sing-box/config.json"]
 
   client2:
-    image: ghcr.io/sagernet/sing-box:latest
+    build: .
     container_name: stand-hiddify-remote-client2
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
     volumes:
       - ./client2.json:/etc/sing-box/config.json:ro
+      - ./smbshare/client2:/smbshare
     command: ["run", "-c", "/etc/sing-box/config.json"]

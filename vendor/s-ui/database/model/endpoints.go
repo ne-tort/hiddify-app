@@ -98,6 +98,28 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 				}
 			}
 		}
+		if o.Type == "wireguard" {
+			for _, k := range []string{
+				"member_group_ids",
+				"member_client_ids",
+			} {
+				delete(restFields, k)
+			}
+			if rawPeers, ok := restFields["peers"]; ok {
+				var peers []map[string]interface{}
+				if err := json.Unmarshal(rawPeers, &peers); err == nil {
+					strip := []string{"client_id", "client_name", "group_id", "managed", "private_key", "user", "peer_sid"}
+					for _, p := range peers {
+						for _, k := range strip {
+							delete(p, k)
+						}
+					}
+					if b, err := json.Marshal(peers); err == nil {
+						restFields["peers"] = b
+					}
+				}
+			}
+		}
 
 		for k, v := range restFields {
 			combined[k] = v

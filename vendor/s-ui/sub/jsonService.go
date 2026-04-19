@@ -3,6 +3,8 @@ package sub
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 
 	"github.com/alireza0/s-ui/database"
@@ -69,6 +71,19 @@ func (j *JsonService) GetJsonL3Router(subId string) (*string, []string, error) {
 	return j.marshalJsonResponse(jsonConfig, client)
 }
 
+// GetJsonWG returns the same profile as GetJson and adds a sing-box WireGuard endpoint
+// (top-level "endpoints", not legacy outbound) plus route rules when a matching WG peer exists.
+// requestHost should be the hostname used to fetch the subscription (no port), e.g. from
+// gin Context; pass empty if unavailable.
+func (j *JsonService) GetJsonWG(subId string, requestHost string) (*string, []string, error) {
+	jsonConfig, client, err := j.assembleJsonMap(subId)
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = patchJsonForWireGuard(&jsonConfig, client, j.resolveWGServerHost(requestHost))
+	return j.marshalJsonResponse(jsonConfig, client)
+}
+
 func (j *JsonService) assembleJsonMap(subId string) (map[string]interface{}, *model.Client, error) {
 	var jsonConfig map[string]interface{}
 
@@ -102,11 +117,14 @@ func (j *JsonService) assembleJsonMap(subId string) (map[string]interface{}, *mo
 		return nil, nil, err
 	}
 
-	jsonConfig["outbounds"] = outbounds
+	// Store the slice value, not *[]map — patches (json-wg, json-l3router) read outbounds via type switch.
+	jsonConfig["outbounds"] = *outbounds
 
 	if err := j.addOthers(&jsonConfig); err != nil {
 		return nil, nil, err
 	}
+
+	NormalizeWireGuardOutboundsToEndpointsJSON(&jsonConfig)
 
 	return jsonConfig, client, nil
 }
@@ -260,7 +278,7 @@ func (j *JsonService) addDefaultOutbounds(outbounds *[]map[string]interface{}, o
 		{
 			"tag":       "auto",
 			"type":      "urltest",
-			"outbounds": outTags,
+			"outbounds": append([]string(nil), *outTags...),
 			"url":       "http://www.gstatic.com/generate_204",
 			"interval":  "10m",
 			"tolerance": 50,
@@ -335,6 +353,43 @@ func (j *JsonService) addOthers(jsonConfig *map[string]interface{}) error {
 	(*jsonConfig)["route"] = route
 
 	return nil
+}
+
+func (j *JsonService) resolveWGServerHost(requestHost string) string {
+	if domain, err := j.SettingService.GetSubDomain(); err == nil {
+		domain = strings.TrimSpace(domain)
+		if domain != "" {
+			return domain
+		}
+	}
+	if uri, err := j.SettingService.GetSubURI(); err == nil {
+		if h := hostFromSubscriptionURI(strings.TrimSpace(uri)); h != "" {
+			return h
+		}
+	}
+	requestHost = strings.TrimSpace(requestHost)
+	if requestHost != "" {
+		return requestHost
+	}
+	return ""
+}
+
+func hostFromSubscriptionURI(uri string) string {
+	if uri == "" {
+		return ""
+	}
+	u, err := url.Parse(uri)
+	if err != nil || u == nil {
+		return ""
+	}
+	host := strings.TrimSpace(u.Host)
+	if host == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 func (j *JsonService) pushMixed(outbounds *[]map[string]interface{}, outTags *[]string, out map[string]interface{}) {

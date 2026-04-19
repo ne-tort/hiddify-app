@@ -11,6 +11,8 @@ import (
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/util/common"
+	"github.com/gofrs/uuid/v5"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"gorm.io/gorm"
 )
@@ -20,17 +22,19 @@ type EndpointService struct {
 }
 
 type EndpointRuntimeAction struct {
-	Action     string
-	EndpointID uint
-	OldTag     string
-	Tag        string
+	Action      string
+	EndpointID  uint
+	OldTag      string
+	Tag         string
 	NeedsReload bool
 }
 
 const (
 	l3RouterType              = "l3router"
+	wireGuardType             = "wireguard"
 	l3RouterDefaultOverlayDst = "198.18.0.1:33333"
 	l3PeerIPAllocKey          = "peer_ip_alloc"
+	wgBasePrefix              = "10.0"
 )
 
 func (o *EndpointService) GetAll() (*[]map[string]interface{}, error) {
@@ -166,13 +170,24 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 			if err != nil {
 				return nil, err
 			}
+		} else if endpoint.Type == wireGuardType {
+			changed, err := s.syncSingleWireGuardEndpoint(tx, &endpoint)
+			if err != nil {
+				return nil, err
+			}
+			if changed {
+				err = tx.Save(&endpoint).Error
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 		runtimeAction = &EndpointRuntimeAction{
-			Action:     act,
-			EndpointID: endpoint.Id,
-			OldTag:     oldTag,
-			Tag:        endpoint.Tag,
-			NeedsReload: endpoint.Type == l3RouterType,
+			Action:      act,
+			EndpointID:  endpoint.Id,
+			OldTag:      oldTag,
+			Tag:         endpoint.Tag,
+			NeedsReload: endpoint.Type == l3RouterType || endpoint.Type == wireGuardType,
 		}
 	case "del":
 		var tag string
@@ -190,7 +205,7 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 		if err != nil {
 			return nil, err
 		}
-		runtimeAction = &EndpointRuntimeAction{Action: act, Tag: tag, NeedsReload: endpointType == l3RouterType}
+		runtimeAction = &EndpointRuntimeAction{Action: act, Tag: tag, NeedsReload: endpointType == l3RouterType || endpointType == wireGuardType}
 	default:
 		return nil, common.NewErrorf("unknown action: %s", act)
 	}
@@ -208,6 +223,28 @@ func (s *EndpointService) SyncAllL3RouterPeers(tx *gorm.DB) (bool, error) {
 	}
 	for i := range endpoints {
 		changed, err := s.syncSingleL3RouterEndpoint(tx, &endpoints[i])
+		if err != nil {
+			return false, err
+		}
+		if !changed {
+			continue
+		}
+		changedAny = true
+		if err := tx.Model(model.Endpoint{}).Where("id = ?", endpoints[i].Id).Update("options", endpoints[i].Options).Error; err != nil {
+			return false, err
+		}
+	}
+	return changedAny, nil
+}
+
+func (s *EndpointService) SyncAllWireGuardPeers(tx *gorm.DB) (bool, error) {
+	changedAny := false
+	var endpoints []model.Endpoint
+	if err := tx.Model(model.Endpoint{}).Where("type = ?", wireGuardType).Find(&endpoints).Error; err != nil {
+		return false, err
+	}
+	for i := range endpoints {
+		changed, err := s.syncSingleWireGuardEndpoint(tx, &endpoints[i])
 		if err != nil {
 			return false, err
 		}
@@ -456,6 +493,511 @@ func (s *EndpointService) syncSingleL3RouterEndpoint(tx *gorm.DB, endpoint *mode
 	}
 	endpoint.Options = updatedOptions
 	return true, nil
+}
+
+type wireGuardClientIdentity struct {
+	ClientID   uint
+	ClientName string
+	User       string
+	GroupID    uint
+	PrivateKey string
+	PublicKey  string
+}
+
+func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *model.Endpoint) (bool, error) {
+	var options map[string]interface{}
+	if len(endpoint.Options) > 0 {
+		if err := json.Unmarshal(endpoint.Options, &options); err != nil {
+			return false, err
+		}
+	} else {
+		options = make(map[string]interface{})
+	}
+	if options == nil {
+		options = make(map[string]interface{})
+	}
+	changed := false
+	if _, exists := options["member_group_ids"]; !exists {
+		options["member_group_ids"] = []uint{}
+		changed = true
+	}
+	if _, exists := options["member_client_ids"]; !exists {
+		options["member_client_ids"] = []uint{}
+		changed = true
+	}
+	wgSubnet, addrChanged, err := s.ensureWireGuardEndpointAddress(tx, endpoint, options)
+	if err != nil {
+		return false, err
+	}
+	if addrChanged {
+		changed = true
+	}
+
+	existingPeers := normalizePeerMaps(options["peers"])
+	manualPeers := make([]map[string]interface{}, 0, len(existingPeers))
+	managedByClient := map[uint]map[string]interface{}{}
+	for _, p := range existingPeers {
+		cid := uintFromAny(p["client_id"])
+		if cid == 0 {
+			if ensureWireGuardPeerSID(p) {
+				changed = true
+			}
+			p["managed"] = false
+			manualPeers = append(manualPeers, p)
+			continue
+		}
+		managedByClient[cid] = p
+	}
+
+	ids, err := s.collectWireGuardClientIdentitiesForEndpoint(tx, endpoint)
+	if err != nil {
+		return false, err
+	}
+
+	used := wgCollectUsedPeerIPs(existingPeers, options)
+
+	for _, p := range manualPeers {
+		peerKeyChanged, err := ensureWireGuardManualPeerKeys(p)
+		if err != nil {
+			return false, err
+		}
+		if peerKeyChanged {
+			changed = true
+		}
+		norm := wgNormalizeAllowedIPList(toStringSlice(p["allowed_ips"]))
+		if len(norm) == 0 {
+			ip := wgPickLowestFreePeerIP(used, wgSubnet)
+			p["allowed_ips"] = []string{ip}
+			used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
+			changed = true
+		} else {
+			if !slicesEqualString(norm, toStringSlice(p["allowed_ips"])) {
+				changed = true
+			}
+			p["allowed_ips"] = norm
+			for _, ip := range norm {
+				used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
+			}
+		}
+	}
+
+	managedPeers := make([]map[string]interface{}, 0, len(ids))
+	for _, id := range ids {
+		existing := managedByClient[id.ClientID]
+		var allowedIPs []string
+		if existing != nil {
+			allowedIPs = wgNormalizeAllowedIPList(toStringSlice(existing["allowed_ips"]))
+		}
+		if len(allowedIPs) == 0 {
+			ip := wgPickLowestFreePeerIP(used, wgSubnet)
+			allowedIPs = []string{ip}
+			used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
+			changed = true
+		} else {
+			for _, ip := range allowedIPs {
+				used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
+			}
+		}
+		row := map[string]interface{}{
+			"client_id":   id.ClientID,
+			"client_name": id.ClientName,
+			"user":        id.User,
+			"group_id":    id.GroupID,
+			"managed":     true,
+			"private_key": id.PrivateKey,
+			"public_key":  id.PublicKey,
+			"allowed_ips": allowedIPs,
+		}
+		managedPeers = append(managedPeers, row)
+	}
+	sort.Slice(managedPeers, func(i, j int) bool {
+		li := strings.ToLower(fmt.Sprintf("%v", managedPeers[i]["client_name"]))
+		lj := strings.ToLower(fmt.Sprintf("%v", managedPeers[j]["client_name"]))
+		return li < lj
+	})
+
+	newPeers := append(append([]map[string]interface{}{}, manualPeers...), managedPeers...)
+	if !peersEqual(existingPeers, newPeers) {
+		changed = true
+	}
+	options["peers"] = newPeers
+	if !changed {
+		return false, nil
+	}
+	raw, err := json.MarshalIndent(options, "", " ")
+	if err != nil {
+		return false, err
+	}
+	endpoint.Options = raw
+	return true, nil
+}
+
+func (s *EndpointService) collectWireGuardClientIdentitiesForEndpoint(tx *gorm.DB, endpoint *model.Endpoint) ([]wireGuardClientIdentity, error) {
+	var options map[string]interface{}
+	if len(endpoint.Options) > 0 {
+		_ = json.Unmarshal(endpoint.Options, &options)
+	}
+	groupIDs := dedupeUintSorted(parseUintListFromAny(options["member_group_ids"]))
+	clientIDs := dedupeUintSorted(parseUintListFromAny(options["member_client_ids"]))
+	if len(groupIDs) == 0 && len(clientIDs) == 0 {
+		return nil, nil
+	}
+	gs := GroupService{}
+	clientToGroup := map[uint]uint{}
+	for _, gid := range groupIDs {
+		memberIDs, err := gs.ResolveMemberClientIDs(tx, gid)
+		if err != nil {
+			return nil, err
+		}
+		for _, cid := range memberIDs {
+			if _, exists := clientToGroup[cid]; !exists {
+				clientToGroup[cid] = gid
+			}
+		}
+	}
+	for _, cid := range clientIDs {
+		if _, exists := clientToGroup[cid]; !exists {
+			clientToGroup[cid] = 0
+		}
+	}
+	cs := ClientService{}
+	out := make([]wireGuardClientIdentity, 0, len(clientToGroup))
+	for cid, gid := range clientToGroup {
+		var client model.Client
+		if err := tx.Model(model.Client{}).Where("id = ?", cid).Select("id", "name", "config").First(&client).Error; err != nil {
+			continue
+		}
+		changed, err := cs.ensureWGIdentityWithResult(&client)
+		if err != nil {
+			return nil, err
+		}
+		if changed {
+			if err := tx.Model(model.Client{}).Where("id = ?", client.Id).Update("config", client.Config).Error; err != nil {
+				return nil, err
+			}
+		}
+		cfg, err := decodeClientConfig(client.Config)
+		if err != nil {
+			continue
+		}
+		wgCfg, ok := cfg["wireguard"]
+		if !ok || wgCfg == nil {
+			continue
+		}
+		privateKey, _ := wgCfg["private_key"].(string)
+		publicKey, _ := wgCfg["public_key"].(string)
+		if strings.TrimSpace(privateKey) == "" || strings.TrimSpace(publicKey) == "" {
+			continue
+		}
+		out = append(out, wireGuardClientIdentity{
+			ClientID:   client.Id,
+			ClientName: client.Name,
+			User:       client.Name,
+			GroupID:    gid,
+			PrivateKey: privateKey,
+			PublicKey:  publicKey,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].ClientName) < strings.ToLower(out[j].ClientName)
+	})
+	return out, nil
+}
+
+func normalizePeerMaps(raw interface{}) []map[string]interface{} {
+	switch v := raw.(type) {
+	case []map[string]interface{}:
+		return v
+	case []interface{}:
+		out := make([]map[string]interface{}, 0, len(v))
+		for _, p := range v {
+			if m, ok := p.(map[string]interface{}); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func ensureWireGuardPeerSID(p map[string]interface{}) bool {
+	if s, ok := p["peer_sid"].(string); ok && strings.TrimSpace(s) != "" {
+		return false
+	}
+	u, err := uuid.NewV4()
+	if err != nil {
+		return false
+	}
+	p["peer_sid"] = u.String()
+	return true
+}
+
+func ensureWireGuardManualPeerKeys(p map[string]interface{}) (bool, error) {
+	changed := false
+	publicKey, _ := p["public_key"].(string)
+	privateKey, _ := p["private_key"].(string)
+	publicKey = strings.TrimSpace(publicKey)
+	privateKey = strings.TrimSpace(privateKey)
+
+	if publicKey != "" {
+		return false, nil
+	}
+	if privateKey != "" {
+		key, err := wgtypes.ParseKey(privateKey)
+		if err == nil {
+			p["public_key"] = key.PublicKey().String()
+			return true, nil
+		}
+	}
+	newKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		return false, err
+	}
+	p["private_key"] = newKey.String()
+	p["public_key"] = newKey.PublicKey().String()
+	changed = true
+	return changed, nil
+}
+
+func (s *EndpointService) ensureWireGuardEndpointAddress(tx *gorm.DB, endpoint *model.Endpoint, options map[string]interface{}) (int, bool, error) {
+	currentSubnet := wgExtractSubnetFromAddressList(options["address"])
+	if currentSubnet >= 0 && wgSubnetFreeForEndpoint(tx, endpoint.Id, currentSubnet) {
+		if changed := wgEnsureServerAddress(options, currentSubnet); changed {
+			return currentSubnet, true, nil
+		}
+		return currentSubnet, false, nil
+	}
+	subnet, err := wgAllocateEndpointSubnet(tx, endpoint.Id)
+	if err != nil {
+		return 1, false, err
+	}
+	_ = wgEnsureServerAddress(options, subnet)
+	return subnet, true, nil
+}
+
+func wgExtractSubnetFromAddressList(raw interface{}) int {
+	for _, addr := range wgWireGuardEndpointAddressKeys(map[string]interface{}{"address": raw}) {
+		prefix, err := netip.ParsePrefix(addr)
+		if err != nil || !prefix.Addr().Is4() {
+			continue
+		}
+		oct := prefix.Addr().As4()
+		if oct[0] == 10 && oct[1] == 0 {
+			return int(oct[2])
+		}
+	}
+	return -1
+}
+
+// wgEnsureServerAddress sets defaults for the WireGuard **server** interface addresses:
+//   - IPv4: 10.0.<subnet>.1/24 (not /32 — matches typical LAN semantics)
+//   - IPv6: fe80::1/128 if not present
+// If the user already set an IPv4 in 10.0.<subnet>.*, it is kept (editable, not overwritten).
+func wgEnsureServerAddress(options map[string]interface{}, subnet int) bool {
+	if subnet < 0 || subnet > 254 {
+		subnet = 0
+	}
+	defaultV4 := fmt.Sprintf("%s.%d.1/24", wgBasePrefix, subnet)
+	defaultV6 := "fe80::1/128"
+	existing := wgWireGuardEndpointAddressKeys(options)
+
+	var primaryV4 string
+	var extras []string
+	for _, addr := range existing {
+		n := strings.TrimSpace(addr)
+		if n == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(n)
+		if err != nil {
+			extras = append(extras, n)
+			continue
+		}
+		if p.Addr().Is4() {
+			o4 := p.Addr().As4()
+			if o4[0] == 10 && o4[1] == 0 && int(o4[2]) == subnet {
+				if primaryV4 == "" {
+					primaryV4 = n
+					continue
+				}
+			}
+			extras = append(extras, n)
+			continue
+		}
+		extras = append(extras, n)
+	}
+	if primaryV4 != "" {
+		if p, err := netip.ParsePrefix(primaryV4); err == nil && p.Addr().Is4() {
+			o := p.Addr().As4()
+			if o[0] == 10 && o[1] == 0 && int(o[2]) == subnet && o[3] == 1 && p.Bits() == 32 {
+				primaryV4 = defaultV4
+			}
+		}
+	}
+	if primaryV4 == "" {
+		primaryV4 = defaultV4
+	}
+
+	out := []string{primaryV4}
+	defV6Key := wgNormalizeAllowedIPKey(defaultV6)
+	hasDefV6 := false
+	for _, x := range extras {
+		if wgNormalizeAllowedIPKey(x) == defV6Key {
+			hasDefV6 = true
+		}
+		out = append(out, x)
+	}
+	if !hasDefV6 {
+		out = append(out, defaultV6)
+	}
+
+	before := wgWireGuardEndpointAddressKeys(options)
+	if slicesEqualString(before, out) {
+		return false
+	}
+	options["address"] = out
+	return true
+}
+
+func wgSubnetFreeForEndpoint(tx *gorm.DB, endpointID uint, subnet int) bool {
+	var endpoints []model.Endpoint
+	if err := tx.Model(model.Endpoint{}).Where("type = ? AND id <> ?", wireGuardType, endpointID).Find(&endpoints).Error; err != nil {
+		return false
+	}
+	for _, ep := range endpoints {
+		var opts map[string]interface{}
+		if len(ep.Options) > 0 {
+			_ = json.Unmarshal(ep.Options, &opts)
+		}
+		if wgExtractSubnetFromAddressList(opts["address"]) == subnet {
+			return false
+		}
+	}
+	return true
+}
+
+func wgAllocateEndpointSubnet(tx *gorm.DB, endpointID uint) (int, error) {
+	used := map[int]struct{}{}
+	var endpoints []model.Endpoint
+	if err := tx.Model(model.Endpoint{}).Where("type = ? AND id <> ?", wireGuardType, endpointID).Find(&endpoints).Error; err != nil {
+		return 0, err
+	}
+	for _, ep := range endpoints {
+		var opts map[string]interface{}
+		if len(ep.Options) > 0 {
+			_ = json.Unmarshal(ep.Options, &opts)
+		}
+		if s := wgExtractSubnetFromAddressList(opts["address"]); s >= 0 {
+			used[s] = struct{}{}
+		}
+	}
+	for i := 0; i <= 254; i++ {
+		if _, ok := used[i]; !ok {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("wireguard subnet pool exhausted")
+}
+
+func wgNormalizeAllowedIPKey(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p.Masked().String()
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		if a.Is4() {
+			return netip.PrefixFrom(a, 32).Masked().String()
+		}
+		return a.String()
+	}
+	return s
+}
+
+func wgNormalizeAllowedIPList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		k := wgNormalizeAllowedIPKey(raw)
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
+}
+
+func wgWireGuardEndpointAddressKeys(options map[string]interface{}) []string {
+	raw, ok := options["address"]
+	if !ok || raw == nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			out = append(out, strings.TrimSpace(fmt.Sprint(x)))
+		}
+		return out
+	case []string:
+		return v
+	default:
+		return nil
+	}
+}
+
+func wgCollectUsedPeerIPs(peers []map[string]interface{}, options map[string]interface{}) map[string]struct{} {
+	used := make(map[string]struct{})
+	for _, p := range peers {
+		for _, ip := range toStringSlice(p["allowed_ips"]) {
+			k := wgNormalizeAllowedIPKey(ip)
+			if k != "" {
+				used[k] = struct{}{}
+			}
+		}
+	}
+	for _, addr := range wgWireGuardEndpointAddressKeys(options) {
+		k := wgNormalizeAllowedIPKey(addr)
+		if k != "" {
+			used[k] = struct{}{}
+		}
+	}
+	return used
+}
+
+func wgPickLowestFreePeerIP(used map[string]struct{}, subnet int) string {
+	if subnet < 0 || subnet > 254 {
+		subnet = 1
+	}
+	for i := 2; i < 255; i++ {
+		candidate := fmt.Sprintf("%s.%d.%d/32", wgBasePrefix, subnet, i)
+		if _, ok := used[wgNormalizeAllowedIPKey(candidate)]; !ok {
+			return candidate
+		}
+	}
+	return "0.0.0.0/0"
+}
+
+func slicesEqualString(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func assignStablePoolCIDR(poolPrefix netip.Prefix, used map[string]struct{}) (string, error) {

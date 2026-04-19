@@ -301,6 +301,10 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			if err != nil {
 				return nil, err
 			}
+			wgPeersChanged, err := (&EndpointService{}).SyncAllWireGuardPeers(tx)
+			if err != nil {
+				return nil, err
+			}
 			if err = PersistL3RouterRouteRules(tx); err != nil {
 				return nil, err
 			}
@@ -316,7 +320,7 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 				}
 				objs = append(objs, "inbounds")
 			}
-			if l3PeersChanged {
+			if l3PeersChanged || wgPeersChanged {
 				needsCoreReload = true
 			}
 			objs = append(objs, "clients", "endpoints", "config", "groups")
