@@ -28,7 +28,12 @@ const routes = [
         path: '/clients',
         name: 'pages.clients',
         component: () => import('@/views/Clients.vue'),
-      },  
+      },
+      {
+        path: '/groups',
+        name: 'pages.groups',
+        component: () => import('@/views/Groups.vue'),
+      },
       {
         path: '/outbounds',
         name: 'pages.outbounds',

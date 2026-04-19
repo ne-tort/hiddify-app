@@ -15,6 +15,7 @@
     :index="dnsRuleModal.index"
     :data="dnsRuleModal.data"
     :clients="clients"
+    :user-groups="userGroups"
     :inTags="inboundTags"
     :serverTags="dnsServerTags"
     :ruleSets="ruleSets"
@@ -249,6 +250,8 @@ const rslvdTags = computed((): string[] => {
 const clients = computed((): string[] => {
   return Data().clients.map((c:any) => c.name)
 })
+
+const userGroups = computed((): any[] => Data().userGroups ?? [])
 
 const stateChange = computed(() => {
   return FindDiff.deepCompare(appConfig.value.dns,oldConfig.value.dns)

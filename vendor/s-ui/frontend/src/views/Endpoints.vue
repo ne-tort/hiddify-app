@@ -34,17 +34,21 @@
           </v-row>
         </v-card-subtitle>
         <v-card-text>
-          <v-row>
+          <v-row v-if="item.type !== 'l3router'">
             <v-col>{{ $t('in.addr') }}</v-col>
             <v-col>
               {{ item.address?.length>0 ? item.address[0] : '-' }}
             </v-col>
           </v-row>
-          <v-row>
+          <v-row v-if="item.type !== 'l3router'">
             <v-col>{{ $t('in.port') }}</v-col>
             <v-col>
               {{ item.listen_port>0 ? item.listen_port : '-' }}
             </v-col>
+          </v-row>
+          <v-row v-if="item.type == 'l3router'">
+            <v-col>{{ $t('l3router.groups') }}</v-col>
+            <v-col>{{ l3EndpointSourcesSummary(item) }}</v-col>
           </v-row>
           <v-row>
             <v-col>{{ $t('types.wg.peers') }}</v-col>
@@ -53,7 +57,13 @@
             </v-col>
           </v-row>
           <v-row v-if="item.type == 'l3router'">
-            <v-col>Overlay</v-col>
+            <v-col>{{ $t('l3router.privateSubnet') }}</v-col>
+            <v-col>
+              {{ (item.private_subnet && String(item.private_subnet).trim()) ? item.private_subnet : '-' }}
+            </v-col>
+          </v-row>
+          <v-row v-if="item.type == 'l3router'">
+            <v-col>{{ $t('l3router.overlayDestination') }}</v-col>
             <v-col>
               {{ item.overlay_destination ?? '-' }}
             </v-col>
@@ -175,6 +185,19 @@ const qrcode = ref({
 const showQrCode = (id: number) => {
   qrcode.value.data = endpoints.value.findLast(o => o.id == id)
   qrcode.value.visible = true
+}
+
+const l3EndpointSourcesSummary = (item: Record<string, unknown>) => {
+  const parts: string[] = []
+  const rawIds = item.member_group_ids
+  if (Array.isArray(rawIds) && rawIds.length > 0) {
+    for (const x of rawIds) {
+      const id = Number(x)
+      const g = Data().userGroups?.find((u: { id: number }) => u.id === id)
+      parts.push(g?.name ?? `#${id}`)
+    }
+  }
+  return parts.length ? parts.join(', ') : '-'
 }
 const closeQrCode = () => {
   qrcode.value.visible = false

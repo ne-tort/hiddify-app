@@ -23,6 +23,7 @@
             <RuleOptions
               :rule="r"
               :clients="clients"
+              :user-groups="userGroups"
               :inTags="inTags"
               :ruleSets="ruleSets" />
           </v-card-text>
@@ -31,6 +32,7 @@
           v-else
           :rule="ruleData.rules[0]"
           :clients="clients"
+          :user-groups="userGroups"
           :inTags="inTags"
           :ruleSets="ruleSets" />
         <v-row>
@@ -157,7 +159,7 @@ import { logicalDnsRule, dnsRule, actionDnsRuleKeys } from '@/types/dns'
 import RuleOptions from '@/components/DnsRule.vue'
 import { i18n } from '@/locales'
 export default {
-  props: ['visible', 'data', 'index', 'clients', 'inTags', 'serverTags', 'ruleSets'],
+  props: ['visible', 'data', 'index', 'clients', 'userGroups', 'inTags', 'serverTags', 'ruleSets'],
   emits: ['close', 'save'],
   data() {
     return {

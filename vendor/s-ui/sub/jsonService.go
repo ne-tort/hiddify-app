@@ -49,6 +49,27 @@ type JsonService struct {
 }
 
 func (j *JsonService) GetJson(subId string, format string) (*string, []string, error) {
+	jsonConfig, client, err := j.assembleJsonMap(subId)
+	if err != nil {
+		return nil, nil, err
+	}
+	return j.marshalJsonResponse(jsonConfig, client)
+}
+
+// GetJsonL3Router returns the same profile as GetJson, but replaces the first tun inbound with
+// L3 overlay settings when the client has an L3RouterPeer row; otherwise identical to GetJson.
+func (j *JsonService) GetJsonL3Router(subId string) (*string, []string, error) {
+	jsonConfig, client, err := j.assembleJsonMap(subId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := patchJsonInboundsForL3Router(&jsonConfig, client); err != nil {
+		return nil, nil, err
+	}
+	return j.marshalJsonResponse(jsonConfig, client)
+}
+
+func (j *JsonService) assembleJsonMap(subId string) (map[string]interface{}, *model.Client, error) {
 	var jsonConfig map[string]interface{}
 
 	client, inDatas, err := j.getData(subId)
@@ -83,10 +104,18 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 
 	jsonConfig["outbounds"] = outbounds
 
-	// Add other objects from settings
-	j.addOthers(&jsonConfig)
+	if err := j.addOthers(&jsonConfig); err != nil {
+		return nil, nil, err
+	}
 
-	result, _ := json.MarshalIndent(jsonConfig, "", "  ")
+	return jsonConfig, client, nil
+}
+
+func (j *JsonService) marshalJsonResponse(jsonConfig map[string]interface{}, client *model.Client) (*string, []string, error) {
+	result, err := json.MarshalIndent(jsonConfig, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
 	resultStr := string(result)
 
 	updateInterval, _ := j.SettingService.GetSubUpdates()

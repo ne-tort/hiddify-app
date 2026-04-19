@@ -1,0 +1,57 @@
+# Stand: s-ui с host network + том Let's Encrypt (персистентный) + периодический renew и HUP панели.
+# Порядок: DNS A на VPS → первичная выдача certbot (порт 80 свободен) → docker compose up -d.
+---
+services:
+  s-ui-local:
+    image: s-ui-local-hiddify
+    container_name: s-ui-local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        core: ../../hiddify-core/hiddify-sing-box
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    hostname: "s-ui-local"
+    network_mode: host
+    environment:
+      SUI_WEB_TLS_CERT: /etc/letsencrypt/live/work.ai-qwerty.ru/fullchain.pem
+      SUI_WEB_TLS_KEY: /etc/letsencrypt/live/work.ai-qwerty.ru/privkey.pem
+    volumes:
+      - "./db:/app/db"
+      - "./cert:/app/cert"
+      - "letsencrypt_data:/etc/letsencrypt:ro"
+    tty: true
+    restart: unless-stopped
+    entrypoint: "./entrypoint.sh"
+
+  # Однократная выдача (не поднимается при up без profile):
+  #   docker compose -f docker-compose.stand.yml --profile cert run --rm --service-ports certbot certonly --standalone \
+  #     -d work.ai-qwerty.ru --email netort@internet.ru --agree-tos --non-interactive
+  certbot:
+    profiles: ["cert"]
+    image: certbot/certbot:latest
+    volumes:
+      - letsencrypt_data:/etc/letsencrypt
+    ports:
+      - "80:80"
+
+  # Раз в 12h: certbot renew; при успешном продлении — сигнал HUP контейнеру панели (перечитать TLS).
+  certbot-renew:
+    image: certbot/certbot:latest
+    container_name: certbot-renew-sui-stand
+    volumes:
+      - letsencrypt_data:/etc/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        while true; do
+          sleep 43200
+          certbot renew -q --deploy-hook 'curl -fsS -X POST --unix-socket /var/run/docker.sock "http://localhost/v1.41/containers/s-ui-local/kill?signal=HUP"' || true
+        done
+    restart: unless-stopped
+
+volumes:
+  letsencrypt_data:

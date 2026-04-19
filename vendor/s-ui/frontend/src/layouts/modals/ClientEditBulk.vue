@@ -64,7 +64,7 @@
           </v-card>
 
           <!-- Section two: Clients (like init users in Inbound modal) -->
-          <Users :clients="clients" :data="selectedClients" />
+          <Users :clients="clients" :user-groups="userGroups" :data="selectedClients" />
         </v-container>
       </v-card-text>
       <v-card-actions>
@@ -93,7 +93,8 @@
 <script lang="ts">
 import Users from '@/components/Users.vue'
 import { i18n } from '@/locales'
-import Data from '@/store/modules/data';
+import Data from '@/store/modules/data'
+import { descendantGroupIds as dagDescendants } from '@/utils/groupGraph';
 import { Client } from '@/types/clients';
 
 export default {
@@ -134,9 +135,10 @@ export default {
       switch (this.selectedClients.model) {
         case 'all':
           return clients
-        case 'group':
-          return clients
-            .filter((c: any) => this.selectedClients.values.includes(c.group))
+        case 'group': {
+          const targetIds = this.resolveClientIdsFromGroups(this.selectedClients.values)
+          return clients.filter((c: any) => targetIds.includes(c.id))
+        }
         case 'client':
           return clients.filter((c: any) => this.selectedClients.values.includes(c.id))
         default:
@@ -181,6 +183,26 @@ export default {
       const success = await Data().save("clients", 'editbulk', targetClients)
       if (success) this.closeModal()
       this.loading = false
+    },
+    descendantGroupIds(rootId: number): number[] {
+      return dagDescendants(rootId, this.userGroups ?? [])
+    },
+    resolveClientIdsFromGroups(groupIds: number[]): number[] {
+      const groupMap = new Map<number, any>()
+      this.userGroups.forEach((g:any) => groupMap.set(g.id, g))
+      const out = new Set<number>()
+      ;(groupIds ?? []).forEach((gid:number) => {
+        this.descendantGroupIds(gid).forEach((id) => {
+          const g = groupMap.get(id)
+          ;(g?.member_client_ids ?? []).forEach((cid:number) => out.add(cid))
+        })
+      })
+      return Array.from(out)
+    },
+  },
+  computed: {
+    userGroups() {
+      return Data().userGroups ?? []
     },
   },
   watch: {

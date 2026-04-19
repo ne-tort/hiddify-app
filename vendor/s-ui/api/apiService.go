@@ -17,6 +17,7 @@ type ApiService struct {
 	service.SettingService
 	service.UserService
 	service.ConfigService
+	service.GroupService
 	service.ClientService
 	service.TlsService
 	service.InboundService
@@ -104,6 +105,11 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 		data["subURI"] = subURI
 		data["enableTraffic"] = trafficAge > 0
 		data["onlines"] = onlines
+		userGroups, err := a.GroupService.GetAllGroups(database.GetDB())
+		if err != nil {
+			return "", err
+		}
+		data["userGroups"] = userGroups
 	} else {
 		data["onlines"] = onlines
 	}
@@ -165,6 +171,12 @@ func (a *ApiService) LoadPartialData(c *gin.Context, objs []string) error {
 				return err
 			}
 			data[obj] = settings
+		case "groups":
+			groups, err := a.GroupService.GetAllGroups(database.GetDB())
+			if err != nil {
+				return err
+			}
+			data[obj] = groups
 		}
 	}
 
@@ -238,6 +250,20 @@ func (a *ApiService) GetKeypairs(c *gin.Context) {
 	jsonObj(c, keypair, nil)
 }
 
+func (a *ApiService) GetNextL3PrivateSubnet(c *gin.Context) {
+	excludeStr := c.DefaultQuery("excludeId", "0")
+	var excludeID uint
+	if n, err := strconv.ParseUint(excludeStr, 10, 32); err == nil {
+		excludeID = uint(n)
+	}
+	s, err := service.SuggestNextL3PrivateSubnet(database.GetDB(), excludeID)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, s, nil)
+}
+
 func (a *ApiService) GetDb(c *gin.Context) {
 	exclude := c.Query("exclude")
 	db, err := database.GetDb(exclude)
@@ -303,7 +329,8 @@ func (a *ApiService) Save(c *gin.Context, loginUser string) {
 	act := c.Request.FormValue("action")
 	data := c.Request.FormValue("data")
 	initUsers := c.Request.FormValue("initUsers")
-	objs, err := a.ConfigService.Save(obj, act, json.RawMessage(data), initUsers, loginUser, hostname)
+	inboundInit := c.Request.FormValue("inboundInit")
+	objs, err := a.ConfigService.Save(obj, act, json.RawMessage(data), initUsers, inboundInit, loginUser, hostname)
 	if err != nil {
 		jsonMsg(c, "save", err)
 		return

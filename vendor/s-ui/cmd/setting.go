@@ -171,12 +171,8 @@ func getPanelURI() {
 	BasePath, _ := settingService.GetWebPath()
 	Listen, _ := settingService.GetListen()
 	Domain, _ := settingService.GetWebDomain()
-	KeyFile, _ := settingService.GetKeyFile()
-	CertFile, _ := settingService.GetCertFile()
-	TLS := false
-	if KeyFile != "" && CertFile != "" {
-		TLS = true
-	}
+	certFile, keyFile := settingService.EffectiveWebTLS()
+	TLS := certFile != "" && keyFile != ""
 	Proto := ""
 	if TLS {
 		Proto = "https://"

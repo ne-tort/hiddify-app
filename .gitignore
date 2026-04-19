@@ -92,3 +92,32 @@ windows/sign.cer
 /l3_after.json
 /runtime_configs_vps.json
 /runtime_proxy_metrics.json
+
+# s-ui stand deploy secrets
+vendor/s-ui/run.env
+vendor/s-ui/deploy/deploy.env
+
+# Тяжёлые артефакты в корне репозитория (docker save, ручные zip-деплои, дампы)
+/*.zip
+/*.tar
+/*.tar.gz
+/*.tgz
+hiddify-*-deploy.zip
+
+# Локальные дампы и профилирование
+*.hprof
+*.prof
+*.pprof
+cpu*.prof
+mem*.prof
+# только dump ядра в корне репозитория (не трогать каталоги/пакеты core)
+/core
+
+# Кэши/артефакты инструментов (корень и общие)
+.turbo/
+.parcel-cache/
+.eslintcache
+*.tsbuildinfo
+
+# Временные медиа/дампы отладки (не путать с кодом)
+*-dump.jsonl

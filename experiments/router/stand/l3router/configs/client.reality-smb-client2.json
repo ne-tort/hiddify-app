@@ -1,124 +1,203 @@
 {
   "log": {
-    "level": "info"
+    "level": "debug"
   },
   "dns": {
     "servers": [
       {
+        "type": "hosts",
+        "tag": "dns-static"
+      },
+      {
+        "type": "udp",
+        "tag": "dns-remote",
+        "detour": "select",
+        "connect_timeout": "5s",
+        "disable_tcp_keep_alive": true,
+        "server": "8.8.8.8"
+      },
+      {
+        "type": "https",
+        "tag": "dns-remote-fallback",
+        "detour": "select",
+        "server": "8.8.8.8",
+        "tls": {
+          "enabled": true
+        }
+      },
+      {
+        "type": "https",
+        "tag": "dns-trick-direct",
+        "detour": "direct-fragment §hide§",
+        "domain_resolver": {
+          "server": "dns-direct",
+          "strategy": "prefer_ipv4"
+        },
+        "server": "dns.cloudflare.com",
+        "tls": {
+          "enabled": true,
+          "fragment": true,
+          "fragment_fallback_delay": "300ms",
+          "record_fragment": true
+        }
+      },
+      {
+        "type": "udp",
+        "tag": "dns-direct",
+        "connect_timeout": "5s",
+        "disable_tcp_keep_alive": true,
+        "server": "1.1.1.1"
+      },
+      {
         "type": "local",
-        "tag": "dns-local"
+        "tag": "dns-local",
+        "prefer_go": true
+      },
+      {
+        "type": "udp",
+        "tag": "dns-remote-no-warp",
+        "detour": "direct-fragment §hide§",
+        "connect_timeout": "5s",
+        "disable_tcp_keep_alive": true,
+        "server": "8.8.8.8"
+      },
+      {
+        "type": "fakeip",
+        "tag": "dns-fake",
+        "inet4_range": "198.18.0.0/15",
+        "inet6_range": "fc00::/18"
       }
     ],
-    "final": "dns-local"
+    "rules": [
+      {
+        "domain": "api.cloudflareclient.com",
+        "server": "dns-remote-no-warp",
+        "strategy": "ipv4_only",
+        "rewrite_ttl": 86400
+      },
+      {
+        "domain": [
+          "api.cloudflareclient.com",
+          "captive.apple.com",
+          "cp.cloudflare.com",
+          "google.com"
+        ],
+        "server": "dns-direct",
+        "strategy": "ipv4_only",
+        "rewrite_ttl": 86400
+      },
+      {
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "server": "dns-fake",
+        "strategy": "ipv4_only",
+        "disable_cache": true,
+        "rewrite_ttl": 86400
+      },
+      {
+        "server": "dns-remote",
+        "strategy": "ipv4_only",
+        "rewrite_ttl": 86400
+      }
+    ],
+    "final": "dns-remote",
+    "disable_expire": true,
+    "independent_cache": true
   },
   "inbounds": [
     {
       "type": "tun",
       "tag": "tun-in",
       "mtu": 9000,
+      "address": [
+        "10.0.0.2/32",
+        "fdfe:dcba:9876::2/126"
+      ],
       "auto_route": true,
       "strict_route": true,
-      "inet4_address": "10.0.0.4/24",
-      "inet4_route_address": ["10.0.0.0/24"],
-      "l3_overlay_outbound": "to-tuic",
+      "stack": "gvisor",
+      "l3_overlay_outbound": "1.vless-32950",
       "l3_overlay_destination": "198.18.0.1:33333",
-      "l3_overlay_route_address": ["10.0.0.0/24"],
-      "stack": "gvisor"
+      "l3_overlay_route_address": [
+        "10.0.0.0/24"
+      ]
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in::",
+      "listen": "::",
+      "listen_port": 12334
+    },
+    {
+      "type": "direct",
+      "tag": "dns-in::",
+      "listen": "::",
+      "listen_port": 12337
     }
   ],
   "outbounds": [
     {
       "type": "selector",
       "tag": "select",
-      "outbounds": ["to-hub", "to-hy2", "to-tuic", "to-mieru", "to-trojan"],
-      "default": "to-trojan",
+      "outbounds": [
+        "1.vless-32950"
+      ],
+      "default": "1.vless-32950",
       "interrupt_exist_connections": true
     },
     {
       "type": "vless",
-      "tag": "to-hub",
-      "server": "31.56.211.60",
-      "server_port": 9440,
-      "uuid": "a3a3a3a3-a3a3-a3a3-a3a3-a3a3a3a3a303",
+      "tag": "1.vless-32950",
+      "server": "work.ai-qwerty.ru",
+      "server_port": 443,
+      "uuid": "d47d0f58-67a8-40f9-9faa-0aec3e53a7e6",
       "flow": "xtls-rprx-vision",
       "tls": {
         "enabled": true,
-        "server_name": "www.heise.de",
         "utls": {
           "enabled": true,
-          "fingerprint": "chrome"
-        },
-        "reality": {
-          "enabled": true,
-          "public_key": "6UthLd4-BuUwP01B6dLpF7qxTpXrx-oLkI5RDOt8hHg",
-          "short_id": "a1b2c3d4"
+          "fingerprint": "firefox"
         }
       }
     },
     {
-      "type": "hysteria2",
-      "tag": "to-hy2",
-      "server": "31.56.211.60",
-      "server_port": 9441,
-      "password": "hy2-client3-pass-2026",
-      "tls": {
-        "enabled": true,
-        "insecure": true
-      }
-    },
-    {
-      "type": "tuic",
-      "tag": "to-tuic",
-      "server": "31.56.211.60",
-      "server_port": 9442,
-      "uuid": "b3a3a3a3-a3a3-a3a3-a3a3-a3a3a3a3a303",
-      "password": "tuic-client3-pass-2026",
-      "udp_over_stream": true,
-      "zero_rtt_handshake": false,
-      "tls": {
-        "enabled": true,
-        "insecure": true
-      }
-    },
-    {
-      "type": "mieru",
-      "tag": "to-mieru",
-      "server": "31.56.211.60",
-      "server_port": 9443,
-      "transport": "TCP",
-      "username": "client3",
-      "password": "mieru-client3-pass-2026",
-      "multiplexing": "MULTIPLEXING_LOW"
-    },
-    {
-      "type": "trojan",
-      "tag": "to-trojan",
-      "server": "31.56.211.60",
-      "server_port": 9444,
-      "password": "trojan-client3-pass-2026",
-      "tls": {
-        "enabled": true,
-        "insecure": true
-      }
+      "type": "direct",
+      "tag": "direct §hide§"
     },
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct-fragment §hide§",
+      "tls_fragment": {
+        "enabled": true,
+        "size": "10-30",
+        "sleep": "2-8"
+      }
     }
   ],
   "route": {
     "rules": [
       {
-        "protocol": ["dns"],
-        "outbound": "direct"
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "ip_cidr": [
+          "10.10.34.0/24",
+          "2001:4188:2:600:10:10:34:0/120"
+        ],
+        "outbound": "select"
       }
     ],
     "final": "select",
-    "auto_detect_interface": true
-  },
-  "experimental": {
-    "cache_file": {
-      "enabled": false
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "dns-direct",
+      "strategy": "ipv4_only"
     }
   }
 }

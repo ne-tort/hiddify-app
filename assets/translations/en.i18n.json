@@ -291,6 +291,7 @@
         },
         "blockAds": "Block advertisements",
         "bypassLan": "Bypass LAN",
+        "clientToClient": "Client-to-client communication",
         "resolveDestination": "Resolve destination",
         "ipv6Route": "IPv6 route",
         "ipv6Modes": {

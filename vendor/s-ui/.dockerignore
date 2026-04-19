@@ -20,6 +20,7 @@ frontend/.vite
 # Log files
 *.log*
 .cache
+.docker-cache
 
 # Editor directories and files
 .idea

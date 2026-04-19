@@ -213,6 +213,17 @@ const Map<String, Map<String, dynamic>> protocolSchemaValues = {
     "client_version": "SSH-2.0-OpenSSH_7.4p1",
   },
 };
+const Map<String, Map<String, dynamic>> inboundSchemaValues = {
+  "tun": {
+    "type": "tun",
+    "tag": "tun-in",
+    "mtu": 9000,
+    "address": ["10.0.0.4/24"],
+    "auto_route": true,
+    "strict_route": true,
+    "stack": "gvisor",
+  },
+};
 const Map<String, Map<String, Map<String, dynamic>>> exampleSchemaValues = {
   "config.outbounds.transport": {
     "browser user-agent": {
@@ -949,6 +960,11 @@ class _HolderState extends State<_Holder> {
       }
 
       setState(() {});
+    } else if (selectedItem.startsWith("inbound___")) {
+      final key = selectedItem.split("___")[1];
+      final jsonItem = inboundSchemaValues[key]!;
+      widget.data.add(jsonDecode(jsonEncode(jsonItem)));
+      setState(() {});
     } else if (protocolSchemaValues.containsKey(selectedItem)) {
       final jsonItem = protocolSchemaValues[selectedItem]!;
       widget.data.add(jsonDecode(jsonEncode(jsonItem)));
@@ -1452,6 +1468,24 @@ class _Options<T> extends StatelessWidget {
               },
               const PopupMenuDivider(height: 1),
             ],
+            if (keyPath == "config.inbounds" && T == List) ...[
+              for (final String key in inboundSchemaValues.keys) ...{
+                PopupMenuItem<_OptionItems>(
+                  height: _popupMenuHeight,
+                  padding: const EdgeInsets.only(left: _popupMenuItemPadding),
+                  value: "inbound___$key",
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.data_object),
+                      const SizedBox(width: 10),
+                      Text(key, style: const TextStyle(fontSize: 14)),
+                    ],
+                  ),
+                ),
+              },
+              const PopupMenuDivider(height: 1),
+            ],
             if (T == Map) ...[
               for (final String key in exampleSchemaValues.keys) ...{
                 if (keyPath == key)
@@ -1474,7 +1508,10 @@ class _Options<T> extends StatelessWidget {
               },
             ],
             if (keyPath != "config" &&
-                !(T == List && (keyPath == "config.outbounds" || keyPath == "config.endpoints"))) ...[
+                !(T == List &&
+                    (keyPath == "config.outbounds" ||
+                        keyPath == "config.endpoints" ||
+                        keyPath == "config.inbounds"))) ...[
               const PopupMenuItem<_OptionItems>(
                 height: _popupMenuHeight,
                 padding: EdgeInsets.only(left: _popupMenuItemPadding),
@@ -1543,7 +1580,9 @@ class _Options<T> extends StatelessWidget {
             ],
           ],
           const PopupMenuDivider(height: 1),
-          if (keyPath != "config" && !(T == List && (keyPath == "config.outbounds" || keyPath == "config.endpoints")))
+          if (keyPath != "config" &&
+              !(T == List &&
+                  (keyPath == "config.outbounds" || keyPath == "config.endpoints" || keyPath == "config.inbounds")))
             const PopupMenuItem<_OptionItems>(
               height: _popupMenuHeight,
               padding: EdgeInsets.only(left: 5),

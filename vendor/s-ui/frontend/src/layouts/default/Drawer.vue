@@ -52,6 +52,7 @@ const menu = [
   { title: 'pages.home', icon: 'mdi-home',  path: '/' },
   { title: 'pages.inbounds', icon: 'mdi-cloud-download',  path: '/inbounds' },
   { title: 'pages.clients', icon: 'mdi-account-multiple',  path: '/clients' },
+  { title: 'pages.groups', icon: 'mdi-folder-account',  path: '/groups' },
   { title: 'pages.outbounds', icon: 'mdi-cloud-upload',  path: '/outbounds' },
   { title: 'pages.endpoints', icon: 'mdi-cloud-tags',  path: '/endpoints' },
   { title: 'pages.services', icon: 'mdi-server',  path: '/services' },

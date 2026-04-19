@@ -71,7 +71,7 @@ func (a *APIHandler) getHandler(c *gin.Context) {
 		a.ApiService.Logout(c)
 	case "load":
 		a.ApiService.LoadData(c)
-	case "inbounds", "outbounds", "endpoints", "services", "tls", "clients", "config":
+	case "inbounds", "outbounds", "endpoints", "services", "tls", "clients", "config", "groups":
 		err := a.ApiService.LoadPartialData(c, []string{action})
 		if err != nil {
 			jsonMsg(c, action, err)
@@ -101,6 +101,8 @@ func (a *APIHandler) getHandler(c *gin.Context) {
 		a.ApiService.GetSingboxConfig(c)
 	case "checkOutbound":
 		a.ApiService.GetCheckOutbound(c)
+	case "nextL3PrivateSubnet":
+		a.ApiService.GetNextL3PrivateSubnet(c)
 	default:
 		jsonMsg(c, "failed", common.NewError("unknown action: ", action))
 	}

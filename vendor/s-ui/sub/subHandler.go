@@ -34,6 +34,8 @@ func (s *SubHandler) subs(c *gin.Context) {
 		switch format {
 		case "json":
 			result, headers, err = s.JsonService.GetJson(subId, format)
+		case "json-l3router":
+			result, headers, err = s.JsonService.GetJsonL3Router(subId)
 		case "clash":
 			result, headers, err = s.ClashService.GetClash(subId)
 		}

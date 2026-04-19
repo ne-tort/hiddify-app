@@ -60,6 +60,9 @@ export interface Tailscale extends EndpointBasics, Dial {
 }
 
 export interface L3RouterPeer {
+  client_id?: number
+  client_name?: string
+  group_id?: number
   peer_id: number
   user: string
   allowed_ips: string[]
@@ -69,6 +72,10 @@ export interface L3RouterPeer {
 
 export interface L3Router extends EndpointBasics {
   peers: L3RouterPeer[]
+  member_group_ids?: number[]
+  member_client_ids?: number[]
+  /** IPv4 pool (RFC1918 / 100.64) for auto /32 per peer; empty = legacy 10.250.x.y/32 from peer_id */
+  private_subnet?: string
   overlay_destination?: string
   packet_filter?: boolean
   fragment_policy?: string
@@ -93,7 +100,7 @@ const defaultValues: Record<EpType, Endpoint> = {
   wireguard: { type: EpTypes.Wireguard, address: ['10.0.0.2/32','fe80::2/128'], private_key: '', listen_port: 0 },
   warp: { type: EpTypes.Warp, address: [], private_key: '', listen_port: 0, mtu: 1420, peers: [{ address: '', port: 0, public_key: ''}] },
   tailscale: { type: EpTypes.Tailscale, domain_resolver: 'local' },
-  l3router: { type: EpTypes.L3Router, peers: [], overlay_destination: '198.18.0.1:33333', packet_filter: false },
+  l3router: { type: EpTypes.L3Router, peers: [], private_subnet: '', overlay_destination: '198.18.0.1:33333', packet_filter: false },
 }
 
 export function createEndpoint<T extends Endpoint>(type: string,json?: Partial<T>): Endpoint {

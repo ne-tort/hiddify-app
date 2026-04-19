@@ -18,13 +18,14 @@ export interface Client {
   up: number
   down: number
   desc: string
-  group: string
   delayStart?: boolean
   autoReset?: boolean
   resetDays?: number
   nextReset?: number
   totalUp?: number
   totalDown?: number
+  /** Direct group memberships (API; persisted in client_group_members). */
+  group_ids?: number[]
 }
 
 const defaultClient: Client = {
@@ -38,13 +39,13 @@ const defaultClient: Client = {
   up: 0,
   down: 0,
   desc: "",
-  group: "",
   delayStart: false,
   autoReset: false,
   resetDays: 0,
   nextReset: 0,
   totalUp: 0,
   totalDown: 0,
+  group_ids: [],
 }
 
 type Config = {

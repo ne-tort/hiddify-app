@@ -148,14 +148,7 @@ func (s *Server) Start() (err error) {
 		return err
 	}
 
-	certFile, err := s.settingService.GetCertFile()
-	if err != nil {
-		return err
-	}
-	keyFile, err := s.settingService.GetKeyFile()
-	if err != nil {
-		return err
-	}
+	certFile, keyFile := s.settingService.EffectiveWebTLS()
 	listen, err := s.settingService.GetListen()
 	if err != nil {
 		return err
@@ -164,12 +157,13 @@ func (s *Server) Start() (err error) {
 	if err != nil {
 		return err
 	}
+	port = config.EffectiveWebPort(port)
 	listenAddr := net.JoinHostPort(listen, strconv.Itoa(port))
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return err
 	}
-	if certFile != "" || keyFile != "" {
+	if certFile != "" && keyFile != "" {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			listener.Close()
@@ -182,7 +176,7 @@ func (s *Server) Start() (err error) {
 		listener = tls.NewListener(listener, c)
 	}
 
-	if certFile != "" || keyFile != "" {
+	if certFile != "" && keyFile != "" {
 		logger.Info("web server run https on", listener.Addr())
 	} else {
 		logger.Info("web server run http on", listener.Addr())

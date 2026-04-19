@@ -81,6 +81,11 @@ func InitDB(dbPath string) error {
 		return err
 	}
 
+	// Legacy parent_id → group_group_members + rebuild user_groups (before AutoMigrate).
+	if err = MigrateUserGroupParentToEdges(db); err != nil {
+		return err
+	}
+
 	// Default Outbounds
 	if !db.Migrator().HasTable(&model.Outbound{}) {
 		db.Migrator().CreateTable(&model.Outbound{})
@@ -97,13 +102,32 @@ func InitDB(dbPath string) error {
 		&model.Outbound{},
 		&model.Service{},
 		&model.Endpoint{},
+		&model.L3RouterPeer{},
 		&model.User{},
 		&model.Tokens{},
 		&model.Stats{},
 		&model.Client{},
 		&model.Changes{},
+		&model.UserGroup{},
+		&model.ClientGroupMember{},
+		&model.GroupGroupMember{},
+		&model.InboundUserPolicy{},
+		&model.InboundPolicyGroup{},
+		&model.InboundPolicyClient{},
 	)
 	if err != nil {
+		return err
+	}
+	if err = MigrateL3RouterPeersFromEndpointOptions(db); err != nil {
+		return err
+	}
+	if err = MigrateL3RouterPeerSerial(db); err != nil {
+		return err
+	}
+	if err = MigrateLegacyInboundPolicies(db); err != nil {
+		return err
+	}
+	if err = MigrateInboundPolicyModeAliases(db); err != nil {
 		return err
 	}
 	err = initUser()

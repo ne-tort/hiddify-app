@@ -19,6 +19,7 @@ const Data = defineStore('Data', {
     endpoints: <any[]>[],
     clients: <any>[],
     tlsConfigs: <any[]>[],
+    userGroups: <any[]>[],
   }),
   actions: {
     async loadData() {
@@ -49,6 +50,8 @@ const Data = defineStore('Data', {
       if (Object.hasOwn(data, 'services')) this.services = data.services ?? []
       if (Object.hasOwn(data, 'endpoints')) this.endpoints = data.endpoints ?? []
       if (Object.hasOwn(data, 'tls')) this.tlsConfigs = data.tls ?? []
+      if (Object.hasOwn(data, 'userGroups')) this.userGroups = data.userGroups ?? []
+      if (Object.hasOwn(data, 'groups')) this.userGroups = data.groups ?? []
     },
     async loadInbounds(ids: number[]): Promise<Inbound[]> {
       const options = ids.length > 0 ? {id: ids.join(",")} : {}
@@ -66,16 +69,23 @@ const Data = defineStore('Data', {
       }
       return <Client>{}
     },
-    async save (object: string, action: string, data: any, initUsers?: number[]): Promise<boolean> {
-      let postData = {
+    async save (object: string, action: string, data: any, initUsers?: number[], inboundInit?: Record<string, unknown>): Promise<boolean> {
+      let postData: Record<string, string | undefined> = {
         object: object,
         action: action,
         data: JSON.stringify(data, null, 2),
         initUsers: initUsers?.join(',') ?? undefined
       }
+      if (object === 'inbounds' && inboundInit !== undefined) {
+        postData.inboundInit = JSON.stringify(inboundInit)
+      }
       const msg = await HttpUtils.post('api/save', postData)
       if (msg.success) {
-        const objectName = ['tls', 'config'].includes(object) ? object : object.substring(0, object.length - 1)
+        let objectName: string
+        if (object === 'groups') objectName = 'group'
+        else if (object === 'tls' || object === 'config') objectName = object
+        else if (object === 'l3router_peer') objectName = 'l3router_peer'
+        else objectName = object.substring(0, object.length - 1)
         push.success({
           title: i18n.global.t('success'),
           duration: 5000,

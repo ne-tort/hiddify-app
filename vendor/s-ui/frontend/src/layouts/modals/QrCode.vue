@@ -29,6 +29,12 @@
           <v-window-item value="sub">
             <v-row>
               <v-col style="text-align: center;">
+                <v-chip>{{ $t('setting.jsonSubL3') }}</v-chip><br />
+                <QrcodeVue :value="clientSub + '?format=json-l3router'" :size="size" @click="copyToClipboard(clientSub + '?format=json-l3router')" :margin="1" style="border-radius: 1rem; cursor: copy;" />
+              </v-col>
+            </v-row>
+            <v-row>
+              <v-col style="text-align: center;">
                 <v-chip>{{ $t('setting.sub') }}</v-chip><br />
                 <QrcodeVue :value="clientSub" :size="size" @click="copyToClipboard(clientSub)" :margin="1" style="border-radius: 1rem; cursor: copy;" />
               </v-col>

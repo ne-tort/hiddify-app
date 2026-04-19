@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:developer';
 
 import 'package:hiddify/core/localization/translations.dart';
 import 'package:hiddify/core/model/failures.dart';
@@ -47,7 +46,7 @@ class ProfileDetailsNotifier extends _$ProfileDetailsNotifier with AppLogger {
         for (final outbound in jsonObject['outbounds'] as List<dynamic>) {
           if (outbound is Map<String, dynamic> &&
               outbound['type'] != null &&
-              !['selector', 'urltest', 'dns', 'block'].contains(outbound['type']) &&
+              !['selector', 'urltest', 'dns', 'block', 'balancer'].contains(outbound['type']) &&
               !['direct', 'bypass', 'direct-fragment'].contains(outbound['tag'])) {
             outbounds.add(outbound);
           }
@@ -56,7 +55,9 @@ class ProfileDetailsNotifier extends _$ProfileDetailsNotifier with AppLogger {
         // print('No outbounds found in the config');
       }
       final endpoints = jsonObject['endpoints'] as List? ?? [];
-      profContent = '{"outbounds": ${json.encode(outbounds)},"endpoints":${json.encode(endpoints)} }';
+      final inbounds = jsonObject['inbounds'] as List? ?? [];
+      profContent =
+          '{"outbounds": ${json.encode(outbounds)},"endpoints":${json.encode(endpoints)},"inbounds":${json.encode(inbounds)} }';
       loggy.info(profContent);
     } catch (e, st) {
       loggy.error('Error parsing profile-content JSON', e, st);

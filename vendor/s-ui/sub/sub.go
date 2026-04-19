@@ -79,14 +79,7 @@ func (s *Server) Start() (err error) {
 		return err
 	}
 
-	certFile, err := s.SettingService.GetSubCertFile()
-	if err != nil {
-		return err
-	}
-	keyFile, err := s.SettingService.GetSubKeyFile()
-	if err != nil {
-		return err
-	}
+	certFile, keyFile := s.SettingService.EffectiveSubTLS()
 	listen, err := s.SettingService.GetSubListen()
 	if err != nil {
 		return err
@@ -95,6 +88,7 @@ func (s *Server) Start() (err error) {
 	if err != nil {
 		return err
 	}
+	port = config.EffectiveSubPort(port)
 
 	listenAddr := net.JoinHostPort(listen, strconv.Itoa(port))
 	listener, err := net.Listen("tcp", listenAddr)
@@ -102,7 +96,7 @@ func (s *Server) Start() (err error) {
 		return err
 	}
 
-	if certFile != "" || keyFile != "" {
+	if certFile != "" && keyFile != "" {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			listener.Close()
@@ -115,7 +109,7 @@ func (s *Server) Start() (err error) {
 		listener = tls.NewListener(listener, c)
 	}
 
-	if certFile != "" || keyFile != "" {
+	if certFile != "" && keyFile != "" {
 		logger.Info("Sub server run https on", listener.Addr())
 	} else {
 		logger.Info("Sub server run http on", listener.Addr())

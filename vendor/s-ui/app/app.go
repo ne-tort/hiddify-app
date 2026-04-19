@@ -38,6 +38,9 @@ func (a *APP) Init() error {
 	if err != nil {
 		return err
 	}
+	if err := (&service.GroupService{}).RunDataMigrations(database.GetDB()); err != nil {
+		return err
+	}
 
 	// Init Setting
 	a.SettingService.GetAllSetting()

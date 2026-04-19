@@ -43,6 +43,7 @@ class SingboxConfigOption with _$SingboxConfigOption {
     // required bool enableTunService,
     required bool setSystemProxy,
     required bool bypassLan,
+    required bool clientToClient,
     required bool allowConnectionFromLan,
     required bool enableFakeDns,
     // required bool enableDnsRouting,

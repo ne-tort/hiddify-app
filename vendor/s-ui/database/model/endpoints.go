@@ -70,6 +70,34 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 		if err := json.Unmarshal(o.Options, &restFields); err != nil {
 			return nil, err
 		}
+		// s-ui-only keys (группы/клиенты для панели); sing-box endpoint l3router их не знает — иначе Unmarshal config err.
+		if o.Type == "l3router" {
+			for _, k := range []string{
+				"member_group_ids",
+				"member_client_ids",
+				"bound_group_id",
+				"bound_group_name",
+				"private_subnet",
+				"peer_ip_alloc",
+			} {
+				delete(restFields, k)
+			}
+			// Пиры в БД содержат client_id / client_name / group_id для UI; sing-box знает только peer_id, user, allowed_ips, filters.
+			if rawPeers, ok := restFields["peers"]; ok {
+				var peers []map[string]interface{}
+				if err := json.Unmarshal(rawPeers, &peers); err == nil {
+					strip := []string{"client_id", "client_name", "group_id"}
+					for _, p := range peers {
+						for _, k := range strip {
+							delete(p, k)
+						}
+					}
+					if b, err := json.Marshal(peers); err == nil {
+						restFields["peers"] = b
+					}
+				}
+			}
+		}
 
 		for k, v := range restFields {
 			combined[k] = v

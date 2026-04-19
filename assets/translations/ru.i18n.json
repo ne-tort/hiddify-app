@@ -294,6 +294,7 @@
         },
         "blockAds": "Блокировать рекламу",
         "bypassLan": "Обход LAN",
+        "clientToClient": "Общение между клиентами",
         "resolveDestination": "Определять адрес назначения",
         "ipv6Route": "Маршрут IPv6",
         "ipv6Modes": {

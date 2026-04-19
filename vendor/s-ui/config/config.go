@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -65,4 +66,28 @@ func GetDBFolderPath() string {
 
 func GetDBPath() string {
 	return fmt.Sprintf("%s/%s.db", GetDBFolderPath(), GetName())
+}
+
+// EffectiveWebPort returns SUI_WEB_PORT from the environment when set to a valid TCP port,
+// otherwise dbPort (from settings).
+func EffectiveWebPort(dbPort int) int {
+	return effectivePortFromEnv("SUI_WEB_PORT", dbPort)
+}
+
+// EffectiveSubPort returns SUI_SUB_PORT from the environment when set to a valid TCP port,
+// otherwise dbPort (from settings).
+func EffectiveSubPort(dbPort int) int {
+	return effectivePortFromEnv("SUI_SUB_PORT", dbPort)
+}
+
+func effectivePortFromEnv(key string, dbPort int) int {
+	s := strings.TrimSpace(os.Getenv(key))
+	if s == "" {
+		return dbPort
+	}
+	p, err := strconv.Atoi(s)
+	if err != nil || p <= 0 || p > 65535 {
+		return dbPort
+	}
+	return p
 }

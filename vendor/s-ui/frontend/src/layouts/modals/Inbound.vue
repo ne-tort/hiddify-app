@@ -51,7 +51,7 @@
               <AnyTls v-if="inbound.type == inTypes.AnyTls" :data="inbound" direction="in" />
               <TProxy v-if="inbound.type == inTypes.TProxy" :inbound="inbound" />
               <Transport v-if="Object.hasOwn(inbound,'transport')" :data="inbound" />
-              <Users v-if="hasUser" :clients="clients" :data="initUsers" />
+              <Users v-if="hasUser" :clients="clients" :user-groups="userGroups" :data="initUsers" />
               <InTls v-if="HasTls.includes(inbound.type)"  :inbound="inbound" :tlsConfigs="tlsConfigs" :tls_id="inbound.tls_id" />
               <Multiplex v-if="MuxAvailable.includes(inbound.type)" direction="in" :data="inbound" />
             </v-window-item>
@@ -119,6 +119,7 @@ import Transport from '@/components/Transport.vue'
 import AddrVue from '@/components/Addr.vue'
 import OutJsonVue from '@/components/OutJson.vue'
 import Data from '@/store/modules/data'
+import { descendantGroupIds as dagDescendants } from '@/utils/groupGraph'
 export default {
   props: ['visible', 'id', 'inTags', 'tlsConfigs'],
   emits: ['close'],
@@ -177,12 +178,31 @@ export default {
       if (this.HasInData.includes(this.inbound.type) && this.inbound.out_json == null) {
         this.inbound.out_json = {}
       }
+      this.applyInboundInitFromServer()
       this.loading = false
+    },
+    applyInboundInitFromServer() {
+      const ini = (this.inbound as any).inbound_init
+      if (!ini || !ini.mode) {
+        this.initUsers = { model: 'none', values: [] }
+        return
+      }
+      let model = ini.mode as string
+      if (model === 'groups') model = 'group'
+      if (model === 'clients') model = 'client'
+      const values: any[] = []
+      if (model === 'group') {
+        (ini.group_ids ?? []).forEach((x: number) => values.push(x))
+      }
+      if (model === 'client') {
+        (ini.client_ids ?? []).forEach((x: number) => values.push(x))
+      }
+      this.initUsers = { model, values }
     },
     updateData(id: number) {
       if (id > 0) {
-        this.loadData(id)
         this.title = "edit"
+        this.loadData(id)
       }
       else {
         const port = RandomUtil.randomIntRange(10000, 60000)
@@ -196,12 +216,12 @@ export default {
         }
         this.title = "add"
         this.loading = false
+        this.initUsers = {
+          model: 'none',
+          values: [],
+        }
       }
       this.side = "s"
-      this.initUsers = {
-        model: 'none',
-        values: [],
-      }
     },
     changeType() {
       if (!this.inbound.listen_port) this.inbound.listen_port = RandomUtil.randomIntRange(10000, 60000)
@@ -234,22 +254,49 @@ export default {
 
       // save data
       this.loading = true
-      let clientIds = []
+      let clientIds: number[] = []
+      let inboundInit: Record<string, unknown> | undefined
       if (this.hasUser) {
+        const m = this.initUsers.model as string
+        const mode =
+          m === 'group' ? 'groups' :
+          m === 'client' ? 'clients' :
+          m
+        inboundInit = {
+          mode,
+          group_ids: m === 'group' ? this.initUsers.values : [],
+          client_ids: m === 'client' ? this.initUsers.values : [],
+        }
         switch (this.initUsers.model) {
           case 'all':
             clientIds = this.clients.map((c:any) => c.id)
             break
           case 'group':
-            clientIds = this.clients.filter((c:any) => this.initUsers.values.includes(c.group)).map((c:any) => c.id)
+            clientIds = this.resolveClientIdsFromGroups(this.initUsers.values)
             break
           case 'client':
             clientIds = this.initUsers.values
         }
       }
-      const success = await Data().save("inbounds", this.$props.id == 0 ? "new" : "edit", this.inbound, clientIds)
+      const { inbound_init: _inboundInitIgnored, ...inboundPayload } = this.inbound as any
+      const success = await Data().save("inbounds", this.$props.id == 0 ? "new" : "edit", inboundPayload, clientIds, inboundInit)
       if (success) this.closeModal()
       this.loading = false
+    },
+    descendantGroupIds(rootId: number): number[] {
+      return dagDescendants(rootId, this.userGroups ?? [])
+    },
+    resolveClientIdsFromGroups(groupIds: number[]): number[] {
+      const groupMap = new Map<number, any>()
+      this.userGroups.forEach((g:any) => groupMap.set(g.id, g))
+      const out = new Set<number>()
+      ;(groupIds ?? []).forEach((gid:number) => {
+        this.descendantGroupIds(gid).forEach((id) => {
+          const g = groupMap.get(id)
+          ;(g?.member_client_ids ?? []).forEach((cid:number) => out.add(cid))
+        })
+      })
+      return Array.from(out)
     },
   },
   computed: {
@@ -263,8 +310,10 @@ export default {
     clients() {
       return Data().clients?? []
     },
+    userGroups() {
+      return Data().userGroups ?? []
+    },
     hasUser() {
-      if (this.$props.id > 0) return false
       if (!this.inboundWithUsers.includes(this.inbound.type)) return false
       if (this.inbound.type == InTypes.ShadowTLS && (<ShadowTLS>this.inbound).version < 3 ) return false
       if ((<any>this.inbound).managed) return false

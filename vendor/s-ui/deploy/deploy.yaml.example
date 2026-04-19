@@ -1,0 +1,20 @@
+# Human-readable mirror of deploy.config.json.example (same keys).
+# deploy_sui.py reads deploy.config.json if present; otherwise use deploy.env / environment.
+
+host: your.vps.ip
+user: root
+local_binary: ../sui
+remote_binary: /usr/local/s-ui/sui
+systemd_unit: s-ui
+skip_restart: false
+# restart_cmd: "docker restart s-ui-local"
+
+docker:
+  container: ""
+  host_tmp: /tmp/sui.upload
+  path_in_container: /app/sui
+  wait_timeout_sec: 120
+
+publish_ports:
+  web: 2095
+  sub: 2096

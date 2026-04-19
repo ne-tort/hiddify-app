@@ -307,6 +307,33 @@ func (s *SettingService) GetSubKeyFile() (string, error) {
 	return s.getString("subKeyFile")
 }
 
+// EffectiveWebTLS returns resolved TLS paths for the panel: DB (only if files exist), then env, then fallback paths.
+func (s *SettingService) EffectiveWebTLS() (cert, key string) {
+	dbCert, err := s.GetCertFile()
+	if err != nil {
+		return "", ""
+	}
+	dbKey, err := s.GetKeyFile()
+	if err != nil {
+		return "", ""
+	}
+	return config.ResolveWebTLSPaths(dbCert, dbKey)
+}
+
+// EffectiveSubTLS returns resolved TLS paths for the subscription server: DB, sub env, then the same pair as the panel.
+func (s *SettingService) EffectiveSubTLS() (cert, key string) {
+	wCert, wKey := s.EffectiveWebTLS()
+	dbCert, err := s.GetSubCertFile()
+	if err != nil {
+		return "", ""
+	}
+	dbKey, err := s.GetSubKeyFile()
+	if err != nil {
+		return "", ""
+	}
+	return config.ResolveSubTLSPaths(dbCert, dbKey, wCert, wKey)
+}
+
 func (s *SettingService) GetSubUpdates() (int, error) {
 	return s.getInt("subUpdates")
 }
@@ -333,7 +360,8 @@ func (s *SettingService) GetFinalSubURI(host string) (string, error) {
 		return SubURI, nil
 	}
 	protocol := "http"
-	if (*allSetting)["subKeyFile"] != "" && (*allSetting)["subCertFile"] != "" {
+	sc, sk := s.EffectiveSubTLS()
+	if sc != "" && sk != "" {
 		protocol = "https"
 	}
 	if (*allSetting)["subDomain"] != "" {

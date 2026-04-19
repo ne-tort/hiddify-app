@@ -38,9 +38,38 @@ func (s *InboundService) getById(ids string) (*[]map[string]interface{}, error) 
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, *inbData)
+		m := *inbData
+		s.appendInboundInitToMap(db, &inb, &m)
+		result = append(result, m)
 	}
 	return &result, nil
+}
+
+func (s *InboundService) appendInboundInitToMap(db *gorm.DB, in *model.Inbound, combined *map[string]interface{}) {
+	if !s.inboundSupportsUserPolicy(in) {
+		return
+	}
+	var pol model.InboundUserPolicy
+	if err := db.Where("inbound_id = ?", in.Id).First(&pol).Error; err != nil {
+		return
+	}
+	mode := normalizeInboundPolicyMode(pol.Mode)
+	payload := map[string]interface{}{
+		"mode":       mode,
+		"group_ids":  []uint{},
+		"client_ids": []uint{},
+	}
+	switch mode {
+	case InboundPolicyGroups:
+		var gids []uint
+		_ = db.Model(model.InboundPolicyGroup{}).Where("inbound_id = ?", in.Id).Pluck("group_id", &gids)
+		payload["group_ids"] = gids
+	case InboundPolicyClients:
+		var cids []uint
+		_ = db.Model(model.InboundPolicyClient{}).Where("inbound_id = ?", in.Id).Pluck("client_id", &cids)
+		payload["client_ids"] = cids
+	}
+	(*combined)["inbound_init"] = payload
 }
 
 func (s *InboundService) GetAll() (*[]map[string]interface{}, error) {
@@ -100,7 +129,7 @@ func (s *InboundService) FromIds(ids []uint) ([]*model.Inbound, error) {
 	return inbounds, nil
 }
 
-func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, initUserIds string, hostname string) error {
+func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, initUserIds string, inboundInitJSON string, hostname string) error {
 	var err error
 
 	switch act {
@@ -124,6 +153,29 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 			}
 		}
 
+		err = util.FillOutJson(&inbound, hostname)
+		if err != nil {
+			return err
+		}
+
+		err = tx.Save(&inbound).Error
+		if err != nil {
+			return err
+		}
+
+		payload, skipPolicy, err := ParseInboundInit(act, inboundInitJSON, initUserIds)
+		if err != nil {
+			return err
+		}
+		if s.inboundSupportsUserPolicy(&inbound) && !skipPolicy {
+			if err = s.saveInboundUserPolicy(tx, inbound.Id, payload); err != nil {
+				return err
+			}
+			if err = s.ReconcileInboundClients(tx, inbound.Id, hostname); err != nil {
+				return err
+			}
+		}
+
 		if corePtr.IsRunning() {
 			if act == "edit" {
 				err = corePtr.RemoveInbound(oldTag)
@@ -136,12 +188,7 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 			if err != nil {
 				return err
 			}
-
-			if act == "edit" {
-				inboundConfig, err = s.addUsers(tx, inboundConfig, inbound.Id, inbound.Type)
-			} else {
-				inboundConfig, err = s.initUsers(tx, inboundConfig, initUserIds, inbound.Type)
-			}
+			inboundConfig, err = s.addUsers(tx, inboundConfig, inbound.Id, inbound.Type)
 			if err != nil {
 				return err
 			}
@@ -152,23 +199,11 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 			}
 		}
 
-		err = util.FillOutJson(&inbound, hostname)
-		if err != nil {
-			return err
-		}
-
-		err = tx.Save(&inbound).Error
-		if err != nil {
-			return err
-		}
-		switch act {
-		case "new":
-			err = s.ClientService.UpdateClientsOnInboundAdd(tx, initUserIds, inbound.Id, hostname)
-		case "edit":
+		if act == "edit" {
 			err = s.ClientService.UpdateLinksByInboundChange(tx, &[]model.Inbound{inbound}, hostname, oldTag)
-		}
-		if err != nil {
-			return err
+			if err != nil {
+				return err
+			}
 		}
 	case "del":
 		var tag string
@@ -191,6 +226,9 @@ func (s *InboundService) Save(tx *gorm.DB, act string, data json.RawMessage, ini
 		if err != nil {
 			return err
 		}
+		_ = tx.Where("inbound_id = ?", id).Delete(&model.InboundPolicyGroup{})
+		_ = tx.Where("inbound_id = ?", id).Delete(&model.InboundPolicyClient{})
+		_ = tx.Where("inbound_id = ?", id).Delete(&model.InboundUserPolicy{})
 		err = tx.Where("tag = ?", tag).Delete(model.Inbound{}).Error
 		if err != nil {
 			return err
@@ -248,6 +286,39 @@ func (s *InboundService) hasUser(inboundType string) bool {
 		return true
 	}
 	return false
+}
+
+// inboundSupportsUserPolicy matches runtime user list rules (shadowtls v3+, shadowsocks not managed).
+func (s *InboundService) inboundSupportsUserPolicy(in *model.Inbound) bool {
+	if !s.hasUser(in.Type) {
+		return false
+	}
+	if in.Options == nil {
+		return true
+	}
+	var restFields map[string]json.RawMessage
+	if err := json.Unmarshal(in.Options, &restFields); err != nil {
+		return true
+	}
+	if in.Type == "shadowtls" {
+		var version float64
+		if restFields["version"] != nil {
+			_ = json.Unmarshal(restFields["version"], &version)
+		}
+		if int(version) < 3 {
+			return false
+		}
+	}
+	if in.Type == "shadowsocks" {
+		var managed bool
+		if restFields["managed"] != nil {
+			_ = json.Unmarshal(restFields["managed"], &managed)
+		}
+		if managed {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *InboundService) fetchUsers(db *gorm.DB, inboundType string, condition string, inbound map[string]interface{}) ([]json.RawMessage, error) {

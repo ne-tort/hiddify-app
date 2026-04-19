@@ -23,6 +23,7 @@
             <RuleOptions
               :rule="r"
               :clients="clients"
+              :user-groups="userGroups"
               :inTags="inTags"
               :outTags="outTags"
               :rsTags="rsTags" />
@@ -32,6 +33,7 @@
           v-else
           :rule="ruleData.rules[0]"
           :clients="clients"
+          :user-groups="userGroups"
           :inTags="inTags"
           :outTags="outTags"
           :rsTags="rsTags" />
@@ -172,7 +174,7 @@
 import { logicalRule, rule, actionKeys } from '@/types/rules'
 import RuleOptions from '@/components/Rule.vue'
 export default {
-  props: ['visible', 'data', 'index', 'clients', 'inTags', 'outTags', 'rsTags'],
+  props: ['visible', 'data', 'index', 'clients', 'userGroups', 'inTags', 'outTags', 'rsTags'],
   emits: ['close', 'save'],
   data() {
     return {

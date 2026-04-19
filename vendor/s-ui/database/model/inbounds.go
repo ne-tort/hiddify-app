@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 type Inbound struct {
@@ -42,6 +43,8 @@ func (i *Inbound) UnmarshalJSON(data []byte) error {
 	delete(raw, "tls_id")
 	delete(raw, "tls")
 	delete(raw, "users")
+	// UI-only metadata (never pass to sing-box JSON)
+	delete(raw, "inbound_init")
 
 	// Addrs
 	i.Addrs, _ = json.MarshalIndent(raw["addrs"], "", "  ")
@@ -73,6 +76,9 @@ func (i Inbound) MarshalJSON() ([]byte, error) {
 		}
 
 		for k, v := range restFields {
+			if strings.EqualFold(k, "inbound_init") {
+				continue
+			}
 			combined[k] = v
 		}
 	}
@@ -96,6 +102,9 @@ func (i Inbound) MarshalFull() (*map[string]interface{}, error) {
 		}
 
 		for k, v := range restFields {
+			if strings.EqualFold(k, "inbound_init") {
+				continue
+			}
 			combined[k] = v
 		}
 	}

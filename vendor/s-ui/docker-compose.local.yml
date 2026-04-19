@@ -1,0 +1,20 @@
+---
+services:
+  s-ui-local:
+    image: s-ui-local-hiddify
+    container_name: s-ui-local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        core: ../../hiddify-core/hiddify-sing-box
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    hostname: "s-ui-local"
+    network_mode: host
+    volumes:
+      - "./db:/app/db"
+      - "./cert:/app/cert"
+    tty: true
+    restart: unless-stopped
+    entrypoint: "./entrypoint.sh"

@@ -4,14 +4,12 @@
     v-model="modal.visible"
     :visible="modal.visible"
     :id="modal.id"
-    :groups="groups"
     :inboundTags="inboundTags"
     @close="closeModal"
   />
   <ClientAddBulk 
     v-model="addBulkModal"
     :visible="addBulkModal"
-    :groups="groups"
     :inboundTags="inboundTags"
     @close="closeAddBulk"
   />
@@ -87,8 +85,8 @@
                 <v-select
                 variant="underlined"
                 density="compact"
-                :label="$t('client.group')"
-                :items="[ {title: $t('all'), value: '-'}, ...groups.map(g => ({ title: g.length>0 ? g : $t('none'), value: g}))]"
+                :label="$t('pages.groups')"
+                :items="[ {title: $t('all'), value: '-'}, ...groupFilterItems]"
                 v-model="filterSettings.group">
                 </v-select>
               </v-col>
@@ -150,6 +148,9 @@
           </v-tooltip>
           {{ item.inbounds?.length }}
           </span>
+        </template>
+        <template v-slot:item.groupNames="{ item }">
+          <span>{{ clientGroupNames(item.id) }}</span>
         </template>
         <template v-slot:item.volume="{ item }">
           <div class="text-start" v-tooltip:top="'↓' + HumanReadable.sizeFormat(item.down) + ' - ' + HumanReadable.sizeFormat(item.up) + '↑'">
@@ -250,6 +251,7 @@ import { computed, ref } from 'vue'
 import { HumanReadable } from '@/plugins/utils'
 import { i18n, locale } from '@/locales'
 import { useDisplay } from 'vuetify'
+import { descendantGroupIds as dagDescendants } from '@/utils/groupGraph'
 
 const { smAndDown } = useDisplay()
 
@@ -270,11 +272,10 @@ const inboundTags = computed((): any[] => {
   return inbounds.value?.filter(i => i.tag != "" && i.users).map(i => { return { title: i.tag, value: i.id } })
 })
 
-const groups = computed((): string[] => {
-  if (!clients.value) return []
-  if (filterSettings?.value.enabled) return Array.from(new Set(filterSettings.value.filteredClients?.map(c => c.group)))
-  return Array.from(new Set(clients.value?.map(c => c.group)))
-})
+const userGroups = computed((): any[] => Data().userGroups ?? [])
+const groupFilterItems = computed(() =>
+  userGroups.value.map((g:any) => ({ title: g.name, value: g.id }))
+)
 
 const actionMenu = ref(false)
 const filterMenu = ref(false)
@@ -296,7 +297,7 @@ const filterItems = [
 const headers = [
   { title: i18n.global.t('client.name'), key: 'name' },
   { title: i18n.global.t('client.desc'), key: 'desc' },
-  { title: i18n.global.t('client.group'), key: 'group' },
+  { title: i18n.global.t('pages.groups'), key: 'groupNames' },
   { title: i18n.global.t('pages.inbounds'), key: 'inbounds', width: 10 },
   { title: i18n.global.t('actions.action'), key: 'actions', sortable: false },
   { title: i18n.global.t('stats.volume'), key: 'volume' },
@@ -363,7 +364,9 @@ const closeStats = () => {
 const doFilter = () => {
   let filteredClients = clients.value.slice()
   if (filterSettings.value.group != '-') {
-    filteredClients = filteredClients.filter(c => c.group == filterSettings.value.group)
+    const groupId = Number(filterSettings.value.group)
+    const clientIds = resolveClientIdsFromGroup(groupId)
+    filteredClients = filteredClients.filter(c => clientIds.includes(c.id))
   }
   if (filterSettings.value.text.length>0) {
     const txt = filterSettings.value.text
@@ -383,6 +386,27 @@ const doFilter = () => {
   filterSettings.value.filteredClients = filteredClients
   filterSettings.value.enabled = true
   filterMenu.value = false
+}
+
+const descendantGroupIds = (rootId: number): number[] =>
+  dagDescendants(rootId, userGroups.value as { id: number; parent_group_ids?: number[] }[])
+
+const resolveClientIdsFromGroup = (groupId: number): number[] => {
+  const groupMap = new Map<number, any>()
+  userGroups.value.forEach((g:any) => groupMap.set(g.id, g))
+  const ids = new Set<number>()
+  descendantGroupIds(groupId).forEach((gid:number) => {
+    const g = groupMap.get(gid)
+    ;(g?.member_client_ids ?? []).forEach((cid:number) => ids.add(cid))
+  })
+  return Array.from(ids)
+}
+
+const clientGroupNames = (clientId: number): string => {
+  const names = userGroups.value
+    .filter((g:any) => (g.member_client_ids ?? []).includes(clientId))
+    .map((g:any) => g.name)
+  return names.length > 0 ? names.join(', ') : '-'
 }
 
 const clearFilter = () => {

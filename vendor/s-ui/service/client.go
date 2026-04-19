@@ -23,6 +23,12 @@ import (
 
 type ClientService struct{}
 
+// clientSavePayload unmarshals optional group_ids without storing it on the Client row.
+type clientSavePayload struct {
+	model.Client
+	GroupIds *[]uint `json:"group_ids"`
+}
+
 var l3RouterPeerIDMu sync.Mutex
 
 func (s *ClientService) Get(id string) (*[]model.Client, error) {
@@ -39,7 +45,8 @@ func (s *ClientService) getById(id string) (*[]model.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	gs := GroupService{}
+	gs.FillClientGroupIDs(db, &client)
 	return &client, nil
 }
 
@@ -47,11 +54,13 @@ func (s *ClientService) GetAll() (*[]model.Client, error) {
 	db := database.GetDB()
 	var clients []model.Client
 	err := db.Model(model.Client{}).
-		Select("`id`, `enable`, `name`, `desc`, `group`, `inbounds`, `up`, `down`, `volume`, `expiry`").
+		Select("`id`, `enable`, `name`, `desc`, `inbounds`, `up`, `down`, `volume`, `expiry`").
 		Scan(&clients).Error
 	if err != nil {
 		return nil, err
 	}
+	gs := GroupService{}
+	gs.FillClientGroupIDs(db, &clients)
 	return &clients, nil
 }
 
@@ -61,21 +70,13 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 
 	switch act {
 	case "new", "edit":
-		var client model.Client
-		err = json.Unmarshal(data, &client)
+		var cw clientSavePayload
+		err = json.Unmarshal(data, &cw)
 		if err != nil {
 			return nil, false, err
 		}
-		err = s.ensureL3RouterIdentity(tx, &client)
-		if err != nil {
-			return nil, false, err
-		}
-		err = s.updateLinksWithFixedInbounds(tx, []*model.Client{&client}, hostname)
-		if err != nil {
-			return nil, false, err
-		}
+		client := cw.Client
 		if act == "edit" {
-			// Find changed inbounds
 			inboundIds, err = s.findInboundsChanges(tx, &client, false)
 			if err != nil {
 				return nil, false, err
@@ -90,9 +91,43 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, false, err
 		}
+		err = s.ensureL3RouterIdentity(tx, &client)
+		if err != nil {
+			return nil, false, err
+		}
+		err = s.updateLinksWithFixedInbounds(tx, []*model.Client{&client}, hostname)
+		if err != nil {
+			return nil, false, err
+		}
+		err = tx.Save(&client).Error
+		if err != nil {
+			return nil, false, err
+		}
+		if cw.GroupIds != nil {
+			gs := GroupService{}
+			if err = gs.SyncClientGroupMemberships(tx, client.Id, *cw.GroupIds); err != nil {
+				return nil, false, err
+			}
+		}
+		inboundIds, err = MergePolicyReconcile(tx, inboundIds, []uint{client.Id}, hostname)
+		if err != nil {
+			return nil, false, err
+		}
 	case "addbulk":
-		var clients []*model.Client
-		err = json.Unmarshal(data, &clients)
+		var payloads []clientSavePayload
+		err = json.Unmarshal(data, &payloads)
+		if err != nil {
+			return nil, false, err
+		}
+		clients := make([]*model.Client, len(payloads))
+		for i := range payloads {
+			clients[i] = &payloads[i].Client
+		}
+		err = json.Unmarshal(clients[0].Inbounds, &inboundIds)
+		if err != nil {
+			return nil, false, err
+		}
+		err = tx.Save(clients).Error
 		if err != nil {
 			return nil, false, err
 		}
@@ -101,10 +136,6 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			if err != nil {
 				return nil, false, err
 			}
-		}
-		err = json.Unmarshal(clients[0].Inbounds, &inboundIds)
-		if err != nil {
-			return nil, false, err
 		}
 		err = s.updateLinksWithFixedInbounds(tx, clients, hostname)
 		if err != nil {
@@ -114,9 +145,42 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, false, err
 		}
+		gs := GroupService{}
+		for i := range payloads {
+			if payloads[i].GroupIds != nil {
+				if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, *payloads[i].GroupIds); err != nil {
+					return nil, false, err
+				}
+			}
+		}
+		cids := make([]uint, len(clients))
+		for i, c := range clients {
+			cids[i] = c.Id
+		}
+		inboundIds, err = MergePolicyReconcile(tx, inboundIds, cids, hostname)
+		if err != nil {
+			return nil, false, err
+		}
 	case "editbulk":
-		var clients []*model.Client
-		err = json.Unmarshal(data, &clients)
+		var payloads []clientSavePayload
+		err = json.Unmarshal(data, &payloads)
+		if err != nil {
+			return nil, false, err
+		}
+		clients := make([]*model.Client, len(payloads))
+		for i := range payloads {
+			clients[i] = &payloads[i].Client
+		}
+		for _, client := range clients {
+			changedInboundIds, err := s.findInboundsChanges(tx, client, true)
+			if err != nil {
+				return nil, false, err
+			}
+			if len(changedInboundIds) > 0 {
+				inboundIds = common.UnionUintArray(inboundIds, changedInboundIds)
+			}
+		}
+		err = tx.Save(clients).Error
 		if err != nil {
 			return nil, false, err
 		}
@@ -124,13 +188,6 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			err = s.ensureL3RouterIdentity(tx, client)
 			if err != nil {
 				return nil, false, err
-			}
-			changedInboundIds, err := s.findInboundsChanges(tx, client, true)
-			if err != nil {
-				return nil, false, err
-			}
-			if len(changedInboundIds) > 0 {
-				inboundIds = common.UnionUintArray(inboundIds, changedInboundIds)
 			}
 		}
 		if len(inboundIds) > 0 {
@@ -143,9 +200,29 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, false, err
 		}
+		gs := GroupService{}
+		for i := range payloads {
+			if payloads[i].GroupIds != nil {
+				if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, *payloads[i].GroupIds); err != nil {
+					return nil, false, err
+				}
+			}
+		}
+		cids := make([]uint, len(clients))
+		for i, c := range clients {
+			cids[i] = c.Id
+		}
+		inboundIds, err = MergePolicyReconcile(tx, inboundIds, cids, hostname)
+		if err != nil {
+			return nil, false, err
+		}
 	case "delbulk":
 		var ids []uint
 		err = json.Unmarshal(data, &ids)
+		if err != nil {
+			return nil, false, err
+		}
+		inboundIds, err = MergePolicyReconcile(tx, inboundIds, ids, hostname)
 		if err != nil {
 			return nil, false, err
 		}
@@ -162,6 +239,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			}
 			inboundIds = common.UnionUintArray(inboundIds, clientInbounds)
 		}
+		if err = tx.Where("client_id in ?", ids).Delete(model.ClientGroupMember{}).Error; err != nil {
+			return nil, false, err
+		}
 		err = tx.Where("id in ?", ids).Delete(model.Client{}).Error
 		if err != nil {
 			return nil, false, err
@@ -172,13 +252,22 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, false, err
 		}
+		inboundIds, err = MergePolicyReconcile(tx, inboundIds, []uint{id}, hostname)
+		if err != nil {
+			return nil, false, err
+		}
 		var client model.Client
 		err = tx.Where("id = ?", id).First(&client).Error
 		if err != nil {
 			return nil, false, err
 		}
-		err = json.Unmarshal(client.Inbounds, &inboundIds)
+		var fromClient []uint
+		err = json.Unmarshal(client.Inbounds, &fromClient)
 		if err != nil {
+			return nil, false, err
+		}
+		inboundIds = common.UnionUintArray(inboundIds, fromClient)
+		if err = tx.Where("client_id = ?", id).Delete(model.ClientGroupMember{}).Error; err != nil {
 			return nil, false, err
 		}
 		err = tx.Where("id = ?", id).Delete(model.Client{}).Error
@@ -191,6 +280,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 
 	l3PeersChanged, err := (&EndpointService{}).SyncAllL3RouterPeers(tx)
 	if err != nil {
+		return nil, false, err
+	}
+	if err := PersistL3RouterRouteRules(tx); err != nil {
 		return nil, false, err
 	}
 
@@ -296,6 +388,34 @@ func (s *ClientService) UpdateClientsOnInboundAdd(tx *gorm.DB, initIds string, i
 		}
 	}
 	return nil
+}
+
+// RemoveInboundFromClient removes one inbound id from the client's inbounds JSON and drops local links for tag.
+func (s *ClientService) RemoveInboundFromClient(tx *gorm.DB, client *model.Client, inboundId uint, tag string) error {
+	var err error
+	var clientInbounds, newClientInbounds []uint
+	_ = json.Unmarshal(client.Inbounds, &clientInbounds)
+	for _, iid := range clientInbounds {
+		if iid != inboundId {
+			newClientInbounds = append(newClientInbounds, iid)
+		}
+	}
+	client.Inbounds, err = json.MarshalIndent(newClientInbounds, "", "  ")
+	if err != nil {
+		return err
+	}
+	var clientLinks, newClientLinks []map[string]string
+	_ = json.Unmarshal(client.Links, &clientLinks)
+	for _, cl := range clientLinks {
+		if cl["remark"] != tag {
+			newClientLinks = append(newClientLinks, cl)
+		}
+	}
+	client.Links, err = json.MarshalIndent(newClientLinks, "", "  ")
+	if err != nil {
+		return err
+	}
+	return tx.Save(client).Error
 }
 
 func (s *ClientService) UpdateClientsOnInboundDelete(tx *gorm.DB, id uint, tag string) error {
@@ -599,6 +719,15 @@ func (s *ClientService) ensureL3RouterIdentity(tx *gorm.DB, client *model.Client
 }
 
 func (s *ClientService) ensureL3RouterIdentityWithResult(tx *gorm.DB, client *model.Client) (bool, error) {
+	if client.Id == 0 {
+		return false, nil
+	}
+	gs := GroupService{}
+	should, err := gs.ClientShouldHaveL3Router(tx, client.Id)
+	if err != nil {
+		return false, err
+	}
+
 	var configs map[string]map[string]interface{}
 	if len(client.Config) > 0 {
 		if err := json.Unmarshal(client.Config, &configs); err != nil {
@@ -611,6 +740,20 @@ func (s *ClientService) ensureL3RouterIdentityWithResult(tx *gorm.DB, client *mo
 	if configs == nil {
 		configs = make(map[string]map[string]interface{})
 	}
+
+	if !should {
+		if _, ok := configs["l3router"]; ok {
+			delete(configs, "l3router")
+			updatedConfig, err := json.MarshalIndent(configs, "", " ")
+			if err != nil {
+				return false, err
+			}
+			client.Config = updatedConfig
+			return true, nil
+		}
+		return false, nil
+	}
+
 	l3Config, ok := configs["l3router"]
 	if !ok || l3Config == nil {
 		l3Config = make(map[string]interface{})

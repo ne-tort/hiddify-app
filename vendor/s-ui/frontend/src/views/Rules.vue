@@ -5,6 +5,7 @@
     :index="ruleModal.index"
     :data="ruleModal.data"
     :clients="clients"
+    :user-groups="userGroups"
     :inTags="inboundTags"
     :outTags="outboundTags"
     :rsTags="rulesetTags"
@@ -205,6 +206,7 @@ const saveConfig = async () => {
 }
 
 const clients = computed((): string[] => Data().clients.map((c:any) => c.name))
+const userGroups = computed((): any[] => Data().userGroups ?? [])
 const route = computed((): any => appConfig.value.route ?? {})
 
 const rules = computed((): any[] => {

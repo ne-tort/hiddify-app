@@ -25,6 +25,7 @@ var (
 )
 
 type ConfigService struct {
+	GroupService
 	ClientService
 	TlsService
 	SettingService
@@ -56,6 +57,15 @@ func NewConfigService(core *core.Core) *ConfigService {
 			logger.Warning("l3router identity migration failed: ", err)
 		} else {
 			tx.Commit()
+		}
+		if db != nil {
+			tx2 := db.Begin()
+			if err := PersistL3RouterRouteRules(tx2); err != nil {
+				tx2.Rollback()
+				logger.Warning("l3router route persist on startup: ", err)
+			} else {
+				tx2.Commit()
+			}
 		}
 	}
 	return &ConfigService{}
@@ -91,103 +101,15 @@ func (s *ConfigService) GetConfig(data string) (*[]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	singboxConfig.Route, err = injectL3RouterRouteRules(singboxConfig.Route, singboxConfig.Endpoints)
-	if err != nil {
-		return nil, err
-	}
 	rawConfig, err := json.MarshalIndent(singboxConfig, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	return &rawConfig, nil
-}
-
-func injectL3RouterRouteRules(routeRaw json.RawMessage, endpoints []json.RawMessage) (json.RawMessage, error) {
-	var route map[string]interface{}
-	if len(routeRaw) > 0 {
-		if err := json.Unmarshal(routeRaw, &route); err != nil {
-			return nil, err
-		}
-	} else {
-		route = make(map[string]interface{})
-	}
-	if route == nil {
-		route = make(map[string]interface{})
-	}
-
-	existingRules := make([]interface{}, 0)
-	if rules, ok := route["rules"].([]interface{}); ok {
-		existingRules = append(existingRules, rules...)
-	}
-
-	l3RouterTags := make(map[string]struct{})
-	desiredRules := make(map[string]map[string]interface{})
-	for _, endpointRaw := range endpoints {
-		var endpoint map[string]interface{}
-		if err := json.Unmarshal(endpointRaw, &endpoint); err != nil {
-			continue
-		}
-		epType, _ := endpoint["type"].(string)
-		if epType != l3RouterType {
-			continue
-		}
-		tag, _ := endpoint["tag"].(string)
-		if tag == "" {
-			continue
-		}
-		l3RouterTags[strings.TrimSpace(tag)] = struct{}{}
-		peersRaw, _ := endpoint["peers"].([]interface{})
-		for _, rawPeer := range peersRaw {
-			peer, ok := rawPeer.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			for _, cidr := range toStringSlice(peer["allowed_ips"]) {
-				key := strings.TrimSpace(tag) + "|" + strings.TrimSpace(cidr)
-				if key == "|" || !isValidRoutableCIDR(cidr) {
-					continue
-				}
-				desiredRules[key] = map[string]interface{}{
-					"ip_cidr":  []string{cidr},
-					"outbound": tag,
-					"l3router_managed": true,
-				}
-			}
-		}
-	}
-
-	filteredRules := make([]interface{}, 0, len(existingRules)+len(desiredRules))
-	for _, rawRule := range existingRules {
-		if isL3RouterManagedRule(rawRule, l3RouterTags) {
-			continue
-		}
-		filteredRules = append(filteredRules, rawRule)
-	}
-	for _, rule := range desiredRules {
-		filteredRules = append(filteredRules, rule)
-	}
-	route["rules"] = filteredRules
-	updatedRoute, err := json.MarshalIndent(route, "", "  ")
+	expanded, err := ExpandSUIFieldsInSingboxConfig(database.GetDB(), rawConfig)
 	if err != nil {
 		return nil, err
 	}
-	return updatedRoute, nil
-}
-
-func isL3RouterManagedRule(rawRule interface{}, l3RouterTags map[string]struct{}) bool {
-	rule, ok := rawRule.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	if managed, ok := rule["l3router_managed"].(bool); ok && managed {
-		return true
-	}
-	outbound, _ := rule["outbound"].(string)
-	if _, isL3 := l3RouterTags[strings.TrimSpace(outbound)]; !isL3 {
-		return false
-	}
-	ipCIDR := toStringSlice(rule["ip_cidr"])
-	return len(ipCIDR) == 1
+	return &expanded, nil
 }
 
 func isValidRoutableCIDR(cidr string) bool {
@@ -199,22 +121,6 @@ func isValidRoutableCIDR(cidr string) bool {
 		return false
 	}
 	return true
-}
-
-func l3routerRuleKey(rawRule interface{}) string {
-	rule, ok := rawRule.(map[string]interface{})
-	if !ok {
-		return ""
-	}
-	outbound, _ := rule["outbound"].(string)
-	if outbound == "" {
-		return ""
-	}
-	ipCIDR := toStringSlice(rule["ip_cidr"])
-	if len(ipCIDR) != 1 {
-		return ""
-	}
-	return strings.TrimSpace(outbound) + "|" + strings.TrimSpace(ipCIDR[0])
 }
 
 func (s *ConfigService) StartCore() error {
@@ -316,7 +222,7 @@ func (s *ConfigService) CheckOutbound(tag string, link string) core.CheckOutboun
 	return core.CheckOutbound(corePtr.GetCtx(), tag, link)
 }
 
-func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initUsers string, loginUser string, hostname string) ([]string, error) {
+func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initUsers string, inboundInit string, loginUser string, hostname string) ([]string, error) {
 	var err error
 	var objs []string = []string{obj}
 	var endpointRuntimeAction *EndpointRuntimeAction
@@ -344,7 +250,17 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		err = s.TlsService.Save(tx, act, data, hostname)
 		objs = append(objs, "clients", "inbounds")
 	case "inbounds":
-		err = s.InboundService.Save(tx, act, data, initUsers, hostname)
+		err = s.InboundService.Save(tx, act, data, initUsers, inboundInit, hostname)
+		if err == nil {
+			err = PersistL3RouterRouteRules(tx)
+		}
+		if err == nil {
+			var n int64
+			tx.Model(model.Endpoint{}).Where("type = ?", l3RouterType).Count(&n)
+			if n > 0 {
+				needsCoreReload = true
+			}
+		}
 		objs = append(objs, "clients")
 	case "outbounds":
 		err = s.OutboundService.Save(tx, act, data)
@@ -354,6 +270,15 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		endpointRuntimeAction, err = s.EndpointService.Save(tx, act, data)
 		if err == nil && endpointRuntimeAction != nil && endpointRuntimeAction.NeedsReload {
 			needsCoreReload = true
+		}
+	case "l3router_peer":
+		err = s.EndpointService.SaveL3RouterPeer(tx, data)
+		if err == nil {
+			if err = PersistL3RouterRouteRules(tx); err != nil {
+				return nil, err
+			}
+			needsCoreReload = true
+			objs = append(objs, "endpoints", "config")
 		}
 	case "config":
 		err = s.SettingService.SaveConfig(tx, data)
@@ -365,6 +290,37 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 		go func() { _ = s.restartCoreWithConfig(configData) }()
 	case "settings":
 		err = s.SettingService.Save(tx, data)
+	case "groups":
+		err = s.GroupService.Save(tx, act, data)
+		if err == nil {
+			if err = (&ClientService{}).MigrateL3RouterIdentities(tx); err != nil {
+				return nil, err
+			}
+			var l3PeersChanged bool
+			l3PeersChanged, err = (&EndpointService{}).SyncAllL3RouterPeers(tx)
+			if err != nil {
+				return nil, err
+			}
+			if err = PersistL3RouterRouteRules(tx); err != nil {
+				return nil, err
+			}
+			var polInIds []uint
+			polInIds, err = ReconcileInboundPoliciesForGroupMembers(tx, hostname)
+			if err != nil {
+				return nil, err
+			}
+			if len(polInIds) > 0 {
+				err = s.InboundService.RestartInbounds(tx, polInIds)
+				if err != nil {
+					return nil, common.NewErrorf("failed to update inbounds after group ACL reconcile: %v", err)
+				}
+				objs = append(objs, "inbounds")
+			}
+			if l3PeersChanged {
+				needsCoreReload = true
+			}
+			objs = append(objs, "clients", "endpoints", "config", "groups")
+		}
 	default:
 		return nil, common.NewError("unknown object: ", obj)
 	}

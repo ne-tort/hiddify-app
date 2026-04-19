@@ -190,6 +190,7 @@ abstract class ConfigOptions {
   );
 
   static final bypassLan = PreferencesNotifier.create<bool, bool>("bypass-lan", false);
+  static final clientToClient = PreferencesNotifier.create<bool, bool>("client-to-client", false);
 
   static final allowConnectionFromLan = PreferencesNotifier.create<bool, bool>("allow-connection-from-lan", false);
 
@@ -347,6 +348,7 @@ abstract class ConfigOptions {
     "url-test-interval": urlTestInterval,
     "clash-api-port": clashApiPort,
     "bypass-lan": bypassLan,
+    "client-to-client": clientToClient,
     "allow-connection-from-lan": allowConnectionFromLan,
     // "enable-dns-routing": enableDnsRouting,
 
@@ -457,6 +459,7 @@ abstract class ConfigOptions {
       // enableTunService: mode == false, //ServiceMode.tunService,
       setSystemProxy: mode == ServiceMode.systemProxy,
       bypassLan: ref.watch(bypassLan),
+      clientToClient: ref.watch(clientToClient),
       allowConnectionFromLan: ref.watch(allowConnectionFromLan),
       enableFakeDns: ref.watch(enableFakeDns),
       // enableDnsRouting: ref.watch(enableDnsRouting),

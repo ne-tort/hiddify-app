@@ -38,9 +38,6 @@
           </v-row>
           <v-row>
             <v-col cols="12" sm="6" md="4">
-              <v-combobox v-model="bulkData.group" :items="groups" :label="$t('client.group')" hide-details></v-combobox>
-            </v-col>
-            <v-col cols="12" sm="6" md="4">
               <v-text-field v-model.number="bulkData.Volume" type="number" min="0" :label="$t('stats.volume')" suffix="GiB" hide-details></v-text-field>
             </v-col>
             <v-col cols="12" sm="6" md="4" v-if="!(bulkData.delayStart && !bulkData.autoReset)">
@@ -110,7 +107,7 @@ import { i18n } from '@/locales'
 import Data from '@/store/modules/data'
 
 export default {
-  props: ['visible', 'inboundTags', 'groups'],
+  props: ['visible', 'inboundTags'],
   emits: ['close'],
   data() {
     return {
@@ -119,7 +116,6 @@ export default {
       bulkData: {
         name: <any[]>[],
         desc: <any[]>[],
-        group: '',
         clientInbounds: [],
         expiry: 0,
         Volume: 0,
@@ -141,7 +137,6 @@ export default {
       this.bulkData = {
         name: [this.patterns[1], "-", this.patterns[0]],
         desc: [],
-        group: '',
         clientInbounds: [],
         expiry: 0,
         Volume: 0,
@@ -174,7 +169,6 @@ export default {
           up: 0,
           down: 0,
           desc: this.genByPattern(this.bulkData.desc, i),
-          group: this.bulkData.group,
           delayStart: this.bulkData.delayStart,
           autoReset: this.bulkData.autoReset,
           resetDays: this.bulkData.resetDays,

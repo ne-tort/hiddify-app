@@ -20,6 +20,15 @@
           <v-col cols="12" sm="6" md="4">
             <v-text-field v-model="endpoint.tag" :label="$t('objects.tag')" hide-details></v-text-field>
           </v-col>
+          <v-col cols="12" sm="6" md="4" v-if="endpoint.type == epTypes.L3Router" class="d-flex align-center">
+            <v-switch
+              v-model="endpoint.packet_filter"
+              color="primary"
+              :label="$t('l3router.packetFilter')"
+              hide-details
+              density="compact"
+            />
+          </v-col>
         </v-row>
         <Wireguard v-if="endpoint.type == epTypes.Wireguard"
           :data="endpoint"
@@ -30,7 +39,7 @@
           @refreshPeerKey="refreshWgPeerKey" />
         <Warp v-if="endpoint.type == epTypes.Warp" :data="endpoint" />
         <TailscaleVue v-if="endpoint.type == epTypes.Tailscale" :data="endpoint" />
-        <L3Router v-if="endpoint.type == epTypes.L3Router" :data="endpoint" />
+        <L3Router v-if="endpoint.type == epTypes.L3Router" :data="endpoint" :user-groups="userGroups" :clients="clients" :is-new="Number(id) === 0" />
         <Dial v-if="endpoint.type != epTypes.L3Router" :dial="endpoint" />
       </v-card-text>
       <v-card-actions>
@@ -67,9 +76,18 @@ import HttpUtils from '@/plugins/httputil'
 import { push } from 'notivue'
 import { i18n } from '@/locales'
 import Data from '@/store/modules/data'
+import { isValidPrivateSubnetField, privateSubnetRuleMessage } from '@/utils/l3Subnet'
 export default {
   props: ['visible', 'data', 'id', 'tags'],
   emits: ['close'],
+  computed: {
+    userGroups() {
+      return Data().userGroups ?? []
+    },
+    clients() {
+      return Data().clients ?? []
+    },
+  },
   data() {
     return {
       endpoint: createEndpoint("wireguard",{ "tag": "" }),
@@ -89,7 +107,7 @@ export default {
       else {
         this.endpoint.type = "wireguard"
         this.endpoint.listen_port = RandomUtil.randomIntRange(10000, 60000)
-        this.changeType()
+        await this.changeType()
         this.title = "add"
       }
       this.tab = "t1"
@@ -129,11 +147,24 @@ export default {
             tag: tag,
             peers: [],
             packet_filter: false,
+            private_subnet: '',
             overlay_destination: "198.18.0.1:33333",
+            member_group_ids: [],
+            member_client_ids: [],
           }
           break
       }
       this.endpoint = createEndpoint(this.endpoint.type, prevConfig)
+      if (this.endpoint.type === EpTypes.L3Router && this.$props.id === 0) {
+        await this.fetchNextL3PrivateSubnet()
+      }
+    },
+    async fetchNextL3PrivateSubnet() {
+      const excludeId = this.$props.id > 0 ? this.$props.id : 0
+      const msg = await HttpUtils.get('api/nextL3PrivateSubnet', { excludeId })
+      if (msg.success && msg.obj != null && typeof msg.obj === 'string' && msg.obj.length > 0) {
+        this.endpoint.private_subnet = msg.obj
+      }
     },
     closeModal() {
       this.updateData(0) // reset
@@ -145,6 +176,15 @@ export default {
       // check duplicate tag
       const isDuplicatedTag = Data().checkTag("endpoint",this.endpoint.id, this.endpoint.tag)
       if (isDuplicatedTag) return
+
+      if (this.endpoint.type === EpTypes.L3Router) {
+        if (!isValidPrivateSubnetField(this.endpoint.private_subnet as string)) {
+          push.error({
+            message: privateSubnetRuleMessage(),
+          })
+          return
+        }
+      }
 
       // save data
       this.loading = true

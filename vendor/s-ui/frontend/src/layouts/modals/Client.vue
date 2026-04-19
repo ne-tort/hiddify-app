@@ -27,9 +27,6 @@
                 <v-col cols="12" sm="6" md="4">
                   <v-switch color="primary" v-model="client.enable" :label="$t('enable')" hide-details></v-switch>
                 </v-col>
-                <v-col cols="12" sm="6" md="4">
-                  <v-combobox v-model="client.group" :items="groups" :label="$t('client.group')" hide-details></v-combobox>
-                </v-col>
               </v-row>
               <v-row>
                 <v-col cols="12" sm="6" md="4">
@@ -117,6 +114,15 @@
                       <v-icon @click="setAllInbounds" icon="mdi-set-all" v-tooltip:top="$t('all')" />
                     </template>
                   </v-select>
+                </v-col>
+              </v-row>
+              <v-row>
+                <v-col cols="12">
+                  <GroupMultiSelect
+                    v-model="clientGroupIds"
+                    :user-groups="userGroupsList"
+                    :label="$t('pages.groups')"
+                  />
                 </v-col>
               </v-row>
             </v-window-item>
@@ -228,9 +234,10 @@ import DatePick from '@/components/DateTime.vue'
 import { HumanReadable } from '@/plugins/utils'
 import Data from '@/store/modules/data'
 import { locale } from '@/locales'
+import GroupMultiSelect from '@/components/GroupMultiSelect.vue'
 
 export default {
-  props: ['visible', 'id', 'inboundTags', 'groups'],
+  props: ['visible', 'id', 'inboundTags'],
   emits: ['close'],
   data() {
     return {
@@ -305,6 +312,17 @@ export default {
     }
   },
   computed: {
+    userGroupsList() {
+      return Data().userGroups ?? []
+    },
+    clientGroupIds: {
+      get(): number[] {
+        return this.client.group_ids ?? []
+      },
+      set(v: number[]) {
+        this.client.group_ids = v ?? []
+      },
+    },
     clientInbounds: {
       get() { return this.client.inbounds.length>0 ? this.client.inbounds.sort() : [] },
       set(v:number[]) { this.client.inbounds = v.length == 0 ?  [] : v.sort() }
@@ -364,7 +382,7 @@ export default {
       }
     },
   },
-  components: { DatePick },
+  components: { DatePick, GroupMultiSelect },
 }
 
 </script>

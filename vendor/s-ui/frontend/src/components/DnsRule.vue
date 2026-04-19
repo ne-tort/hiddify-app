@@ -21,6 +21,19 @@
           hide-details
         ></v-combobox>
       </v-col>
+      <v-col cols="12" v-if="optionAuthGroups">
+        <v-select
+          v-model="rule.s_ui_auth_groups"
+          :items="userGroupItems"
+          item-title="title"
+          item-value="value"
+          :label="$t('pages.groups')"
+          multiple
+          chips
+          closable-chips
+          hide-details
+        />
+      </v-col>
       <v-col cols="12" sm="6" md="4" v-if="optionIPver">
         <v-select
           hide-details
@@ -155,6 +168,9 @@
               <v-switch v-model="optionClient" color="primary" :label="$t('pages.clients')" hide-details></v-switch>
             </v-list-item>
             <v-list-item>
+              <v-switch v-model="optionAuthGroups" color="primary" :label="$t('pages.groups')" hide-details></v-switch>
+            </v-list-item>
+            <v-list-item>
               <v-switch v-model="optionIPver" color="primary" :label="$t('rule.ipVer')" hide-details></v-switch>
             </v-list-item>
             <v-list-item>
@@ -183,8 +199,9 @@
 </template>
 
 <script lang="ts">
+import { i18n } from '@/locales'
 export default {
-  props: ['rule', 'clients', 'inTags', 'rsTags', 'deleteable', 'ruleSets'],
+  props: ['rule', 'clients', 'userGroups', 'inTags', 'rsTags', 'deleteable', 'ruleSets'],
   data() {
     return {
       menu: false,
@@ -224,6 +241,20 @@ export default {
     optionClient: {
       get() { return this.$props.rule.auth_user != undefined },
       set(v:boolean) { this.$props.rule.auth_user = v ? [] : undefined }
+    },
+    optionAuthGroups: {
+      get() { return this.$props.rule.s_ui_auth_groups != undefined },
+      set(v:boolean) { this.$props.rule.s_ui_auth_groups = v ? [] : undefined }
+    },
+    userGroupItems() {
+      const ug = this.$props.userGroups ?? []
+      const known = ug.map((g: any) => ({ title: g.name, value: g.id }))
+      const knownIDs = new Set<number>(known.map((g: any) => g.value))
+      const selected = this.$props.rule?.s_ui_auth_groups ?? []
+      const orphan = selected
+        .filter((id: number) => !knownIDs.has(id))
+        .map((id: number) => ({ title: i18n.global.t('group.deletedPlaceholder', { id }), value: id }))
+      return [...known, ...orphan]
     },
     optionIPver: {
       get() { return this.$props.rule.ip_version != undefined },

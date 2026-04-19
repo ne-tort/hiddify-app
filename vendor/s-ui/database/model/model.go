@@ -34,7 +34,6 @@ type Client struct {
 	Down     int64           `json:"down" form:"down"`
 	Up       int64           `json:"up" form:"up"`
 	Desc     string          `json:"desc" form:"desc"`
-	Group    string          `json:"group" form:"group"`
 
 	// Delay start and periodic reset
 	DelayStart bool  `json:"delayStart" form:"delayStart" gorm:"default:false;not null"`
@@ -43,6 +42,9 @@ type Client struct {
 	NextReset  int64 `json:"nextReset" form:"nextReset" gorm:"default:0;not null"`
 	TotalUp    int64 `json:"totalUp" form:"totalUp" gorm:"default:0;not null"`
 	TotalDown  int64 `json:"totalDown" form:"totalDown" gorm:"default:0;not null"`
+
+	// API-only: direct group memberships (stored in client_group_members).
+	GroupIds []uint `json:"group_ids,omitempty" gorm:"-"`
 }
 
 type Stats struct {
