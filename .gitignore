@@ -79,6 +79,9 @@ windows/sign.cer
 # Local nested repo clone used for router experiments (not a submodule here)
 /experiments/router/wireguard-go/
 
+# Local clone of ne-tort/amnezia-wg-easy (not a submodule)
+/amnezia-wg-easy/
+
 # Local reference clones for mieru comparison
 /mbox/
 /mieru/
