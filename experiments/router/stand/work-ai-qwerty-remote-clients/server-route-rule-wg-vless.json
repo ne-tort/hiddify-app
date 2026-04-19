@@ -1,0 +1,13 @@
+{
+  "_comment": "ХАБ: VLESS слушает 443/tcp (TLS, не Reality). UDP полезной нагрузки с этого inbound пересылается на WG в том же sing-box. override_port = listen_port WG на сервере (14290).",
+  "inbound": [
+    "vless-wg-in"
+  ],
+  "network": [
+    "udp"
+  ],
+  "action": "route",
+  "outbound": "direct",
+  "override_address": "127.0.0.1",
+  "override_port": 14290
+}

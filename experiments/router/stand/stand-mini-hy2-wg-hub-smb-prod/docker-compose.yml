@@ -1,0 +1,143 @@
+name: stand-mini-hy2-wg-hub-smb
+services:
+  singbox-server:
+    build: .
+    container_name: mini-hy2-wg-hub-prod-server
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.default.rp_filter=0
+      - net.ipv4.conf.all.send_redirects=0
+      - net.ipv4.conf.default.send_redirects=0
+    restart: unless-stopped
+    environment:
+      - ADD_OVERLAY_ROUTES=0
+    networks:
+      hy2_wg_hub_net:
+        ipv4_address: 172.30.0.2
+        aliases:
+          - minimal.cascade.local
+    volumes:
+      - ./server/compose:/etc/sing-box:ro
+      - ../stand-mini-tun-peer/tls:/certs:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+    ports:
+      - "59440:9440/tcp"
+      - "59440:9440/udp"
+      - "59441:9441/tcp"
+      - "59441:9441/udp"
+    command: ["run", "-D", "/var/lib/sing-box", "-C", "/etc/sing-box"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1',9450),3); s.close()\"",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  singbox-client1:
+    build: .
+    container_name: mini-hy2-wg-hub-prod-client1
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    restart: unless-stopped
+    depends_on:
+      singbox-server:
+        condition: service_healthy
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
+    networks:
+      - hy2_wg_hub_net
+    volumes:
+      - ./client1:/etc/sing-box:ro
+      - ./smbshare/client1:/smbshare
+      - ../stand-mini-tun-peer/tls:/certs:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+    command: ["run", "-D", "/var/lib/sing-box", "-C", "/etc/sing-box"]
+
+  singbox-client2:
+    build: .
+    container_name: mini-hy2-wg-hub-prod-client2
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    restart: unless-stopped
+    depends_on:
+      singbox-server:
+        condition: service_healthy
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
+    networks:
+      - hy2_wg_hub_net
+    volumes:
+      - ./client2:/etc/sing-box:ro
+      - ./smbshare/client2:/smbshare
+      - ../stand-mini-tun-peer/tls:/certs:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+    command: ["run", "-D", "/var/lib/sing-box", "-C", "/etc/sing-box"]
+
+  singbox-client3:
+    build: .
+    container_name: mini-hy2-wg-hub-prod-client3
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    restart: unless-stopped
+    depends_on:
+      singbox-server:
+        condition: service_healthy
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
+    networks:
+      - hy2_wg_hub_net
+    volumes:
+      - ./client3:/etc/sing-box:ro
+      - ./smbshare/client3:/smbshare
+      - ../stand-mini-tun-peer/tls:/certs:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+    command: ["run", "-D", "/var/lib/sing-box", "-C", "/etc/sing-box"]
+
+  singbox-client4:
+    build: .
+    container_name: mini-hy2-wg-hub-prod-client4
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    restart: unless-stopped
+    depends_on:
+      singbox-server:
+        condition: service_healthy
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
+    networks:
+      - hy2_wg_hub_net
+    volumes:
+      - ./client4:/etc/sing-box:ro
+      - ./smbshare/client4:/smbshare
+      - ../stand-mini-tun-peer/tls:/certs:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+    command: ["run", "-D", "/var/lib/sing-box", "-C", "/etc/sing-box"]
+
+networks:
+  hy2_wg_hub_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

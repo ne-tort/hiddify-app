@@ -50,6 +50,7 @@ export default {
     dns: "DNS",
     admins: "Quản trị viên",
     settings: "Cài đặt",
+    debug: "Gỡ lỗi",
   },
   main: {
     tiles: "OHB",

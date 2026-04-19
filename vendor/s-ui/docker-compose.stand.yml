@@ -21,6 +21,11 @@ services:
       - "./db:/app/db"
       - "./cert:/app/cert"
       - "letsencrypt_data:/etc/letsencrypt:ro"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
     tty: true
     restart: unless-stopped
     entrypoint: "./entrypoint.sh"

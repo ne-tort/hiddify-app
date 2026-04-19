@@ -51,6 +51,7 @@ export default {
     dns: "DNS",
     admins: "Администраторы",
     settings: "Настройки",
+    debug: "Дебаг",
   },
   main: {
     tiles: "Плитки",

@@ -79,6 +79,11 @@ const routes = [
         name: 'pages.settings',
         component: () => import('@/views/Settings.vue'),
       },
+      {
+        path: '/debug',
+        name: 'pages.debug',
+        component: () => import('@/views/Debug.vue'),
+      },
     ],
   },
 ]

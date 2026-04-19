@@ -1,0 +1,108 @@
+{
+  "log": {
+    "level": "debug"
+  },
+  "dns": {
+    "rules": [],
+    "servers": []
+  },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "wireguard-ma2",
+      "system": true,
+      "name": "wg",
+      "mtu": 1280,
+      "address": [
+        "10.0.0.1/24",
+        "fe80::40/128"
+      ],
+      "listen_port": 14290,
+      "private_key": "CAhemW1jsKqTIKiv+UrQIHyb6AB2Ntcy3QAouVll61U=",
+      "peers": [
+        {
+          "allowed_ips": [
+            "10.0.0.2/32"
+          ],
+          "public_key": "YYgJVV/ezjoricR0U+MOtf8Mtc/VF6MyiUgVpmn57Qs="
+        },
+        {
+          "allowed_ips": [
+            "10.0.0.3/32"
+          ],
+          "public_key": "f+K5InCXl99O9qjCnqIVig4XTzeDPWpV3cbq2imRzlM="
+        }
+      ]
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-36272",
+      "listen": "::",
+      "listen_port": 36272,
+      "transport": {},
+      "tls": {
+        "enabled": true,
+        "server_name": "hshp.host",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "hshp.host",
+            "server_port": 443
+          },
+          "private_key": "KFo1vl9MBTzRJBXXMz9Y4EqrmqWSXlTn3iFgnN_eDE8",
+          "short_id": [
+            "5c",
+            "7c5794"
+          ]
+        }
+      },
+      "users": [
+        {
+          "flow": "xtls-rprx-vision",
+          "name": "test",
+          "uuid": "2b243d99-36cc-4e9a-a415-e2128f89ac29"
+        },
+        {
+          "flow": "xtls-rprx-vision",
+          "name": "test2",
+          "uuid": "d47d0f58-67a8-40f9-9faa-0aec3e53a7e6"
+        }
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    }
+  ],
+  "route": {
+    "rule_set": [],
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "hijack-dns",
+        "protocol": [
+          "dns"
+        ]
+      },
+      {
+        "action": "route",
+        "inbound": [
+          "vless-36272"
+        ],
+        "network": [
+          "udp"
+        ],
+        "outbound": "direct",
+        "override_address": "127.0.0.1",
+        "override_port": 14290,
+        "udp_connect": true
+      }
+    ]
+  }
+}

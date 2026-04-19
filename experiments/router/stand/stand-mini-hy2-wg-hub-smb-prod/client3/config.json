@@ -1,0 +1,461 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "strategy": "prefer_ipv4",
+    "servers": [
+      {
+        "tag": "dns-remote",
+        "type": "udp",
+        "server": "1.1.1.1",
+        "server_port": 53
+      },
+      {
+        "tag": "local",
+        "type": "local"
+      }
+    ],
+    "rules": [
+      {
+        "domain": [
+          "singbox-server",
+          "minimal.cascade.local"
+        ],
+        "server": "local"
+      }
+    ],
+    "final": "dns-remote"
+  },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "wg-hub",
+      "system": true,
+      "name": "wg0",
+      "address": [
+        "10.0.0.4/24"
+      ],
+      "private_key": "8GRtNNP+0l91YagadAVFNQvA44b+YPzXX/+72LTPtko=",
+      "mtu": 1280,
+      "peers": [
+        {
+          "address": "singbox-server",
+          "port": 51820,
+          "public_key": "PbpHYwNY//7r9b/QsyJDoq9XD9L6tSm/YvFKIDby6Fw=",
+          "allowed_ips": [
+            "10.0.0.0/24"
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ],
+      "detour": "wg-transport-selector"
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun0",
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/128"
+      ],
+      "auto_route": true,
+      "strict_route": false,
+      "route_address": [
+        "0.0.0.0/1",
+        "128.0.0.0/1",
+        "::/1",
+        "8000::/1"
+      ],
+      "stack": "gvisor",
+      "mtu": 1280,
+      "route_exclude_address": [
+        "10.0.0.0/24"
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct",
+      "domain_resolver": "dns-remote"
+    },
+    {
+      "tag": "transport-selector",
+      "type": "urltest",
+      "outbounds": [
+        "anytls-out",
+        "vless-reality-out",
+        "vless-tcp-reality-out",
+        "vless-grpc-reality-out",
+        "shadowtls-out"
+      ],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "2m",
+      "tolerance": 50,
+      "interrupt_exist_connections": false
+    },
+    {
+      "tag": "wg-transport-selector",
+      "type": "selector",
+      "outbounds": [
+        "vless-grpc-reality-wg-out",
+        "vless-tcp-reality-wg-out",
+        "hy2-obfs-wg-out",
+        "anytls-wg-out",
+        "vless-wg-out",
+        "hy2-wg-out",
+        "tuic-wg-out"
+      ],
+      "interrupt_exist_connections": false,
+      "default": "vless-wg-out"
+    },
+    {
+      "tag": "hy2-out",
+      "type": "hysteria2",
+      "server": "singbox-server",
+      "server_port": 9440,
+      "password": "pass-client3",
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true
+      }
+    },
+    {
+      "tag": "hy2-wg-out",
+      "type": "hysteria2",
+      "server": "singbox-server",
+      "server_port": 9441,
+      "network": "udp",
+      "password": "pass-client3",
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true
+      }
+    },
+    {
+      "tag": "tuic-wg-out",
+      "type": "tuic",
+      "server": "singbox-server",
+      "server_port": 9444,
+      "uuid": "33333333-3333-3333-3333-333333333333",
+      "password": "pass-client3",
+      "congestion_control": "bbr",
+      "udp_relay_mode": "native",
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true
+      }
+    },
+    {
+      "tag": "vless-tcp-reality-wg-out",
+      "type": "vless",
+      "server": "singbox-server",
+      "server_port": 9470,
+      "uuid": "aaaaaaa3-3333-4333-8333-333333333333",
+      "flow": "xtls-rprx-vision",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "NDR9URoOCkq9_NhF4_OVu1cwgIpdBoAkW7kZLqz1nHs",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    },
+    {
+      "tag": "vless-grpc-reality-wg-out",
+      "type": "vless",
+      "server": "singbox-server",
+      "server_port": 9471,
+      "uuid": "aaaaaaa3-3333-4333-8333-333333333333",
+      "packet_encoding": "xudp",
+      "transport": {
+        "type": "grpc",
+        "service_name": "TunService"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "alpn": [
+          "h2"
+        ],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "NDR9URoOCkq9_NhF4_OVu1cwgIpdBoAkW7kZLqz1nHs",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    },
+    {
+      "tag": "hy2-obfs-wg-out",
+      "type": "hysteria2",
+      "server": "singbox-server",
+      "server_port": 9468,
+      "network": "udp",
+      "password": "pass-client3",
+      "obfs": {
+        "type": "salamander",
+        "password": "pass-client-obfs"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true,
+        "min_version": "1.3",
+        "max_version": "1.3"
+      }
+    },
+    {
+      "tag": "anytls-wg-out",
+      "type": "anytls",
+      "server": "singbox-server",
+      "server_port": 9456,
+      "password": "pass-client3",
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true
+      }
+    },
+    {
+      "tag": "vless-wg-out",
+      "type": "vless",
+      "server": "singbox-server",
+      "server_port": 9450,
+      "uuid": "aaaaaaa3-3333-4333-8333-333333333333",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "NDR9URoOCkq9_NhF4_OVu1cwgIpdBoAkW7kZLqz1nHs",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    },
+    {
+      "tag": "hy2-obfs-out",
+      "type": "hysteria2",
+      "server": "singbox-server",
+      "server_port": 9467,
+      "password": "pass-client3",
+      "obfs": {
+        "type": "salamander",
+        "password": "pass-client-obfs"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true,
+        "min_version": "1.3",
+        "max_version": "1.3"
+      }
+    },
+    {
+      "tag": "tuic-out",
+      "type": "tuic",
+      "server": "singbox-server",
+      "server_port": 9443,
+      "uuid": "33333333-3333-3333-3333-333333333333",
+      "password": "pass-client3",
+      "congestion_control": "bbr",
+      "udp_relay_mode": "native",
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true
+      }
+    },
+    {
+      "tag": "anytls-out",
+      "type": "anytls",
+      "server": "singbox-server",
+      "server_port": 9445,
+      "password": "pass-client3",
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "insecure": true
+      }
+    },
+    {
+      "tag": "vless-reality-out",
+      "type": "vless",
+      "server": "singbox-server",
+      "server_port": 9451,
+      "uuid": "aaaaaaa3-3333-4333-8333-333333333333",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "NDR9URoOCkq9_NhF4_OVu1cwgIpdBoAkW7kZLqz1nHs",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    },
+    {
+      "tag": "vless-tcp-reality-out",
+      "type": "vless",
+      "server": "singbox-server",
+      "server_port": 9452,
+      "uuid": "aaaaaaa3-3333-4333-8333-333333333333",
+      "flow": "xtls-rprx-vision",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "NDR9URoOCkq9_NhF4_OVu1cwgIpdBoAkW7kZLqz1nHs",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    },
+    {
+      "tag": "vless-grpc-reality-out",
+      "type": "vless",
+      "server": "singbox-server",
+      "server_port": 9453,
+      "uuid": "aaaaaaa3-3333-4333-8333-333333333333",
+      "packet_encoding": "xudp",
+      "transport": {
+        "type": "grpc",
+        "service_name": "TunService"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "www.heise.de",
+        "alpn": [
+          "h2"
+        ],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "NDR9URoOCkq9_NhF4_OVu1cwgIpdBoAkW7kZLqz1nHs",
+          "short_id": "0123456789abcdef"
+        }
+      }
+    },
+    {
+      "tag": "shadowtls-tls-out",
+      "type": "shadowtls",
+      "server": "singbox-server",
+      "server_port": 9459,
+      "version": 3,
+      "password": "PCD2Z4o12bKUoFa3cC97Hw==",
+      "tls": {
+        "enabled": true,
+        "server_name": "minimal.cascade.local",
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "min_version": "1.3",
+        "max_version": "1.3",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "insecure": true
+      }
+    },
+    {
+      "tag": "shadowtls-out",
+      "type": "shadowsocks",
+      "server": "singbox-server",
+      "server_port": 9459,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "PCD2Z4o12bKUoFa3cC97Hw==",
+      "udp_over_tcp": {
+        "enabled": true
+      },
+      "detour": "shadowtls-tls-out"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local",
+    "rules": [
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "port": [
+          53
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "ip_cidr": [
+          "0.0.0.0/0"
+        ],
+        "action": "route",
+        "outbound": "transport-selector"
+      },
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "ip_cidr": [
+          "::/0"
+        ],
+        "action": "route",
+        "outbound": "transport-selector"
+      }
+    ],
+    "final": "direct"
+  }
+}

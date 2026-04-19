@@ -1,0 +1,134 @@
+{
+  "log": {
+    "level": "debug"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns-local",
+        "type": "local"
+      }
+    ],
+    "final": "dns-local"
+  },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "wg-hub",
+      "mtu": 1280,
+      "address": [
+        "10.0.0.2/32"
+      ],
+      "private_key": "eE1IqQ54uiC8olmqni8t9paA+UD2pj0xZFPvr2/LZV4=",
+      "peers": [
+        {
+          "address": "sb-server",
+          "port": 14290,
+          "public_key": "I86trMlP7Oyv7SP9ETqZ0aDe2bnNAu4/KClxykIP7wo=",
+          "allowed_ips": [
+            "10.0.0.0/24",
+            "fe80::40/128"
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ],
+      "detour": "vless-wg-transport"
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun0",
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "auto_route": true,
+      "strict_route": false,
+      "route_address": [
+        "0.0.0.0/1",
+        "128.0.0.0/1"
+      ],
+      "stack": "gvisor",
+      "mtu": 1280
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct",
+      "domain_resolver": "dns-local"
+    },
+    {
+      "tag": "transport-selector",
+      "type": "selector",
+      "outbounds": [
+        "vless-wg-transport"
+      ],
+      "default": "vless-wg-transport"
+    },
+    {
+      "tag": "vless-wg-transport",
+      "type": "vless",
+      "server": "sb-server",
+      "server_port": 36272,
+      "uuid": "2b243d99-36cc-4e9a-a415-e2128f89ac29",
+      "flow": "xtls-rprx-vision",
+      "network": "tcp",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "hshp.host",
+        "alpn": [
+          "h2",
+          "http/1.1"
+        ],
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "WHIrXX47P_1jQKHPRrLV8e0J9Zy4-SUmELqY5FSPpgQ",
+          "short_id": "7c5794"
+        }
+      }
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-local",
+    "rules": [
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "port": [
+          53
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "ip_cidr": [
+          "10.0.0.0/24"
+        ],
+        "action": "route",
+        "outbound": "wg-hub"
+      },
+      {
+        "inbound": [
+          "tun-in"
+        ],
+        "ip_cidr": [
+          "0.0.0.0/0"
+        ],
+        "action": "route",
+        "outbound": "transport-selector"
+      }
+    ],
+    "final": "direct"
+  }
+}

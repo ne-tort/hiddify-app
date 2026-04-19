@@ -70,7 +70,7 @@
             </v-col>
           </v-row>
         </v-card>
-        <v-card subtitle="Route Option" v-if="ruleData.action == 'route-options'">
+        <v-card subtitle="Route Option" v-if="ruleData.action == 'route-options' || ruleData.action == 'route'">
           <v-row>
             <v-col cols="12" sm="6" md="4">
               <v-text-field v-model="ruleData.override_address" :label="$t('types.direct.overrideAddr')" hide-details></v-text-field>
@@ -218,6 +218,15 @@ export default {
     }
   },
   methods: {
+    applyRouteOptions(newRule: any) {
+      newRule.override_address = this.ruleData.override_address?.length > 0 ? this.ruleData.override_address : undefined
+      newRule.override_port = this.ruleData?.override_port > 0 ? this.ruleData.override_port : undefined
+      newRule.network_strategy = this.ruleData.network_strategy?.length > 0 ? this.ruleData.network_strategy : undefined
+      newRule.fallback_delay = this.ruleData.fallback_delay?.length > 0 ? this.ruleData.fallback_delay : undefined
+      newRule.udp_disable_domain_unmapping = this.ruleData.udp_disable_domain_unmapping ? true : undefined
+      newRule.udp_connect = this.ruleData.udp_connect ? true : undefined
+      newRule.udp_timeout = this.ruleData.udp_timeout?.length > 0 ? this.ruleData.udp_timeout : undefined
+    },
     updateData() {
       if (this.$props.index != -1) {
         const newData = JSON.parse(this.$props.data)
@@ -266,15 +275,10 @@ export default {
       switch (newRule.action){
         case 'route':
           newRule.outbound = this.ruleData.outbound
+          this.applyRouteOptions(newRule)
           break
         case 'route-options':
-          newRule.override_address = this.ruleData.override_address?.length > 0 ? this.ruleData.override_address : undefined
-          newRule.override_port = this.ruleData?.override_port > 0 ? this.ruleData.override_port : undefined
-          newRule.network_strategy = this.ruleData.network_strategy?.length > 0 ? this.ruleData.network_strategy : undefined
-          newRule.fallback_delay = this.ruleData.fallback_delay?.length > 0 ? this.ruleData.fallback_delay : undefined
-          newRule.udp_disable_domain_unmapping = this.ruleData.udp_disable_domain_unmapping? true : undefined
-          newRule.udp_connect = this.ruleData.udp_connect? true : undefined
-          newRule.udp_timeout = this.ruleData.udp_timeout?.length > 0 ? this.ruleData.udp_timeout : undefined
+          this.applyRouteOptions(newRule)
           break
         case 'reject':
           newRule.method = this.ruleData.method?.length > 0 ? this.ruleData.method : undefined

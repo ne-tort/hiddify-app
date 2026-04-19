@@ -1,0 +1,25 @@
+name: stand-hiddify-remote-clients
+services:
+  client1:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-hiddify-remote-client1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    volumes:
+      - ./client1.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+
+  client2:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-hiddify-remote-client2
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    volumes:
+      - ./client2.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]

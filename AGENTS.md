@@ -2,83 +2,76 @@
 
 ## Основная цель текущего этапа
 
-Интегрировать `L3Router` в `s-ui` как first-class endpoint:
+Реализовать опцию `WG Cloak` в маршрутизации Hiddify:
 
-- сборка `s-ui` на ядре `hiddify-core/hiddify-sing-box`,
-- поддержка `l3router` в backend API и frontend UI панели,
-- автогенерация и поддержание peer-привязок пользователей,
-- корректная генерация итогового `sing-box` конфига с rules,
-- отсутствие регрессий существующего поведения панели.
+- добавить переключатель в UI Routing и сохранить флаг в preferences;
+- при включенном флаге пересобирать WG endpoint-ы в cloak-форму;
+- скрывать WG endpoint-ы из `select`, чтобы на них нельзя было переключиться вручную;
+- автоматически добавлять `detour: select` для WG и необходимые `tun/route` правки;
+- сохранить совместимость с обычным поведением при выключенном флаге.
 
-## Где находится интеграция
+## Где находится реализация
 
-- Вендорная копия `s-ui`: `vendor/s-ui`.
-- Backend панели: `vendor/s-ui/service`, `vendor/s-ui/core`, `vendor/s-ui/database`.
-- Frontend панели: `vendor/s-ui/frontend`.
-- Ядро: `hiddify-core/hiddify-sing-box`.
+- UI/настройки: `lib/features/settings/overview/sections/route_options_page.dart`.
+- Preferences и сбор опций: `lib/features/settings/data/config_option_repository.dart`.
+- Модель конфиг-опций: `lib/singbox/model/singbox_config_option.dart`.
+- Генерация sing-box: `hiddify-core/v2/config/builder.go`, `hiddify-core/v2/config/outbound.go`.
+- Структура hiddify options: `hiddify-core/v2/config/hiddify_option.go`.
 
 ## Архитектурные инварианты (обязательные)
 
-- `l3router` остается endpoint-типом sing-box (`type: l3router`) и не переупаковывается в outbound.
-- У каждого клиента есть стабильный `peer_id` в `client.config.l3router`, одинаковый для всех `l3router` endpoint.
-- У каждого клиента есть фиксированный `user` в `client.config.l3router`, синхронизированный с именем клиента.
-- При создании endpoint или клиента peer-запись должна автоматически появляться без ручного шага администратора.
-- ACL-поля (`filter_source_ips`/`filter_destination_ips`) не должны принудительно включаться; `packet_filter` по умолчанию `false`.
-- Значения по умолчанию должны быть безопасными: без loopback-адресов и без пустых peer-конфигов, ломающих старт endpoint.
+- WG Cloak применяется только когда `wg-cloak=true`.
+- Если WG endpoint есть, но валидных proxy outbound нет, Cloak игнорируется (fallback на обычное поведение).
+- Для каждого WG endpoint при Cloak:
+  - endpoint остается в `endpoints`,
+  - исключается из списка `selector`,
+  - получает `detour: select`,
+  - использует клиентский режим (`system: false`).
+- Конфиг WG должен собираться из исходных данных endpoint-а (ключи, peers, allowed CIDR, адреса).
+- Изменения должны быть минимальными и не ломать WARP/обычные прокси/прочие endpoint-ы.
 
-## Правила синхронизации данных
+## Правила маршрутизации и TUN
 
-- Источник истины по пользователям: таблица `clients`.
-- Источник истины по endpoint: таблица `endpoints`.
-- Источник истины по peer identity: `clients.config.l3router`.
-- Любая операция над клиентами (`new/edit/del/bulk`) должна вызывать пересборку peer-списков всех `l3router` endpoint.
-- Любая операция `new/edit` над endpoint типа `l3router` должна нормализовать peers на основе актуальных клиентов.
-- Удаленный клиент должен исчезать из peers всех `l3router` endpoint.
+- При включенном WG Cloak в `tun.address` должна быть служебная IPv4 сеть и WG IPv4 `/32`.
+- Для WG CIDR должны добавляться route-правила вида:
+  - `inbound: tun-in`,
+  - `ip_cidr: <wg allowed CIDR>`,
+  - `outbound: <wg endpoint tag>`.
+- При нескольких WG endpoint-ах правила и tun-адреса должны формироваться для каждого.
 
 ## Runtime и совместимость
 
-- Базовый режим: панель генерирует полный JSON и умеет runtime add/remove endpoint.
-- Runtime API `l3router` в clashapi считать дополнительным ops-инструментом; не делать его обязательным для базового пути.
-- Если требуется runtime-пересинхронизация peers, допускается безопасный remove/add конкретного endpoint.
-- Не ломать существующие протоколы (`wireguard`, `warp`, `tailscale`, inbounds/outbounds/services).
+- Поведение без WG Cloak должно оставаться прежним.
+- Существующие профили с WG endpoint должны корректно открываться даже если флаг выключен.
+- Нельзя ломать `client-to-client`, `warp`, DNS-правила и базовые маршруты.
 
 ## Требования к UI
 
-- В `s-ui-frontend` тип `L3Router` должен быть доступен в селекторе endpoint.
-- Форма endpoint должна поддерживать хотя бы базовые поля:
-  - `tag`,
-  - `overlay_destination`,
-  - `packet_filter`,
-  - `peers` (редактируемый список).
-- Для `l3router` не выводить нерелевантные поля dial/multiplex, если они не используются.
-- Отображение endpoint в списке должно быть читаемым (минимум peers count и overlay destination).
+- В Routing должен быть видимый чекбокс `WG Cloak`.
+- Значение должно сохраняться в preferences ключом `wg-cloak`.
+- Флаг должен попадать в итоговые `SingboxConfigOption` и передаваться в core.
 
-## Требования к сборке
+## Требования к проверкам
 
-- `vendor/s-ui/go.mod` должен использовать локальный `hiddify-sing-box` через `replace`.
-- Build tags для `s-ui` и Docker-образов должны включать `with_l3router`.
-- Регистрация `l3router` в `vendor/s-ui/core` обязана иметь:
-  - `with_l3router`-реализацию,
-  - `!with_l3router`-stub с явной ошибкой пересборки.
-
-## Проверки перед сдачей
-
-- `go test -mod=mod ./...` в `vendor/s-ui`.
-- Минимум smoke по ядру: `go test ./protocol/l3router -count=1` в `hiddify-core/hiddify-sing-box`.
-- Проверка, что в diff нет тяжелых артефактов (`node_modules`, `dist`, бинарники, дампы).
-- Проверка, что `client.config` мигрируется и не теряет существующие креды других протоколов.
+- Проверить, что при `wg-cloak=true` WG endpoint не появляется в selector.
+- Проверить, что WG endpoint в итоговом JSON содержит `detour: select`.
+- Проверить, что `tun.address` содержит служебный IPv4 + WG `/32`.
+- Проверить, что есть правило `tun -> wg` для WG CIDR.
+- Проверить fallback сценарии:
+  - WG без proxy outbound,
+  - несколько WG endpoint-ов.
 
 ## Политика изменений в ядре
 
-- Правки в `hiddify-core/hiddify-sing-box` допускаются только для совместимости с `s-ui`.
-- Любая правка ядра должна быть минимальной и иметь понятный интеграционный мотив.
-- Не расширять API без необходимости для текущего этапа.
+- Правки в `hiddify-core/v2/config` должны быть точечными и обратимо-безопасными.
+- Не добавлять необязательные фичи вне WG Cloak.
+- Приоритет: корректность генерации конфига и отсутствие регрессий.
 
 ## Формат отчета по этапу
 
 В итоговом отчете обязательно указывать:
 
-- что изменено в `vendor/s-ui` (backend, frontend, core registration, build),
-- что изменено в `hiddify-core/hiddify-sing-box` (если изменялось),
-- какие команды верификации выполнены и их результат,
-- какие риски/ограничения остаются (например, loopback-сценарии без tun address требуют отдельного e2e).
+- какие файлы UI/preferences/core были изменены;
+- какие сценарии WG Cloak проверены и с каким результатом;
+- какие команды верификации запускались;
+- какие ограничения/риски остались (если есть).

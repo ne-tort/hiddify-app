@@ -1,0 +1,57 @@
+name: stand-hiddify-style-wg-vless
+services:
+  sb-server:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-hiddify-server
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    networks:
+      stand_net:
+        ipv4_address: 172.26.0.2
+    volumes:
+      - ./server.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+
+  client1:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-hiddify-client1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    depends_on:
+      - sb-server
+    networks:
+      stand_net:
+        ipv4_address: 172.26.0.3
+    volumes:
+      - ./client1.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+
+  client2:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-hiddify-client2
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    depends_on:
+      - sb-server
+    networks:
+      stand_net:
+        ipv4_address: 172.26.0.4
+    volumes:
+      - ./client2.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+
+networks:
+  stand_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.26.0.0/24

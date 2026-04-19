@@ -62,6 +62,7 @@ const menu = [
   { title: 'pages.dns', icon: 'mdi-dns',  path: '/dns' },
   { title: 'pages.admins', icon: 'mdi-account-tie',  path: '/admins' },
   { title: 'pages.settings', icon: 'mdi-cog',  path: '/settings' },
+  { title: 'pages.debug', icon: 'mdi-bug',  path: '/debug' },
 ]
 
 const Logout = async () => {

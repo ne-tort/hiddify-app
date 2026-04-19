@@ -1,0 +1,41 @@
+name: stand-local-vless-reality-wg-ma2
+services:
+  sb-server:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-local-sb-server
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    volumes:
+      - ./server.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+
+  client1:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-local-sb-client1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    depends_on:
+      - sb-server
+    volumes:
+      - ./client1.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+
+  client2:
+    image: ghcr.io/sagernet/sing-box:latest
+    container_name: stand-local-sb-client2
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    depends_on:
+      - sb-server
+    volumes:
+      - ./client2.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]

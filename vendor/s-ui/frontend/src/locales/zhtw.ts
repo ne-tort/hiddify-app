@@ -50,6 +50,7 @@ export default {
     dns: "DNS",
     admins: "管理員",
     settings: "設置",
+    debug: "除錯",
   },
   main: {
     tiles: "信息卡",

@@ -50,6 +50,7 @@ export default {
     dns: "DNS",
     admins: "ادمین‌ها",
     settings: "پیکربندی",
+    debug: "اشکال‌زدایی",
   },
   main: {
     tiles: "کاشی‌ها",

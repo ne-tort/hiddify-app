@@ -191,6 +191,7 @@ abstract class ConfigOptions {
 
   static final bypassLan = PreferencesNotifier.create<bool, bool>("bypass-lan", false);
   static final clientToClient = PreferencesNotifier.create<bool, bool>("client-to-client", false);
+  static final wgCloak = PreferencesNotifier.create<bool, bool>("wg-cloak", false);
 
   static final allowConnectionFromLan = PreferencesNotifier.create<bool, bool>("allow-connection-from-lan", false);
 
@@ -349,6 +350,7 @@ abstract class ConfigOptions {
     "clash-api-port": clashApiPort,
     "bypass-lan": bypassLan,
     "client-to-client": clientToClient,
+    "wg-cloak": wgCloak,
     "allow-connection-from-lan": allowConnectionFromLan,
     // "enable-dns-routing": enableDnsRouting,
 
@@ -460,6 +462,7 @@ abstract class ConfigOptions {
       setSystemProxy: mode == ServiceMode.systemProxy,
       bypassLan: ref.watch(bypassLan),
       clientToClient: ref.watch(clientToClient),
+      wgCloak: ref.watch(wgCloak),
       allowConnectionFromLan: ref.watch(allowConnectionFromLan),
       enableFakeDns: ref.watch(enableFakeDns),
       // enableDnsRouting: ref.watch(enableDnsRouting),

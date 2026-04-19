@@ -4,6 +4,8 @@ interface generalRule {
   outbound?: string
   override_address?: string
   override_port?: number
+  network_strategy?: string
+  fallback_delay?: string
   udp_disable_domain_unmapping?: boolean
   udp_connect?: boolean
   udp_timeout?: string
@@ -21,6 +23,8 @@ export const actionKeys = [
   'outbound',
   'override_address',
   'override_port',
+  'network_strategy',
+  'fallback_delay',
   'udp_disable_domain_unmapping',
   'udp_connect',
   'udp_timeout',

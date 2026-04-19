@@ -94,6 +94,12 @@ class RouteOptionsPage extends HookConsumerWidget {
             value: ref.watch(ConfigOptions.clientToClient),
             onChanged: ref.read(ConfigOptions.clientToClient.notifier).update,
           ),
+          SwitchListTile.adaptive(
+            title: const Text("WG Cloak"),
+            secondary: const Icon(Icons.shield_moon_rounded),
+            value: ref.watch(ConfigOptions.wgCloak),
+            onChanged: ref.read(ConfigOptions.wgCloak.notifier).update,
+          ),
           // Устарело: resolve-destination и ipv6-mode сохраняются в prefs/JSON, но в
           // hiddify-core/v2/config/builder.go не участвуют в генерации sing-box (логика
           // закомментирована / не подключена). Элементы UI скрыты, чтобы не вводить в заблуждение.

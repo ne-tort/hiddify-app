@@ -44,6 +44,7 @@ class SingboxConfigOption with _$SingboxConfigOption {
     required bool setSystemProxy,
     required bool bypassLan,
     required bool clientToClient,
+    required bool wgCloak,
     required bool allowConnectionFromLan,
     required bool enableFakeDns,
     // required bool enableDnsRouting,
