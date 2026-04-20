@@ -71,10 +71,12 @@ abstract class ConfigOptions {
     validator: (value) => value.isNotBlank,
   );
 
+  /// Default [DomainStrategy.adaptive] (UI «Auto») on first install and when the key is absent.
+  /// See [_remoteDnsDomainStrategyFromPref] for empty-string / legacy migration handling.
   static final remoteDnsDomainStrategy = PreferencesNotifier.create<DomainStrategy, String>(
     "remote-dns-domain-strategy",
     DomainStrategy.adaptive,
-    mapFrom: (value) => _domainStrategyFromPref(value),
+    mapFrom: (value) => _remoteDnsDomainStrategyFromPref(value),
     mapTo: _domainStrategyToPref,
   );
 
@@ -121,6 +123,15 @@ abstract class ConfigOptions {
       return DomainStrategy.adaptive;
     }
     return DomainStrategy.asIs;
+  }
+
+  /// Remote DNS domain strategy: empty prefs (e.g. bad v1 migration) default to **Auto** [DomainStrategy.adaptive],
+  /// not «as is», so first launch and repaired state match product default.
+  static DomainStrategy _remoteDnsDomainStrategyFromPref(String value) {
+    if (value.isEmpty) {
+      return DomainStrategy.adaptive;
+    }
+    return _domainStrategyFromPref(value);
   }
 
   static final mixedPort = PreferencesNotifier.create<int, int>(

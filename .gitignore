@@ -124,3 +124,10 @@ mem*.prof
 
 # Временные медиа/дампы отладки (не путать с кодом)
 *-dump.jsonl
+
+# WARP CLI (ViRb3 wgcf / wgcf-teams): бинарники и секреты профиля
+tools/wgcf/wgcf.exe
+tools/wgcf/wgcf-teams.zip
+tools/wgcf/wgcf-teams/wgcf-teams.exe
+tools/wgcf/wgcf-account.toml
+tools/wgcf/wgcf-profile.conf

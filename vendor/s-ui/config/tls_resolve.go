@@ -32,7 +32,8 @@ func tlsPairOK(certPath, keyPath string) bool {
 //  1) DB paths when both exist on disk
 //  2) SUI_WEB_TLS_CERT + SUI_WEB_TLS_KEY when both exist
 //  3) SUI_TLS_FALLBACK_CERT + SUI_TLS_FALLBACK_KEY, or DefaultFallbackTLSCert/DefaultFallbackTLSKey, when both exist
-// Returns "", "" if TLS should not be used.
+// Returns "", "" if the panel should listen on plain HTTP only (no cert pair resolved).
+// If non-empty paths are returned but loading the PEM pair fails at runtime, the web server falls back to HTTP.
 func ResolveWebTLSPaths(dbCert, dbKey string) (cert, key string) {
 	if tlsPairOK(dbCert, dbKey) {
 		return strings.TrimSpace(dbCert), strings.TrimSpace(dbKey)

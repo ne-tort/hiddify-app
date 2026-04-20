@@ -1,0 +1,42 @@
+# VPS 89.125.17.164 (cascade exit): тот же том LE, что у контейнера nginx.
+# Имя: amnezia-cascade-exit_certbot_conf (см. docker volume ls | grep certbot_conf).
+# Домен в путях: itvzlet2.ai-qwerty.ru
+#
+# Деплой: SUI_RUN_COMPOSE_FILE=docker-compose.stand.amnezia-cascade-itvzlet2.yml
+# nginx для /itvzlet/ должен проксировать на https://172.17.0.1:2095 (см. deploy/itvzlet2.ai-qwerty.ru.panel.conf).
+---
+services:
+  s-ui-local:
+    image: s-ui-local-hiddify
+    container_name: s-ui-local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        core: ../../hiddify-core/hiddify-sing-box
+      args:
+        BUILDKIT_INLINE_CACHE: "1"
+    hostname: "s-ui-local"
+    network_mode: host
+    environment:
+      SUI_WEB_TLS_CERT: /etc/letsencrypt/live/itvzlet2.ai-qwerty.ru/fullchain.pem
+      SUI_WEB_TLS_KEY: /etc/letsencrypt/live/itvzlet2.ai-qwerty.ru/privkey.pem
+      SUI_SUB_TLS_CERT: /etc/letsencrypt/live/itvzlet2.ai-qwerty.ru/fullchain.pem
+      SUI_SUB_TLS_KEY: /etc/letsencrypt/live/itvzlet2.ai-qwerty.ru/privkey.pem
+    volumes:
+      - "./db:/app/db"
+      - "./cert:/app/cert"
+      - "amnezia_cascade_certbot_conf:/etc/letsencrypt:ro"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    tty: true
+    restart: unless-stopped
+    entrypoint: "./entrypoint.sh"
+
+volumes:
+  amnezia_cascade_certbot_conf:
+    external: true
+    name: amnezia-cascade-exit_certbot_conf

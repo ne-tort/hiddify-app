@@ -60,19 +60,21 @@ class PreferencesVersion1Migration extends PreferencesMigrationStep with InfraLo
     }
 
     if (sharedPreferences.getString("remote-domain-dns-strategy") case final String remoteDomainStrategy) {
+      final mapped = _remoteDomainStrategyMapper(remoteDomainStrategy);
       loggy.debug(
-        "changing [remote-domain-dns-strategy] = [$remoteDomainStrategy] to [remote-dns-domain-strategy] = [${_domainStrategyMapper(remoteDomainStrategy)}]",
+        "changing [remote-domain-dns-strategy] = [$remoteDomainStrategy] to [remote-dns-domain-strategy] = [$mapped]",
       );
       await sharedPreferences.remove("remote-domain-dns-strategy");
-      await sharedPreferences.setString("remote-dns-domain-strategy", _domainStrategyMapper(remoteDomainStrategy));
+      await sharedPreferences.setString("remote-dns-domain-strategy", mapped);
     }
 
     if (sharedPreferences.getString("direct-domain-dns-strategy") case final String directDomainStrategy) {
+      final mapped = _directDomainStrategyMapper(directDomainStrategy);
       loggy.debug(
-        "changing [direct-domain-dns-strategy] = [$directDomainStrategy] to [direct-dns-domain-strategy] = [${_domainStrategyMapper(directDomainStrategy)}]",
+        "changing [direct-domain-dns-strategy] = [$directDomainStrategy] to [direct-dns-domain-strategy] = [$mapped]",
       );
       await sharedPreferences.remove("direct-domain-dns-strategy");
-      await sharedPreferences.setString("direct-dns-domain-strategy", _domainStrategyMapper(directDomainStrategy));
+      await sharedPreferences.setString("direct-dns-domain-strategy", mapped);
     }
 
     if (sharedPreferences.getInt("localDns-port") case final int directPort) {
@@ -97,13 +99,28 @@ class PreferencesVersion1Migration extends PreferencesMigrationStep with InfraLo
     _ => "ipv4_only",
   };
 
-  String _domainStrategyMapper(String persisted) => switch (persisted) {
+  /// Legacy remote DNS strategy → `remote-dns-domain-strategy` storage keys (adaptive = `auto`).
+  /// Unknown values default to **auto** (Auto / adaptive), not empty string (which would break UX).
+  String _remoteDomainStrategyMapper(String persisted) => switch (persisted) {
     "ipv4_only" || "prefer_ipv6" || "prefer_ipv4" || "ipv6_only" => persisted,
-    "auto" => "",
+    "auto" => "auto",
     "preferIpv6" => "prefer_ipv6",
     "preferIpv4" => "prefer_ipv4",
     "ipv4Only" => "ipv4_only",
     "ipv6Only" => "ipv6_only",
-    _ => "",
+    "as_is" => "as_is",
+    _ => "auto",
+  };
+
+  /// Legacy direct DNS strategy → `direct-dns-domain-strategy`; default unknown to **as_is**.
+  String _directDomainStrategyMapper(String persisted) => switch (persisted) {
+    "ipv4_only" || "prefer_ipv6" || "prefer_ipv4" || "ipv6_only" => persisted,
+    "auto" => "auto",
+    "preferIpv6" => "prefer_ipv6",
+    "preferIpv4" => "prefer_ipv4",
+    "ipv4Only" => "ipv4_only",
+    "ipv6Only" => "ipv6_only",
+    "as_is" => "as_is",
+    _ => "as_is",
   };
 }

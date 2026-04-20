@@ -1,5 +1,11 @@
-# Stand: s-ui с host network + том Let's Encrypt (персистентный) + периодический renew и HUP панели.
+# Stand: s-ui с host network + том Let's Encrypt (персистентный) + опциональный renew и HUP панели.
 # Порядок: DNS A на VPS → первичная выдача certbot (порт 80 свободен) → docker compose up -d.
+#
+# Профили Compose:
+#   (нет)     — только s-ui-local (панель HTTP за reverse proxy без LE в compose).
+#   cert      — одноразовая выдача: `docker compose --profile cert run ...` или `python run.py certbot`.
+#   le        — фоновый certbot-renew. Включение: `SUI_RUN_COMPOSE_PROFILES=le` в run.env или
+#               `docker compose --profile le up -d`.
 ---
 services:
   s-ui-local:
@@ -42,7 +48,9 @@ services:
       - "80:80"
 
   # Раз в 12h: certbot renew; при успешном продлении — сигнал HUP контейнеру панели (перечитать TLS).
+  # Без профиля `le` не поднимается (TLS у nginx / без авто-renew в compose).
   certbot-renew:
+    profiles: ["le"]
     image: certbot/certbot:latest
     container_name: certbot-renew-sui-stand
     volumes:

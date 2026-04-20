@@ -23,12 +23,16 @@ go mod/build и выглядит как «зависание» — это дол
 `docker compose down --remove-orphans`, чтобы контейнеры корректно пересоздались с новым образом.
 SUI_RUN_DEPLOY_IMAGE_PRUNE=1 — после `up` выполнить `docker image prune -f` (убирает «висячие»
 слои после смены тега на тот же :latest).
+
+Опционально: SUI_RUN_COMPOSE_PROFILES=le (через запятую) — передать в `docker compose` для up/down
+(например профиль `le`: фоновый certbot-renew в docker-compose.stand.yml). Без этого — только s-ui-local.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -62,7 +66,8 @@ def _load_dotenv() -> None:
             key = key.strip()
             val = val.strip().strip("'").strip('"')
             if key:
-                os.environ.setdefault(key, val)
+                # run.env — источник истины для деплоя; перекрывает случайные SUI_* в окружении shell.
+                os.environ[key] = val
     dep = _SUI_ROOT / "deploy" / "deploy.env"
     if dep.is_file():
         for raw in dep.read_text(encoding="utf-8").splitlines():
@@ -309,12 +314,33 @@ def _env_bool(name: str, default: bool = True) -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+def _compose_profile_args_shell() -> str:
+    """
+    Фрагмент для удалённого shell: `docker compose ...` + `--profile X` для каждого имени из
+    SUI_RUN_COMPOSE_PROFILES (через запятую), например `le` для certbot-renew в stand compose.
+    """
+    raw = (os.environ.get("SUI_RUN_COMPOSE_PROFILES") or "").strip()
+    if not raw:
+        return ""
+    parts: list[str] = []
+    for p in raw.split(","):
+        p = p.strip()
+        if p:
+            parts.append(f"--profile {shlex.quote(p)}")
+    return " " + " ".join(parts) if parts else ""
+
+
 def cmd_down(cfg: dict) -> None:
     """Остановить стек на VPS (перед сменой образа с тем же тегом — контейнеры пересоздаются при up)."""
     _require_cfg(cfg)
     d = _remote_compose_dir(cfg)
     c = cfg["compose"]
-    script = f"set -e; cd {d} && docker compose -f {c} down --remove-orphans"
+    prof = _compose_profile_args_shell()
+    # mkdir — первый деплой на чистый VPS; down только если есть compose (иначе зелёное поле).
+    script = (
+        f"set -e; mkdir -p {d}/db {d}/cert; "
+        f"cd {d} && if [ -f {shlex.quote(c)} ]; then docker compose -f {shlex.quote(c)}{prof} down --remove-orphans; fi"
+    )
     print(f"[run] down: {script}", file=sys.stderr)
     _ssh(cfg, script, check=True)
 
@@ -324,7 +350,8 @@ def cmd_up(cfg: dict) -> None:
     _require_cfg(cfg)
     d = _remote_compose_dir(cfg)
     c = cfg["compose"]
-    script = f"set -e; cd {d} && docker compose -f {c} up -d --no-build"
+    prof = _compose_profile_args_shell()
+    script = f"set -e; cd {d} && docker compose -f {c}{prof} up -d --no-build"
     print(f"[run] up: {script}", file=sys.stderr)
     _ssh(cfg, script, check=True)
 
@@ -347,8 +374,9 @@ def cmd_remote_build(cfg: dict) -> None:
     cmd_sync(cfg)
     d = _remote_compose_dir(cfg)
     c = cfg["compose"]
+    prof = _compose_profile_args_shell()
     script = (
-        f"set -e; cd {d} && docker compose -f {c} build && docker compose -f {c} up -d"
+        f"set -e; cd {d} && docker compose -f {c}{prof} build && docker compose -f {c}{prof} up -d"
     )
     print(f"[run] remote-build: {script}", file=sys.stderr)
     _ssh(cfg, script, check=True)

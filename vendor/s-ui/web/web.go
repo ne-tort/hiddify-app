@@ -163,20 +163,23 @@ func (s *Server) Start() (err error) {
 	if err != nil {
 		return err
 	}
+	tlsEnabled := false
 	if certFile != "" && keyFile != "" {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			listener.Close()
-			return err
+		cert, errTLS := tls.LoadX509KeyPair(certFile, keyFile)
+		if errTLS != nil {
+			// Paths existed at resolve time but PEM is invalid or key mismatch — serve plain HTTP (e.g. reverse proxy TLS).
+			logger.Warning("web: TLS load failed, using HTTP: ", errTLS)
+		} else {
+			c := &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			}
+			listener = network.NewAutoHttpsListener(listener)
+			listener = tls.NewListener(listener, c)
+			tlsEnabled = true
 		}
-		c := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		}
-		listener = network.NewAutoHttpsListener(listener)
-		listener = tls.NewListener(listener, c)
 	}
 
-	if certFile != "" && keyFile != "" {
+	if tlsEnabled {
 		logger.Info("web server run https on", listener.Addr())
 	} else {
 		logger.Info("web server run http on", listener.Addr())
