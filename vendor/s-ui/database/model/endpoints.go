@@ -102,6 +102,10 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 			for _, k := range []string{
 				"member_group_ids",
 				"member_client_ids",
+				"persistent_keepalive_interval",
+				"forward_allow",
+				"cloak_enabled",
+				"cloak_detour_tag",
 			} {
 				delete(restFields, k)
 			}

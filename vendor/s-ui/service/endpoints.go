@@ -3,9 +3,11 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/alireza0/s-ui/database"
@@ -34,7 +36,6 @@ const (
 	wireGuardType             = "wireguard"
 	l3RouterDefaultOverlayDst = "198.18.0.1:33333"
 	l3PeerIPAllocKey          = "peer_ip_alloc"
-	wgBasePrefix              = "10.0"
 )
 
 func (o *EndpointService) GetAll() (*[]map[string]interface{}, error) {
@@ -516,6 +517,9 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 	if options == nil {
 		options = make(map[string]interface{})
 	}
+	if err := validateAndNormalizeWireGuardOptions(options); err != nil {
+		return false, err
+	}
 	changed := false
 	if _, exists := options["member_group_ids"]; !exists {
 		options["member_group_ids"] = []uint{}
@@ -525,12 +529,11 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 		options["member_client_ids"] = []uint{}
 		changed = true
 	}
-	wgSubnet, addrChanged, err := s.ensureWireGuardEndpointAddress(tx, endpoint, options)
-	if err != nil {
-		return false, err
-	}
-	if addrChanged {
-		changed = true
+	poolPrefix, poolOK := wgPeerPoolPrefixFromEndpointAddress(options)
+	endpointKeepalive := intFromAny(options["persistent_keepalive_interval"])
+	if endpointKeepalive <= 0 {
+		delete(options, "persistent_keepalive_interval")
+		endpointKeepalive = 0
 	}
 
 	existingPeers := normalizePeerMaps(options["peers"])
@@ -566,7 +569,10 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 		}
 		norm := wgNormalizeAllowedIPList(toStringSlice(p["allowed_ips"]))
 		if len(norm) == 0 {
-			ip := wgPickLowestFreePeerIP(used, wgSubnet)
+			if !poolOK {
+				return false, common.NewError("wireguard endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation")
+			}
+			ip := wgPickLowestFreePeerIP(used, poolPrefix)
 			p["allowed_ips"] = []string{ip}
 			used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
 			changed = true
@@ -579,6 +585,16 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 				used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
 			}
 		}
+		current := intFromAny(p["persistent_keepalive_interval"])
+		if endpointKeepalive > 0 {
+			if current != endpointKeepalive {
+				p["persistent_keepalive_interval"] = endpointKeepalive
+				changed = true
+			}
+		} else if current > 0 {
+			delete(p, "persistent_keepalive_interval")
+			changed = true
+		}
 	}
 
 	managedPeers := make([]map[string]interface{}, 0, len(ids))
@@ -589,7 +605,10 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 			allowedIPs = wgNormalizeAllowedIPList(toStringSlice(existing["allowed_ips"]))
 		}
 		if len(allowedIPs) == 0 {
-			ip := wgPickLowestFreePeerIP(used, wgSubnet)
+			if !poolOK {
+				return false, common.NewError("wireguard endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation")
+			}
+			ip := wgPickLowestFreePeerIP(used, poolPrefix)
 			allowedIPs = []string{ip}
 			used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
 			changed = true
@@ -607,6 +626,9 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 			"private_key": id.PrivateKey,
 			"public_key":  id.PublicKey,
 			"allowed_ips": allowedIPs,
+		}
+		if endpointKeepalive > 0 {
+			row["persistent_keepalive_interval"] = endpointKeepalive
 		}
 		managedPeers = append(managedPeers, row)
 	}
@@ -760,161 +782,27 @@ func ensureWireGuardManualPeerKeys(p map[string]interface{}) (bool, error) {
 	return changed, nil
 }
 
-func (s *EndpointService) ensureWireGuardEndpointAddress(tx *gorm.DB, endpoint *model.Endpoint, options map[string]interface{}) (int, bool, error) {
-	currentSubnet := wgExtractSubnetFromAddressList(options["address"])
-	if currentSubnet >= 0 && wgSubnetFreeForEndpoint(tx, endpoint.Id, currentSubnet) {
-		if changed := wgEnsureServerAddress(options, currentSubnet); changed {
-			return currentSubnet, true, nil
-		}
-		return currentSubnet, false, nil
-	}
-	subnet, err := wgAllocateEndpointSubnet(tx, endpoint.Id)
-	if err != nil {
-		return 1, false, err
-	}
-	_ = wgEnsureServerAddress(options, subnet)
-	return subnet, true, nil
-}
-
-func wgExtractSubnetFromAddressList(raw interface{}) int {
-	for _, addr := range wgWireGuardEndpointAddressKeys(map[string]interface{}{"address": raw}) {
-		prefix, err := netip.ParsePrefix(addr)
-		if err != nil || !prefix.Addr().Is4() {
+func wgPeerPoolPrefixFromEndpointAddress(options map[string]interface{}) (netip.Prefix, bool) {
+	for _, raw := range wgWireGuardEndpointAddressKeys(options) {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil || !p.Addr().Is4() {
 			continue
 		}
-		oct := prefix.Addr().As4()
-		if oct[0] == 10 && oct[1] == 0 {
-			return int(oct[2])
-		}
-	}
-	return -1
-}
-
-// wgEnsureServerAddress sets defaults for the WireGuard **server** interface addresses:
-//   - IPv4: 10.0.<subnet>.1/24 (not /32 — matches typical LAN semantics)
-//   - IPv6: fe80::1/128 if not present
-// If the user already set an IPv4 in 10.0.<subnet>.*, it is kept (editable, not overwritten).
-func wgEnsureServerAddress(options map[string]interface{}, subnet int) bool {
-	if subnet < 0 || subnet > 254 {
-		subnet = 0
-	}
-	defaultV4 := fmt.Sprintf("%s.%d.1/24", wgBasePrefix, subnet)
-	defaultV6 := "fe80::1/128"
-	existing := wgWireGuardEndpointAddressKeys(options)
-
-	var primaryV4 string
-	var extras []string
-	for _, addr := range existing {
-		n := strings.TrimSpace(addr)
-		if n == "" {
+		pm := p.Masked()
+		if pm.Bits() >= 31 {
 			continue
 		}
-		p, err := netip.ParsePrefix(n)
-		if err != nil {
-			extras = append(extras, n)
-			continue
-		}
-		if p.Addr().Is4() {
-			o4 := p.Addr().As4()
-			if o4[0] == 10 && o4[1] == 0 && int(o4[2]) == subnet {
-				if primaryV4 == "" {
-					primaryV4 = n
-					continue
-				}
-			}
-			extras = append(extras, n)
-			continue
-		}
-		extras = append(extras, n)
+		return pm, true
 	}
-	if primaryV4 != "" {
-		if p, err := netip.ParsePrefix(primaryV4); err == nil && p.Addr().Is4() {
-			o := p.Addr().As4()
-			if o[0] == 10 && o[1] == 0 && int(o[2]) == subnet && o[3] == 1 && p.Bits() == 32 {
-				primaryV4 = defaultV4
-			}
-		}
-	}
-	if primaryV4 == "" {
-		primaryV4 = defaultV4
-	}
-
-	out := []string{primaryV4}
-	defV6Key := wgNormalizeAllowedIPKey(defaultV6)
-	hasDefV6 := false
-	for _, x := range extras {
-		if wgNormalizeAllowedIPKey(x) == defV6Key {
-			hasDefV6 = true
-		}
-		out = append(out, x)
-	}
-	if !hasDefV6 {
-		out = append(out, defaultV6)
-	}
-
-	before := wgWireGuardEndpointAddressKeys(options)
-	if slicesEqualString(before, out) {
-		return false
-	}
-	options["address"] = out
-	return true
-}
-
-func wgSubnetFreeForEndpoint(tx *gorm.DB, endpointID uint, subnet int) bool {
-	var endpoints []model.Endpoint
-	if err := tx.Model(model.Endpoint{}).Where("type = ? AND id <> ?", wireGuardType, endpointID).Find(&endpoints).Error; err != nil {
-		return false
-	}
-	for _, ep := range endpoints {
-		var opts map[string]interface{}
-		if len(ep.Options) > 0 {
-			_ = json.Unmarshal(ep.Options, &opts)
-		}
-		if wgExtractSubnetFromAddressList(opts["address"]) == subnet {
-			return false
-		}
-	}
-	return true
-}
-
-func wgAllocateEndpointSubnet(tx *gorm.DB, endpointID uint) (int, error) {
-	used := map[int]struct{}{}
-	var endpoints []model.Endpoint
-	if err := tx.Model(model.Endpoint{}).Where("type = ? AND id <> ?", wireGuardType, endpointID).Find(&endpoints).Error; err != nil {
-		return 0, err
-	}
-	for _, ep := range endpoints {
-		var opts map[string]interface{}
-		if len(ep.Options) > 0 {
-			_ = json.Unmarshal(ep.Options, &opts)
-		}
-		if s := wgExtractSubnetFromAddressList(opts["address"]); s >= 0 {
-			used[s] = struct{}{}
-		}
-	}
-	for i := 0; i <= 254; i++ {
-		if _, ok := used[i]; !ok {
-			return i, nil
-		}
-	}
-	return 0, fmt.Errorf("wireguard subnet pool exhausted")
+	return netip.Prefix{}, false
 }
 
 func wgNormalizeAllowedIPKey(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
+	n, ok := wgNormalizeCIDROrIP(s)
+	if !ok {
 		return ""
 	}
-	if p, err := netip.ParsePrefix(s); err == nil {
-		return p.Masked().String()
-	}
-	if a, err := netip.ParseAddr(s); err == nil {
-		if a.Is4() {
-			return netip.PrefixFrom(a, 32).Masked().String()
-		}
-		return a.String()
-	}
-	return s
+	return n
 }
 
 func wgNormalizeAllowedIPList(in []string) []string {
@@ -946,11 +834,23 @@ func wgWireGuardEndpointAddressKeys(options map[string]interface{}) []string {
 	case []interface{}:
 		out := make([]string, 0, len(v))
 		for _, x := range v {
-			out = append(out, strings.TrimSpace(fmt.Sprint(x)))
+			s := strings.TrimSpace(fmt.Sprint(x))
+			if s == "" {
+				continue
+			}
+			out = append(out, s)
 		}
 		return out
 	case []string:
-		return v
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			s := strings.TrimSpace(x)
+			if s == "" {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out
 	default:
 		return nil
 	}
@@ -971,21 +871,205 @@ func wgCollectUsedPeerIPs(peers []map[string]interface{}, options map[string]int
 		if k != "" {
 			used[k] = struct{}{}
 		}
+		// Reserve endpoint interface host address so peer allocator never assigns server IP.
+		if p, err := netip.ParsePrefix(strings.TrimSpace(strings.ReplaceAll(addr, "\\", "/"))); err == nil {
+			if p.Addr().Is4() {
+				used[netip.PrefixFrom(p.Addr(), 32).Masked().String()] = struct{}{}
+			} else if p.Addr().Is6() {
+				used[netip.PrefixFrom(p.Addr(), 128).Masked().String()] = struct{}{}
+			}
+		}
 	}
 	return used
 }
 
-func wgPickLowestFreePeerIP(used map[string]struct{}, subnet int) string {
-	if subnet < 0 || subnet > 254 {
-		subnet = 1
+func validateAndNormalizeWireGuardOptions(options map[string]interface{}) error {
+	if options == nil {
+		return nil
 	}
-	for i := 2; i < 255; i++ {
-		candidate := fmt.Sprintf("%s.%d.%d/32", wgBasePrefix, subnet, i)
+	if boolFromAnyWG(options["cloak_enabled"]) {
+		options["cloak_enabled"] = true
+		tag := strings.TrimSpace(fmt.Sprint(options["cloak_detour_tag"]))
+		if tag == "" || strings.EqualFold(tag, "<nil>") {
+			delete(options, "cloak_detour_tag")
+		} else {
+			options["cloak_detour_tag"] = tag
+		}
+	} else {
+		delete(options, "cloak_enabled")
+		delete(options, "cloak_detour_tag")
+	}
+	addresses := wgWireGuardEndpointAddressKeys(options)
+	if len(addresses) > 0 {
+		options["address"] = addresses
+	}
+	if len(addresses) > 0 {
+		for _, raw := range addresses {
+			if err := wgValidateEndpointAddress(raw); err != nil {
+				return common.NewErrorf("wireguard address %q invalid: %v", raw, err)
+			}
+		}
+		if err := wgValidateNoHostSubnetConflict(addresses); err != nil {
+			return err
+		}
+	}
+	peers := normalizePeerMaps(options["peers"])
+	for i := range peers {
+		rawIPs := toStringSlice(peers[i]["allowed_ips"])
+		if len(rawIPs) == 0 {
+			continue
+		}
+		for _, raw := range rawIPs {
+			if _, ok := wgNormalizeCIDROrIP(raw); !ok {
+				return common.NewErrorf("wireguard peer[%d] allowed_ips contains invalid value: %q", i+1, raw)
+			}
+		}
+	}
+	return nil
+}
+
+func boolFromAnyWG(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		s := strings.TrimSpace(strings.ToLower(x))
+		return s == "true" || s == "1" || s == "yes" || s == "on"
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	default:
+		return false
+	}
+}
+
+func wgValidateEndpointAddress(raw string) error {
+	value := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if value == "" {
+		return common.NewError("empty")
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return err
+	}
+	if prefix.Addr().Is4() {
+		// Interface address must not be the network address for subnet prefixes.
+		if prefix.Bits() < 32 && prefix.Addr() == prefix.Masked().Addr() {
+			return common.NewError("network address is not allowed; use host address (e.g. x.x.x.1/24)")
+		}
+	}
+	return nil
+}
+
+func wgPickLowestFreePeerIP(used map[string]struct{}, pool netip.Prefix) string {
+	hostBits := 32 - pool.Bits()
+	total := 1 << hostBits
+	usable := total - 2
+	if usable <= 0 {
+		return "0.0.0.0/0"
+	}
+	for idx := 0; idx < usable; idx++ {
+		pr, err := nthUsableIPv4InPool(pool, idx)
+		if err != nil {
+			continue
+		}
+		// Peer routes are host routes.
+		candidate := fmt.Sprintf("%s/32", pr.Addr().String())
 		if _, ok := used[wgNormalizeAllowedIPKey(candidate)]; !ok {
 			return candidate
 		}
 	}
 	return "0.0.0.0/0"
+}
+
+func wgValidateNoHostSubnetConflict(addresses []string) error {
+	if len(addresses) == 0 {
+		return nil
+	}
+	hostPrefixes := localIPv4PrefixesForWGConflictCheck()
+	if len(hostPrefixes) == 0 {
+		return nil
+	}
+	for _, raw := range addresses {
+		p, err := netip.ParsePrefix(strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/")))
+			if err != nil {
+			continue
+		}
+		if !p.Addr().Is4() {
+			continue
+		}
+		pm := p.Masked()
+		for _, hp := range hostPrefixes {
+			hm := hp.Masked()
+			if pm.Contains(hm.Addr()) || hm.Contains(pm.Addr()) {
+				return common.NewErrorf(
+					"wireguard address %q conflicts with host subnet %q; choose another subnet (e.g. 10.66.x.1/24)",
+					raw,
+					hm.String(),
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func localIPv4PrefixesForWGConflictCheck() []netip.Prefix {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	out := make([]netip.Prefix, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	for _, iface := range ifaces {
+		name := strings.ToLower(strings.TrimSpace(iface.Name))
+		// Skip loopback and virtual interfaces typically managed by tunnels.
+		if iface.Flags&net.FlagLoopback != 0 || strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "tun") {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok || ipn == nil || ipn.IP == nil || ipn.Mask == nil {
+				continue
+			}
+			ip4 := ipn.IP.To4()
+			if ip4 == nil {
+				continue
+			}
+			p, err := netip.ParsePrefix(ipn.String())
+			if err != nil {
+				continue
+			}
+			pm := p.Masked().String()
+			if _, ok := seen[pm]; ok {
+				continue
+			}
+			seen[pm] = struct{}{}
+			out = append(out, p.Masked())
+		}
+	}
+	return out
+}
+
+func wgNormalizeCIDROrIP(raw string) (string, bool) {
+	value := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if value == "" {
+		return "", false
+	}
+	if p, err := netip.ParsePrefix(value); err == nil {
+		return p.Masked().String(), true
+	}
+	if addr, err := netip.ParseAddr(value); err == nil {
+		if addr.Is4() {
+			return netip.PrefixFrom(addr, 32).Masked().String(), true
+		}
+		return netip.PrefixFrom(addr, 128).Masked().String(), true
+	}
+	return "", false
 }
 
 func slicesEqualString(a, b []string) bool {
@@ -1179,6 +1263,34 @@ func uintFromAny(v interface{}) uint {
 		}
 	}
 	return 0
+}
+
+func intFromAny(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case uint:
+		return int(n)
+	case json.Number:
+		x, _ := n.Int64()
+		return int(x)
+	case string:
+		s := strings.TrimSpace(n)
+		if s == "" {
+			return 0
+		}
+		x, err := strconv.Atoi(s)
+		if err != nil {
+			return 0
+		}
+		return x
+	default:
+		return 0
+	}
 }
 
 func defaultL3RouterCIDR(peerID uint64) string {

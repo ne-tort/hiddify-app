@@ -54,11 +54,21 @@
           color="primary"
           variant="tonal"
           :loading="loading"
+          :disabled="Boolean(wireguardValidationError)"
           @click="saveChanges"
         >
           {{ $t('actions.save') }}
         </v-btn>
       </v-card-actions>
+      <v-alert
+        v-if="wireguardValidationError"
+        type="error"
+        variant="tonal"
+        density="compact"
+        class="ma-4 mt-0"
+      >
+        {{ wireguardValidationError }}
+      </v-alert>
     </v-card>
   </v-dialog>
 </template>
@@ -85,6 +95,10 @@ export default {
     },
     clients() {
       return Data().clients ?? []
+    },
+    wireguardValidationError(): string | null {
+      if (this.endpoint.type !== EpTypes.Wireguard) return null
+      return this.validateWireguardFields()
     },
   },
   data() {
@@ -215,12 +229,49 @@ export default {
           return
         }
       }
+      if (this.endpoint.type === EpTypes.Wireguard && this.wireguardValidationError) {
+        push.error({ message: this.wireguardValidationError })
+        return
+      }
 
       // save data
       this.loading = true
       const success = await Data().save("endpoints", this.$props.id == 0 ? "new" : "edit", this.endpoint)
       if (success) this.closeModal()
       this.loading = false
+    },
+    normalizeCIDRToken(raw: string): string {
+      return String(raw ?? '').trim().replaceAll('\\', '/')
+    },
+    isCIDROrIPToken(raw: string): boolean {
+      const token = this.normalizeCIDRToken(raw)
+      if (token.length === 0) return false
+      if (token.includes('/')) {
+        const parts = token.split('/')
+        if (parts.length !== 2 || parts[0].length === 0 || parts[1].length === 0) return false
+        return /^\d+$/.test(parts[1])
+      }
+      return true
+    },
+    validateWireguardFields(): string | null {
+      const addrs = Array.isArray(this.endpoint.address) ? this.endpoint.address : []
+      for (let i = 0; i < addrs.length; i += 1) {
+        const n = this.normalizeCIDRToken(addrs[i])
+        if (!this.isCIDROrIPToken(n)) {
+          return `WireGuard address invalid: ${String(addrs[i])}`
+        }
+      }
+      const peers = Array.isArray(this.endpoint.peers) ? this.endpoint.peers : []
+      for (let pi = 0; pi < peers.length; pi += 1) {
+        const allowed = Array.isArray(peers[pi]?.allowed_ips) ? peers[pi].allowed_ips : []
+        for (let ai = 0; ai < allowed.length; ai += 1) {
+          const n = this.normalizeCIDRToken(allowed[ai])
+          if (!this.isCIDROrIPToken(n)) {
+            return `WireGuard peer[${pi + 1}] allowed_ips invalid: ${String(allowed[ai])}`
+          }
+        }
+      }
+      return null
     },
     async genWgKey(){
       this.loading = true

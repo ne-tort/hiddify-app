@@ -244,6 +244,7 @@ import Data from '@/store/modules/data'
 import { locale } from '@/locales'
 import GroupMultiSelect from '@/components/GroupMultiSelect.vue'
 import HttpUtils from '@/plugins/httputil'
+import { toRaw } from 'vue'
 
 export default {
   props: ['visible', 'id', 'inboundTags'],
@@ -300,7 +301,12 @@ export default {
       this.client.links = [
                         ...this.extLinks.filter(l => l.uri != ''),
                         ...this.subLinks.filter(l => l.uri != '')]
-      const success = await Data().save("clients", this.$props.id == 0 ? "new" : "edit", this.client)
+      // Plain object + explicit group_ids so api/save JSON always includes group_ids (Vue proxy / key order quirks).
+      const payload = {
+        ...toRaw(this.client),
+        group_ids: (this.client.group_ids ?? []).map((x: number) => Number(x)),
+      }
+      const success = await Data().save("clients", this.$props.id == 0 ? "new" : "edit", payload)
       if (success) this.closeModal()
       this.loading = false
     },

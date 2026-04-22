@@ -3,6 +3,9 @@
 # тогда: $env:DOCKER_BUILDKIT='0'; docker compose build
 # SMB: шара [wgshare] на каталоге /smbshare (см. smbshare/client*), пользователь wguser/wgpass
 # (как в stand-mini-hy2-wg-hub-smb-prod). Доступ с другого пира: //10.0.0.2/wgshare или //10.0.0.3/wgshare.
+#
+# По умолчанию стенд НЕ поднимается: профиль manual + restart: no.
+# Запуск вручную: COMPOSE_PROFILES=manual docker compose up -d   (PowerShell: $env:COMPOSE_PROFILES='manual'; docker compose up -d)
 name: work-ai-qwerty-remote-clients
 services:
   client1:
@@ -12,7 +15,9 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
-    restart: unless-stopped
+    restart: "no"
+    profiles:
+      - manual
     environment:
       - START_SMB_SERVER=1
       - SMB_SHARE_DIR=/smbshare
@@ -31,7 +36,9 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
-    restart: unless-stopped
+    restart: "no"
+    profiles:
+      - manual
     environment:
       - START_SMB_SERVER=1
       - SMB_SHARE_DIR=/smbshare

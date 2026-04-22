@@ -34,7 +34,11 @@ export interface WgPeer {
 export interface WireGuard extends EndpointBasics, Dial {
   system?: boolean
   name?: string
+  forward_allow?: boolean
+  cloak_enabled?: boolean
+  cloak_detour_tag?: string
   mtu?: number
+  persistent_keepalive_interval?: number
   address: string[]
   private_key: string
   listen_port: number
@@ -105,7 +109,7 @@ export type Endpoint = InterfaceMap[keyof InterfaceMap]
 
 // Create defaultValues object dynamically
 const defaultValues: Record<EpType, Endpoint> = {
-  wireguard: { type: EpTypes.Wireguard, address: ['10.0.0.2/32','fe80::2/128'], private_key: '', listen_port: 0, peers: [], member_group_ids: [], member_client_ids: [] },
+  wireguard: { type: EpTypes.Wireguard, address: ['10.0.0.2/32','fe80::2/128'], private_key: '', listen_port: 0, peers: [], member_group_ids: [], member_client_ids: [], forward_allow: false, cloak_enabled: false },
   warp: { type: EpTypes.Warp, address: [], private_key: '', listen_port: 0, mtu: 1420, peers: [{ address: '', port: 0, public_key: ''}] },
   tailscale: { type: EpTypes.Tailscale, domain_resolver: 'local' },
   l3router: { type: EpTypes.L3Router, peers: [], private_subnet: '', overlay_destination: '198.18.0.1:33333', packet_filter: false },

@@ -24,10 +24,31 @@ import (
 
 type ClientService struct{}
 
-// clientSavePayload unmarshals optional group_ids without storing it on the Client row.
+// clientSavePayload embeds Client; group_ids is not a DB column (see model.Client.GroupIds gorm:"-").
 type clientSavePayload struct {
 	model.Client
-	GroupIds *[]uint `json:"group_ids"`
+}
+
+// parseClientSaveGroupIDsField reports whether JSON contains a top-level "group_ids" key.
+// If the key is absent, callers should not replace memberships (edit flows without the field).
+// If present (including null or []), ids is the new membership list (possibly empty).
+func parseClientSaveGroupIDsField(data json.RawMessage) (present bool, ids []uint, err error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false, nil, err
+	}
+	raw, ok := m["group_ids"]
+	if !ok {
+		return false, nil, nil
+	}
+	present = true
+	if len(raw) == 0 || string(raw) == "null" {
+		return true, []uint{}, nil
+	}
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return true, nil, err
+	}
+	return true, ids, nil
 }
 
 var l3RouterPeerIDMu sync.Mutex
@@ -104,9 +125,13 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, false, err
 		}
-		if cw.GroupIds != nil {
+		present, gids, perr := parseClientSaveGroupIDsField(data)
+		if perr != nil {
+			return nil, false, perr
+		}
+		if present {
 			gs := GroupService{}
-			if err = gs.SyncClientGroupMemberships(tx, client.Id, *cw.GroupIds); err != nil {
+			if err = gs.SyncClientGroupMemberships(tx, client.Id, gids); err != nil {
 				return nil, false, err
 			}
 		}
@@ -115,10 +140,17 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			return nil, false, err
 		}
 	case "addbulk":
-		var payloads []clientSavePayload
-		err = json.Unmarshal(data, &payloads)
+		var rawItems []json.RawMessage
+		err = json.Unmarshal(data, &rawItems)
 		if err != nil {
 			return nil, false, err
+		}
+		payloads := make([]clientSavePayload, len(rawItems))
+		for i := range rawItems {
+			err = json.Unmarshal(rawItems[i], &payloads[i])
+			if err != nil {
+				return nil, false, err
+			}
 		}
 		clients := make([]*model.Client, len(payloads))
 		for i := range payloads {
@@ -148,8 +180,12 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		}
 		gs := GroupService{}
 		for i := range payloads {
-			if payloads[i].GroupIds != nil {
-				if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, *payloads[i].GroupIds); err != nil {
+			present, gids, perr := parseClientSaveGroupIDsField(rawItems[i])
+			if perr != nil {
+				return nil, false, perr
+			}
+			if present {
+				if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, gids); err != nil {
 					return nil, false, err
 				}
 			}
@@ -163,10 +199,17 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			return nil, false, err
 		}
 	case "editbulk":
-		var payloads []clientSavePayload
-		err = json.Unmarshal(data, &payloads)
+		var rawItems []json.RawMessage
+		err = json.Unmarshal(data, &rawItems)
 		if err != nil {
 			return nil, false, err
+		}
+		payloads := make([]clientSavePayload, len(rawItems))
+		for i := range rawItems {
+			err = json.Unmarshal(rawItems[i], &payloads[i])
+			if err != nil {
+				return nil, false, err
+			}
 		}
 		clients := make([]*model.Client, len(payloads))
 		for i := range payloads {
@@ -203,8 +246,12 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		}
 		gs := GroupService{}
 		for i := range payloads {
-			if payloads[i].GroupIds != nil {
-				if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, *payloads[i].GroupIds); err != nil {
+			present, gids, perr := parseClientSaveGroupIDsField(rawItems[i])
+			if perr != nil {
+				return nil, false, perr
+			}
+			if present {
+				if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, gids); err != nil {
 					return nil, false, err
 				}
 			}

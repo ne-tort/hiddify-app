@@ -125,6 +125,11 @@ mem*.prof
 # Временные медиа/дампы отладки (не путать с кодом)
 *-dump.jsonl
 
+# SMB стенд артефакты (генерируются тестами передачи файлов)
+/experiments/router/stand/stand-singbox-official-itvzlet/smbshare/**/*.bin
+/experiments/router/stand/stand-singbox-official-itvzlet/smbshare/**/c*-to-*.txt
+/experiments/router/stand/stand-singbox-official-itvzlet/smbshare/**/noop.txt
+
 # WARP CLI (ViRb3 wgcf / wgcf-teams): бинарники и секреты профиля
 tools/wgcf/wgcf.exe
 tools/wgcf/wgcf-teams.zip

@@ -18,21 +18,20 @@
     {
       "type": "wireguard",
       "tag": "wg-hub",
-      "mtu": 1280,
       "address": [
         "10.0.0.3/32"
       ],
       "private_key": "mAYgM9nPD1OkxJuRhRBoIq3NxKgzTgDGXcAJPOu69HQ=",
+	  "mtu": 1280,
       "peers": [
         {
           "address": "work.ai-qwerty.ru",
           "port": 59148,
           "public_key": "LI+dmecUxqYj3ohXLhUVTax8qBDN9RSST+vyPDy6wE4=",
           "allowed_ips": [
-            "10.0.0.0/24",
+            "10.0.0.1/24",
             "fe80::/64"
-          ],
-          "persistent_keepalive_interval": 25
+          ]
         }
       ],
       "detour": "vless-wg-transport"
@@ -48,15 +47,8 @@
       ],
       "auto_route": true,
       "strict_route": false,
-      "route_address": [
-        "0.0.0.0/1",
-        "128.0.0.0/1"
-      ],
       "stack": "gvisor",
-      "mtu": 1280,
-      "route_exclude_address": [
-        "10.8.0.0/29"
-      ]
+      "mtu": 9000
     }
   ],
   "outbounds": [
@@ -85,26 +77,16 @@
       "tag": "vless-wg-transport",
       "type": "vless",
       "server": "work.ai-qwerty.ru",
-      "server_port": 36272,
+      "server_port": 443,
       "uuid": "d47d0f58-67a8-40f9-9faa-0aec3e53a7e6",
       "flow": "xtls-rprx-vision",
-      "network": "tcp",
-      "packet_encoding": "xudp",
+	  "packet_encoding": "xudp",
       "tls": {
         "enabled": true,
-        "server_name": "hshp.host",
-        "alpn": [
-          "h2",
-          "http/1.1"
-        ],
+        "server_name": "work.ai-qwerty.ru",
         "utls": {
           "enabled": true,
           "fingerprint": "firefox"
-        },
-        "reality": {
-          "enabled": true,
-          "public_key": "WHIrXX47P_1jQKHPRrLV8e0J9Zy4-SUmELqY5FSPpgQ",
-          "short_id": "5c"
         }
       }
     }
@@ -127,7 +109,7 @@
           "tun-in"
         ],
         "ip_cidr": [
-          "10.0.0.0/24"
+          "10.0.0.1/24"
         ],
         "action": "route",
         "outbound": "wg-hub"

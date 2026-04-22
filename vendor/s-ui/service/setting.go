@@ -317,7 +317,17 @@ func (s *SettingService) EffectiveWebTLS() (cert, key string) {
 	if err != nil {
 		return "", ""
 	}
-	return config.ResolveWebTLSPaths(dbCert, dbKey)
+	cert, key = config.ResolveWebTLSPaths(dbCert, dbKey)
+	// If env/fallback pair was resolved, persist it for stable subsequent boots.
+	if cert != "" && key != "" && (strings.TrimSpace(dbCert) != cert || strings.TrimSpace(dbKey) != key) {
+		if err := s.saveSetting("webCertFile", cert); err != nil {
+			logger.Warning("persist web TLS cert path failed: ", err)
+		}
+		if err := s.saveSetting("webKeyFile", key); err != nil {
+			logger.Warning("persist web TLS key path failed: ", err)
+		}
+	}
+	return cert, key
 }
 
 // EffectiveSubTLS returns resolved TLS paths for the subscription server: DB, sub env, then the same pair as the panel.
@@ -331,7 +341,17 @@ func (s *SettingService) EffectiveSubTLS() (cert, key string) {
 	if err != nil {
 		return "", ""
 	}
-	return config.ResolveSubTLSPaths(dbCert, dbKey, wCert, wKey)
+	cert, key = config.ResolveSubTLSPaths(dbCert, dbKey, wCert, wKey)
+	// If sub TLS was resolved from env/reused web pair, persist it to DB.
+	if cert != "" && key != "" && (strings.TrimSpace(dbCert) != cert || strings.TrimSpace(dbKey) != key) {
+		if err := s.saveSetting("subCertFile", cert); err != nil {
+			logger.Warning("persist sub TLS cert path failed: ", err)
+		}
+		if err := s.saveSetting("subKeyFile", key); err != nil {
+			logger.Warning("persist sub TLS key path failed: ", err)
+		}
+	}
+	return cert, key
 }
 
 func (s *SettingService) GetSubUpdates() (int, error) {

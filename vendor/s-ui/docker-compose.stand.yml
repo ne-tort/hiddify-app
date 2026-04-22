@@ -21,8 +21,8 @@ services:
     hostname: "s-ui-local"
     network_mode: host
     environment:
-      SUI_WEB_TLS_CERT: /etc/letsencrypt/live/work.ai-qwerty.ru/fullchain.pem
-      SUI_WEB_TLS_KEY: /etc/letsencrypt/live/work.ai-qwerty.ru/privkey.pem
+      SUI_WEB_TLS_CERT: /etc/letsencrypt/live/itvzlet.ai-qwerty.ru/fullchain.pem
+      SUI_WEB_TLS_KEY: /etc/letsencrypt/live/itvzlet.ai-qwerty.ru/privkey.pem
     volumes:
       - "./db:/app/db"
       - "./cert:/app/cert"
@@ -38,7 +38,7 @@ services:
 
   # Однократная выдача (не поднимается при up без profile):
   #   docker compose -f docker-compose.stand.yml --profile cert run --rm --service-ports certbot certonly --standalone \
-  #     -d work.ai-qwerty.ru --email netort@internet.ru --agree-tos --non-interactive
+  #     -d itvzlet.ai-qwerty.ru --email netort@internet.ru --agree-tos --non-interactive
   certbot:
     profiles: ["cert"]
     image: certbot/certbot:latest
@@ -68,3 +68,4 @@ services:
 
 volumes:
   letsencrypt_data:
+

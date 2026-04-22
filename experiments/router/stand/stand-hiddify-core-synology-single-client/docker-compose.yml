@@ -1,0 +1,18 @@
+services:
+  hiddify-core-client:
+    image: ghcr.io/hiddify/hiddify-core:latest
+    container_name: hiddify-core-client
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    security_opt:
+      - apparmor:unconfined
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - /volume1/docker2/config:/config:rw
+    entrypoint: ["/hiddify/hiddify-core-linux-amd64/hiddify-core"]
+    command: ["srun", "--config", "/config/config.json"]

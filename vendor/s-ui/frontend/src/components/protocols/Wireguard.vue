@@ -32,6 +32,9 @@
       <v-col cols="12" sm="6" md="4" v-if="data.mtu != undefined">
         <v-text-field label="MTU" hide-details type="number" min="0" v-model.number="data.mtu" />
       </v-col>
+      <v-col cols="12" sm="6" md="4" v-if="data.persistent_keepalive_interval != undefined">
+        <v-text-field label="Keepalive" hide-details type="number" min="1" suffix="s" v-model.number="keepalive" />
+      </v-col>
     </v-row>
     <v-row>
       <v-col cols="12" sm="8">
@@ -44,6 +47,15 @@
       </v-col>
       <v-col cols="12" sm="6" md="4" v-if="data.system">
         <v-text-field :label="$t('types.wg.ifName')" hide-details v-model="ifName" />
+      </v-col>
+      <v-col cols="12" sm="6" md="4" v-if="optionCloak">
+        <v-select
+          v-model="cloakDetourTag"
+          :items="detourTags"
+          label="WG Cloak Detour"
+          clearable
+          hide-details
+        />
       </v-col>
     </v-row>
     <v-card-actions>
@@ -58,6 +70,13 @@
             <v-list-item><v-switch v-model="optionUdp" color="primary" label="UDP Timeout" hide-details /></v-list-item>
             <v-list-item><v-switch v-model="optionWorker" color="primary" :label="$t('types.wg.worker')" hide-details /></v-list-item>
             <v-list-item><v-switch v-model="optionMtu" color="primary" label="MTU" hide-details /></v-list-item>
+            <v-list-item><v-switch v-model="optionKeepalive" color="primary" label="Keepalive" hide-details /></v-list-item>
+            <v-list-item>
+              <v-switch v-model="optionForwardAllow" color="primary" label="FORWARD allow (wg peer-to-peer)" hide-details />
+            </v-list-item>
+            <v-list-item>
+              <v-switch v-model="optionCloak" color="primary" label="WG Cloak" hide-details />
+            </v-list-item>
           </v-list>
         </v-card>
       </v-menu>
@@ -101,6 +120,7 @@
 import GroupMultiSelect from '@/components/GroupMultiSelect.vue'
 import HttpUtils from '@/plugins/httputil'
 import { push } from 'notivue'
+import Data from '@/store/modules/data'
 
 export default {
   props: ['data', 'userGroups', 'clients'],
@@ -200,6 +220,12 @@ export default {
       const cl = this.$props.clients ?? []
       return cl.map((c: any) => ({ title: c.name, value: c.id }))
     },
+    detourTags() {
+      const tags = (Data().inbounds ?? [])
+        .map((inb: any) => String(inb?.tag ?? '').trim())
+        .filter((t: string) => t.length > 0)
+      return ['select', ...[...new Set(tags)].filter((t: string) => t !== 'select')]
+    },
     optionUdp: {
       get(): boolean { return this.$props.data.udp_timeout != undefined },
       set(v:boolean) { this.$props.data.udp_timeout = v ? "5m" : undefined }
@@ -216,13 +242,47 @@ export default {
       get(): boolean { return this.$props.data.mtu != undefined },
       set(v:boolean) { this.$props.data.mtu = v ? 1408 : undefined }
     },
+    optionKeepalive: {
+      get(): boolean { return this.$props.data.persistent_keepalive_interval != undefined },
+      set(v:boolean) { this.$props.data.persistent_keepalive_interval = v ? 25 : undefined }
+    },
+    optionForwardAllow: {
+      get(): boolean { return this.$props.data.forward_allow === true },
+      set(v:boolean) { this.$props.data.forward_allow = v }
+    },
+    optionCloak: {
+      get(): boolean { return this.$props.data.cloak_enabled === true },
+      set(v:boolean) {
+        this.$props.data.cloak_enabled = v
+        if (!v) {
+          this.$props.data.cloak_detour_tag = undefined
+          return
+        }
+        if (!this.$props.data.cloak_detour_tag) {
+          this.$props.data.cloak_detour_tag = 'select'
+        }
+      }
+    },
+    cloakDetourTag: {
+      get() { return this.$props.data.cloak_detour_tag ?? undefined },
+      set(v:string | null) {
+        const next = String(v ?? '').trim()
+        this.$props.data.cloak_detour_tag = next.length > 0 ? next : undefined
+      }
+    },
     ifName: {
       get() { return this.$props.data.name?? '' },
       set(v:string) { this.$props.data.name = v.length > 0 ? v : undefined }
     },
     address: {
       get() { return this.$props.data.address?.join(',') },
-      set(v:string) { this.$props.data.address = v.length > 0 ? v.split(',') : undefined }
+      set(v:string) {
+        const next = String(v ?? '')
+          .split(',')
+          .map((x) => x.trim())
+          .filter((x) => x.length > 0)
+        this.$props.data.address = next.length > 0 ? next : undefined
+      }
     },
     reserved: {
       get() { return this.$props.data.reserved?.join(',') },
@@ -235,6 +295,10 @@ export default {
     udp_timeout: {
       get() { return this.$props.data.udp_timeout ? parseInt(this.$props.data.udp_timeout.replace('m','')) : 5 },
       set(v:number) { this.$props.data.udp_timeout = v > 0 ? v + 'm' : '5m' }
+    },
+    keepalive: {
+      get() { return this.$props.data.persistent_keepalive_interval ?? 25 },
+      set(v:number) { this.$props.data.persistent_keepalive_interval = v > 0 ? Math.floor(v) : 25 }
     },
     public_key: {
       get() { return this.$props.data.ext?.public_key?? '' },

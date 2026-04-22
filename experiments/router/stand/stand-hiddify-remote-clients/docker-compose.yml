@@ -1,6 +1,9 @@
 # Удалённые sing-box-клиенты. Сборка: при apk «DNS: transient error» (BuildKit/Win):
 # $env:DOCKER_BUILDKIT='0'; docker compose build
 # SMB: шара [wgshare] на /smbshare, wguser/wgpass (как stand-mini-hy2-wg-hub-smb-prod).
+#
+# По умолчанию стенд НЕ поднимается: профиль manual + restart: no.
+# Запуск вручную: COMPOSE_PROFILES=manual docker compose up -d   (PowerShell: $env:COMPOSE_PROFILES='manual'; docker compose up -d)
 name: stand-hiddify-remote-clients
 services:
   client1:
@@ -10,7 +13,9 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
-    restart: unless-stopped
+    restart: "no"
+    profiles:
+      - manual
     environment:
       - START_SMB_SERVER=1
       - SMB_SHARE_DIR=/smbshare
@@ -29,7 +34,9 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
-    restart: unless-stopped
+    restart: "no"
+    profiles:
+      - manual
     environment:
       - START_SMB_SERVER=1
       - SMB_SHARE_DIR=/smbshare

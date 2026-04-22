@@ -1,0 +1,49 @@
+# Два клиента к itvzlet.ai-qwerty.ru (WG через VLESS). Официальный образ ghcr.io/hiddify/hiddify-core + entrypoint (sysctl + опционально SMB).
+# Конфиг — sing-box JSON (как из Hiddify), запуск: hiddify-core srun --config …
+#
+# Сборка: при apk «DNS: transient error» на Docker Desktop: $env:DOCKER_BUILDKIT='0'; docker compose build
+# SMB: //10.0.0.2/wgshare и //10.0.0.3/wgshare, wguser/wgpass
+# Запуск: $env:COMPOSE_PROFILES='manual'; docker compose up -d
+name: stand-singbox-official-itvzlet
+services:
+  client1:
+    build: .
+    container_name: stand-singbox-official-itvzlet-client1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: "no"
+    profiles:
+      - manual
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
+    volumes:
+      - ./client1.json:/etc/sing-box/config.json:ro
+      - ./smbshare/client1:/smbshare
+    command: ["srun", "--config", "/etc/sing-box/config.json"]
+
+  client2:
+    build: .
+    container_name: stand-singbox-official-itvzlet-client2
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: "no"
+    profiles:
+      - manual
+    environment:
+      - START_SMB_SERVER=1
+      - SMB_SHARE_DIR=/smbshare
+      - SMB_USER=wguser
+      - SMB_PASS=wgpass
+      - SMB_PORTS=445
+    volumes:
+      - ./client2.json:/etc/sing-box/config.json:ro
+      - ./smbshare/client2:/smbshare
+    command: ["srun", "--config", "/etc/sing-box/config.json"]

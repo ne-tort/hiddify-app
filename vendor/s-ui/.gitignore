@@ -14,8 +14,15 @@ tmp
 # local env files
 .env.local
 .env.*.local
+run.env
 deploy/deploy.env
 deploy/deploy.config.json
+deploy/*.pem
+deploy/*.key
+deploy/*.db
+deploy/*.env
+deploy/*.final.env
+!deploy/*.example
 
 # Log files
 *.log*

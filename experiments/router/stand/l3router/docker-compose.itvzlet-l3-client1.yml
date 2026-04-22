@@ -1,0 +1,26 @@
+# Клиент 1: дамп itvzlet с L3 overlay в tun (l3_overlay_*), без WG/endpoints.
+# Бинарник: форк hiddify-sing-box с l3router → artifacts/sing-box-linux-amd64, образ sing-box-l3router:local.
+#
+# Сборка бинарника и образа (один раз или после правок ядра):
+#   cd experiments/router/stand/l3router && python run.py build
+#   docker compose -f docker-compose.l3router-static-clients.yml build
+#
+# Только client1 (client2 не поднимается):
+#   docker compose -f docker-compose.itvzlet-l3-client1.yml up -d --build
+
+services:
+  l3router-itvzlet-client1:
+    build:
+      context: .
+      dockerfile: docker/l3router-from-artifact.Dockerfile
+    image: sing-box-l3router:local
+    container_name: l3router-itvzlet-client1
+    network_mode: host
+    restart: "no"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/client1.itvzlet-l3-dump.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]

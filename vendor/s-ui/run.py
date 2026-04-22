@@ -66,8 +66,9 @@ def _load_dotenv() -> None:
             key = key.strip()
             val = val.strip().strip("'").strip('"')
             if key:
-                # run.env — источник истины для деплоя; перекрывает случайные SUI_* в окружении shell.
-                os.environ[key] = val
+                # Environment variables provided by the caller should have priority over run.env,
+                # so ad-hoc deploy target overrides (e.g. SUI_RUN_HOST=...) work as expected.
+                os.environ.setdefault(key, val)
     dep = _SUI_ROOT / "deploy" / "deploy.env"
     if dep.is_file():
         for raw in dep.read_text(encoding="utf-8").splitlines():

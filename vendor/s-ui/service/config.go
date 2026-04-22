@@ -67,6 +67,9 @@ func NewConfigService(core *core.Core) *ConfigService {
 				tx2.Commit()
 			}
 		}
+		if err := (&EndpointService{}).ReconcileWireGuardForwardRules(db); err != nil {
+			logger.Warning("wireguard forward rules reconcile on startup failed: ", err)
+		}
 	}
 	return &ConfigService{}
 }
@@ -358,6 +361,11 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 	} else if endpointRuntimeAction != nil && corePtr.IsRunning() {
 		if runtimeErr := s.EndpointService.ApplyRuntimeAction(endpointRuntimeAction); runtimeErr != nil {
 			return nil, runtimeErr
+		}
+	}
+	if obj == "endpoints" {
+		if recErr := s.EndpointService.ReconcileWireGuardForwardRules(database.GetDB()); recErr != nil {
+			logger.Warning("wireguard forward rules reconcile on save failed: ", recErr)
 		}
 	}
 	// Try to start core if it is not running

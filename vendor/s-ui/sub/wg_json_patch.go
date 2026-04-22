@@ -73,7 +73,7 @@ func patchJsonForWireGuardWithDB(db *gorm.DB, jsonConfig *map[string]interface{}
 	if psk := strings.TrimSpace(fmt.Sprint(peer["pre_shared_key"])); psk != "" && psk != "<nil>" {
 		wgPeer["pre_shared_key"] = psk
 	}
-	if keepalive := intFromAny(peer["persistent_keepalive_interval"]); keepalive > 0 {
+	if keepalive := intFromAny(epOpt["persistent_keepalive_interval"]); keepalive > 0 {
 		wgPeer["persistent_keepalive_interval"] = keepalive
 	}
 
@@ -84,6 +84,9 @@ func patchJsonForWireGuardWithDB(db *gorm.DB, jsonConfig *map[string]interface{}
 		"private_key": clientPrivateKey,
 		"peers":       []interface{}{wgPeer},
 	}
+	if detour := selectWGCloakDetourTag(epOpt, outbounds); detour != "" {
+		wgEndpoint["detour"] = detour
+	}
 	if mtu := intFromAny(peer["mtu"]); mtu > 0 {
 		wgEndpoint["mtu"] = mtu
 	}
@@ -92,45 +95,68 @@ func patchJsonForWireGuardWithDB(db *gorm.DB, jsonConfig *map[string]interface{}
 	}
 
 	mergeWireGuardEndpoint(jsonConfig, wgTag, wgEndpoint)
+	mergeWGTunAddresses(jsonConfig, localAddrs)
 	insertWGRouteRules(jsonConfig, wgTag, routeIPCIDRsForWG(peerTunnelRoutes, localAddrs))
 	return nil
 }
 
 // wgInferPeerTunnelRoutes builds sing-box WireGuard peer "allowed_ips" (routes via the server)
-// from the client's tunnel addresses (10.0.x.y/32 → 10.0.x.0/24) plus optional IPv6 link-local from endpoint options.
+// from the client's tunnel addresses plus endpoint network addresses.
 func wgInferPeerTunnelRoutes(localAddrs []string, epOpt map[string]interface{}) []string {
 	seen := map[string]struct{}{}
 	var out []string
+	addCIDR := func(c string) {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			return
+		}
+		if _, ok := seen[c]; ok {
+			return
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	// Client local addresses (usually /32); infer network route for IPv4.
 	for _, a := range localAddrs {
 		a = strings.TrimSpace(a)
 		if a == "" {
 			continue
 		}
-		ip, _, err := net.ParseCIDR(a)
-		if err != nil {
+		ip, n, err := net.ParseCIDR(a)
+		if err != nil || n == nil {
 			continue
 		}
-		if ip4 := ip.To4(); ip4 != nil && ip4[0] == 10 && ip4[1] == 0 {
-			third := ip4[2]
-			cidr := fmt.Sprintf("10.0.%d.0/24", third)
-			if _, ok := seen[cidr]; !ok {
-				seen[cidr] = struct{}{}
-				out = append(out, cidr)
+		if ip4 := ip.To4(); ip4 != nil {
+			ones, _ := n.Mask.Size()
+			// /32 from peer assignment should route the whole /24 tunnel segment.
+			if ones == 32 {
+				addCIDR(fmt.Sprintf("%d.%d.%d.0/24", ip4[0], ip4[1], ip4[2]))
+			} else {
+				addCIDR(n.String())
 			}
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(ip.String()), "fe80") {
+			addCIDR("fe80::/64")
 		}
 	}
+	// Endpoint addresses are server-side source of truth for tunnel subnet.
 	if epOpt != nil {
 		for _, a := range toStringSlice(epOpt["address"]) {
 			a = strings.TrimSpace(a)
 			if a == "" {
 				continue
 			}
-			if strings.Contains(a, ":") && strings.HasPrefix(strings.ToLower(a), "fe80") {
-				if _, ok := seen["fe80::/64"]; !ok {
-					seen["fe80::/64"] = struct{}{}
-					out = append(out, "fe80::/64")
-				}
-				break
+			ip, n, err := net.ParseCIDR(a)
+			if err != nil || n == nil {
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				addCIDR(n.String())
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(ip.String()), "fe80") {
+				addCIDR("fe80::/64")
 			}
 		}
 	}
@@ -142,6 +168,69 @@ func routeIPCIDRsForWG(peerRoutes []string, localAddrs []string) []string {
 		return append([]string(nil), peerRoutes...)
 	}
 	return append([]string(nil), localAddrs...)
+}
+
+func selectWGCloakDetourTag(epOpt map[string]interface{}, outbounds []map[string]interface{}) string {
+	if !boolFromAnySub(epOpt["cloak_enabled"]) {
+		return ""
+	}
+	manualTag := strings.TrimSpace(fmt.Sprint(epOpt["cloak_detour_tag"]))
+	if manualTag != "" && !strings.EqualFold(manualTag, "<nil>") && hasOutboundTag(outbounds, manualTag) {
+		return manualTag
+	}
+	for _, typ := range []string{"vless", "naive", "anytls", "trojan", "hysteria2", "tuic"} {
+		if tag := firstOutboundTagByType(outbounds, typ); tag != "" {
+			return tag
+		}
+	}
+	return "direct"
+}
+
+func hasOutboundTag(outbounds []map[string]interface{}, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, ob := range outbounds {
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(ob["tag"])), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func firstOutboundTagByType(outbounds []map[string]interface{}, wantType string) string {
+	wantType = strings.TrimSpace(strings.ToLower(wantType))
+	if wantType == "" {
+		return ""
+	}
+	for _, ob := range outbounds {
+		typ := strings.TrimSpace(strings.ToLower(fmt.Sprint(ob["type"])))
+		tag := strings.TrimSpace(fmt.Sprint(ob["tag"]))
+		if tag == "" {
+			continue
+		}
+		if typ == wantType {
+			return tag
+		}
+	}
+	return ""
+}
+
+func boolFromAnySub(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		s := strings.TrimSpace(strings.ToLower(x))
+		return s == "true" || s == "1" || s == "yes" || s == "on"
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	default:
+		return false
+	}
 }
 
 func mergeWireGuardEndpoint(jsonConfig *map[string]interface{}, tag string, wgEndpoint map[string]interface{}) {
@@ -214,6 +303,60 @@ func insertWGRouteRules(jsonConfig *map[string]interface{}, wgTag string, cidrs 
 	route["rules"] = newRules
 }
 
+func mergeWGTunAddresses(jsonConfig *map[string]interface{}, localAddrs []string) {
+	if len(localAddrs) == 0 {
+		return
+	}
+	raw, ok := (*jsonConfig)["inbounds"]
+	if !ok || raw == nil {
+		return
+	}
+	list, ok := raw.([]interface{})
+	if !ok || len(list) == 0 {
+		return
+	}
+	for i, it := range list {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		typ := strings.TrimSpace(fmt.Sprint(m["type"]))
+		if !strings.EqualFold(typ, "tun") {
+			continue
+		}
+		seen := map[string]struct{}{}
+		merged := make([]string, 0, 8)
+		for _, a := range toStringSlice(m["address"]) {
+			a = strings.TrimSpace(a)
+			if a == "" {
+				continue
+			}
+			if _, exists := seen[a]; exists {
+				continue
+			}
+			seen[a] = struct{}{}
+			merged = append(merged, a)
+		}
+		for _, a := range localAddrs {
+			a = strings.TrimSpace(a)
+			if a == "" {
+				continue
+			}
+			if _, exists := seen[a]; exists {
+				continue
+			}
+			seen[a] = struct{}{}
+			merged = append(merged, a)
+		}
+		if len(merged) > 0 {
+			m["address"] = stringSliceToIface(merged)
+			list[i] = m
+			(*jsonConfig)["inbounds"] = list
+		}
+		return
+	}
+}
+
 func firstWireGuardPeerForClient(db *gorm.DB, client *model.Client) (map[string]interface{}, *model.Endpoint, map[string]interface{}, error) {
 	if client == nil {
 		return nil, nil, nil, nil
@@ -257,7 +400,7 @@ func firstWireGuardPeerForClient(db *gorm.DB, client *model.Client) (map[string]
 				"private_key":                   priv,
 				"allowed_ips":                   toStringSlice(p["allowed_ips"]),
 				"pre_shared_key":                strings.TrimSpace(fmt.Sprint(p["pre_shared_key"])),
-				"persistent_keepalive_interval": intFromAny(p["persistent_keepalive_interval"]),
+				"persistent_keepalive_interval": intFromAny(opt["persistent_keepalive_interval"]),
 				"mtu":                           intFromAny(opt["mtu"]),
 				"workers":                       intFromAny(opt["workers"]),
 				"dns":                           toStringSlice(opt["dns"]),

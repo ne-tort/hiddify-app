@@ -1,0 +1,223 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "hosts",
+        "tag": "dns-static"
+      },
+      {
+        "type": "udp",
+        "tag": "dns-remote",
+        "detour": "select",
+        "connect_timeout": "5s",
+        "disable_tcp_keep_alive": true,
+        "server": "8.8.8.8"
+      },
+      {
+        "type": "https",
+        "tag": "dns-remote-fallback",
+        "detour": "select",
+        "server": "8.8.8.8",
+        "tls": {
+          "enabled": true
+        }
+      },
+      {
+        "type": "https",
+        "tag": "dns-trick-direct",
+        "detour": "direct-fragment",
+        "domain_resolver": {
+          "server": "dns-direct",
+          "strategy": "prefer_ipv4"
+        },
+        "server": "dns.cloudflare.com",
+        "tls": {
+          "enabled": true,
+          "fragment": true,
+          "fragment_fallback_delay": "300ms",
+          "record_fragment": true
+        }
+      },
+      {
+        "type": "udp",
+        "tag": "dns-direct",
+        "connect_timeout": "5s",
+        "disable_tcp_keep_alive": true,
+        "server": "1.1.1.1"
+      },
+      {
+        "type": "local",
+        "tag": "dns-local",
+        "prefer_go": true
+      },
+      {
+        "type": "udp",
+        "tag": "dns-remote-no-warp",
+        "detour": "direct-fragment",
+        "connect_timeout": "5s",
+        "disable_tcp_keep_alive": true,
+        "server": "8.8.8.8"
+      }
+    ],
+    "rules": [
+      {
+        "domain": "api.cloudflareclient.com",
+        "server": "dns-remote-no-warp",
+        "strategy": "ipv4_only",
+        "rewrite_ttl": 86400
+      },
+      {
+        "domain": [
+          "google.com",
+          "api.cloudflareclient.com",
+          "captive.apple.com",
+          "cp.cloudflare.com"
+        ],
+        "server": "dns-direct",
+        "strategy": "ipv4_only",
+        "rewrite_ttl": 86400
+      },
+      {
+        "server": "dns-remote",
+        "strategy": "ipv4_only",
+        "rewrite_ttl": 86400
+      }
+    ],
+    "final": "dns-remote",
+    "disable_expire": true,
+    "independent_cache": true
+  },
+  "endpoints": [
+    {
+      "type": "wireguard",
+      "tag": "wg-client",
+      "mtu": 1280,
+      "address": [
+        "10.0.0.2/32"
+      ],
+      "private_key": "gM+xdS2D8G5ZAV9ZwCOJWyLoTt51pE405hAm5aSKumM=",
+      "peers": [
+        {
+          "address": "itvzlet.ai-qwerty.ru",
+          "port": 59148,
+          "public_key": "LI+dmecUxqYj3ohXLhUVTax8qBDN9RSST+vyPDy6wE4=",
+          "allowed_ips": [
+            "10.0.0.0/24",
+            "fe80::/64"
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ],
+      "detour": "select",
+      "noise": {
+        "fake_packet": {}
+      }
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "mtu": 9000,
+      "address": [
+        "172.19.0.1/28",
+        "10.0.0.2/32",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "route_address": [
+        "10.0.0.0/24"
+      ],
+      "strict_route": true,
+      "stack": "gvisor"
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in::1",
+      "listen": "::1",
+      "listen_port": 12334
+    },
+    {
+      "type": "direct",
+      "tag": "dns-in::1",
+      "listen": "::1",
+      "listen_port": 12337
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in127.0.0.1",
+      "listen": "127.0.0.1",
+      "listen_port": 12334
+    },
+    {
+      "type": "direct",
+      "tag": "dns-in127.0.0.1",
+      "listen": "127.0.0.1",
+      "listen_port": 12337
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "select",
+      "outbounds": [
+        "vless-14261"
+      ],
+      "default": "vless-14261",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "vless",
+      "tag": "vless-14261",
+      "server": "itvzlet.ai-qwerty.ru",
+      "server_port": 14261,
+      "uuid": "42ce430e-05be-41ed-a255-db85372a66f3",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "utls": {
+          "enabled": true,
+          "fingerprint": "firefox"
+        }
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "direct",
+      "tag": "direct-fragment",
+      "tls_fragment": {
+        "enabled": true,
+        "size": "10-30",
+        "sleep": "2-8"
+      }
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "inbound": "tun-in",
+        "ip_cidr": "10.0.0.0/24",
+        "outbound": "wg-client"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      }
+    ],
+    "final": "select",
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "dns-direct",
+      "strategy": "ipv4_only"
+    }
+  }
+}
