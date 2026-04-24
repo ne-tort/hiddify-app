@@ -3,15 +3,29 @@ package api
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/service"
 	"github.com/alireza0/s-ui/util"
+	"github.com/alireza0/s-ui/util/common"
 
 	"github.com/gin-gonic/gin"
 )
+
+func parseUIntQuery(c *gin.Context, key string) uint {
+	raw := c.Query(key)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint(n)
+}
 
 type ApiService struct {
 	service.SettingService
@@ -24,6 +38,9 @@ type ApiService struct {
 	service.OutboundService
 	service.EndpointService
 	service.ServicesService
+	service.GeoCatalogService
+	service.RoutingProfilesService
+	service.AwgObfuscationProfilesService
 	service.PanelService
 	service.StatsService
 	service.ServerService
@@ -87,6 +104,18 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 		if err != nil {
 			return "", err
 		}
+		geoCatalog, err := a.GeoCatalogService.GetAll(database.GetDB(), 0)
+		if err != nil {
+			return "", err
+		}
+		routingProfiles, err := a.RoutingProfilesService.GetAll(database.GetDB())
+		if err != nil {
+			return "", err
+		}
+		awgObfuscationProfiles, err := a.AwgObfuscationProfilesService.GetAll(database.GetDB())
+		if err != nil {
+			return "", err
+		}
 		subURI, err := a.SettingService.GetFinalSubURI(getHostname(c))
 		if err != nil {
 			return "", err
@@ -102,6 +131,9 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 		data["outbounds"] = outbounds
 		data["endpoints"] = endpoints
 		data["services"] = services
+		data["geoCatalog"] = geoCatalog
+		data["routingProfiles"] = routingProfiles
+		data["awgObfuscationProfiles"] = awgObfuscationProfiles
 		data["subURI"] = subURI
 		data["enableTraffic"] = trafficAge > 0
 		data["onlines"] = onlines
@@ -177,6 +209,25 @@ func (a *ApiService) LoadPartialData(c *gin.Context, objs []string) error {
 				return err
 			}
 			data[obj] = groups
+		case "geo_catalog":
+			tagID := parseUIntQuery(c, "tag_id")
+			geoCatalog, err := a.GeoCatalogService.GetAll(database.GetDB(), tagID)
+			if err != nil {
+				return err
+			}
+			data[obj] = geoCatalog
+		case "routing_profiles":
+			routingProfiles, err := a.RoutingProfilesService.GetAll(database.GetDB())
+			if err != nil {
+				return err
+			}
+			data[obj] = routingProfiles
+		case "awg_obfuscation_profiles":
+			rows, err := a.AwgObfuscationProfilesService.GetAll(database.GetDB())
+			if err != nil {
+				return err
+			}
+			data[obj] = rows
 		}
 	}
 
@@ -429,4 +480,66 @@ func (a *ApiService) GetCheckOutbound(c *gin.Context) {
 	link := c.Query("link")
 	result := a.ConfigService.CheckOutbound(tag, link)
 	jsonObj(c, result, nil)
+}
+
+func (a *ApiService) GetRoutingProfileHapp(c *gin.Context) {
+	id, err := service.ParseRoutingProfileID(c.Query("id"))
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	row, err := a.RoutingProfilesService.GetByID(database.GetDB(), id)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	link, err := a.RoutingProfilesService.BuildHappRoutingLink(*row)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	payload, err := a.RoutingProfilesService.BuildHappPayload(*row)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, map[string]interface{}{
+		"id":           row.Id,
+		"name":         row.Name,
+		"happ_link":    link,
+		"happ_payload": json.RawMessage(payload),
+	}, nil)
+}
+
+func (a *ApiService) GetAwgObfuscationProfileAutofill(c *gin.Context) {
+	id64, err := strconv.ParseUint(strings.TrimSpace(c.Query("id")), 10, 32)
+	if err != nil || id64 == 0 {
+		jsonMsg(c, "", common.NewErrorf("invalid profile id"))
+		return
+	}
+	payload, err := a.AwgObfuscationProfilesService.AutofillObfuscation(database.GetDB(), uint(id64))
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, payload, nil)
+}
+
+func (a *ApiService) GetRoutingProfileSingbox(c *gin.Context) {
+	id, err := service.ParseRoutingProfileID(c.Query("id"))
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	row, err := a.RoutingProfilesService.GetByID(database.GetDB(), id)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	rules := a.RoutingProfilesService.BuildSingboxManagedRules(*row)
+	jsonObj(c, map[string]interface{}{
+		"id":            row.Id,
+		"name":          row.Name,
+		"singbox_rules": rules,
+	}, nil)
 }

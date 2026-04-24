@@ -84,6 +84,11 @@ const routes = [
         name: 'pages.debug',
         component: () => import('@/views/Debug.vue'),
       },
+      {
+        path: '/routing-profiles',
+        name: 'pages.routingProfiles',
+        component: () => import('@/views/RoutingProfiles.vue'),
+      },
     ],
   },
 ]

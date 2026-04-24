@@ -33,6 +33,9 @@ type ConfigService struct {
 	OutboundService
 	ServicesService
 	EndpointService
+	GeoCatalogService
+	RoutingProfilesService
+	AwgObfuscationProfilesService
 }
 
 type SingBoxConfig struct {
@@ -327,6 +330,21 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 				needsCoreReload = true
 			}
 			objs = append(objs, "clients", "endpoints", "config", "groups")
+		}
+	case "geo_catalog":
+		err = s.GeoCatalogService.Save(tx, act, data)
+		if err == nil {
+			objs = append(objs, "geo_catalog")
+		}
+	case "routing_profiles":
+		err = s.RoutingProfilesService.Save(tx, act, data)
+		if err == nil {
+			objs = append(objs, "routing_profiles")
+		}
+	case "awg_obfuscation_profiles":
+		err = s.AwgObfuscationProfilesService.Save(tx, act, data)
+		if err == nil {
+			objs = append(objs, "awg_obfuscation_profiles")
 		}
 	default:
 		return nil, common.NewError("unknown object: ", obj)

@@ -98,7 +98,7 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 				}
 			}
 		}
-		if o.Type == "wireguard" {
+		if o.Type == "wireguard" || o.Type == "awg" {
 			for _, k := range []string{
 				"member_group_ids",
 				"member_client_ids",
@@ -106,6 +106,7 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 				"forward_allow",
 				"cloak_enabled",
 				"cloak_detour_tag",
+				"obfuscation_profile_id",
 			} {
 				delete(restFields, k)
 			}

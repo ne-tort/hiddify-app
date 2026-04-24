@@ -1,0 +1,10 @@
+AmneziaWG-Architect generator.ts
+==================================
+
+The file generator.ts is derived from the MIT-licensed project:
+
+  https://github.com/Vadim-Khristenko/AmneziaWG-Architect
+
+Copyright belongs to the upstream authors. This copy is vendored for use
+inside s-ui (Hiddify) only; refer to the upstream repository for the latest
+version and issue tracking.

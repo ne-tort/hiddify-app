@@ -20,6 +20,9 @@ const Data = defineStore('Data', {
     clients: <any>[],
     tlsConfigs: <any[]>[],
     userGroups: <any[]>[],
+    geoCatalog: <any>{ datasets: [], revisions: [], tags: [] },
+    routingProfiles: <any[]>[],
+    awgObfuscationProfiles: <any[]>[],
   }),
   actions: {
     async loadData() {
@@ -52,6 +55,25 @@ const Data = defineStore('Data', {
       if (Object.hasOwn(data, 'tls')) this.tlsConfigs = data.tls ?? []
       if (Object.hasOwn(data, 'userGroups')) this.userGroups = data.userGroups ?? []
       if (Object.hasOwn(data, 'groups')) this.userGroups = data.groups ?? []
+      if (Object.hasOwn(data, 'geoCatalog')) this.geoCatalog = data.geoCatalog ?? { datasets: [], revisions: [], tags: [] }
+      if (Object.hasOwn(data, 'geo_catalog')) this.geoCatalog = data.geo_catalog ?? { datasets: [], revisions: [], tags: [] }
+      if (Object.hasOwn(data, 'routingProfiles')) this.routingProfiles = data.routingProfiles ?? []
+      if (Object.hasOwn(data, 'routing_profiles')) this.routingProfiles = data.routing_profiles ?? []
+      if (Object.hasOwn(data, 'awgObfuscationProfiles')) this.awgObfuscationProfiles = data.awgObfuscationProfiles ?? []
+      if (Object.hasOwn(data, 'awg_obfuscation_profiles')) this.awgObfuscationProfiles = data.awg_obfuscation_profiles ?? []
+    },
+    /** Loads AmneziaWG obfuscation profiles for AWG endpoint UI (partial GET). */
+    async loadAwgObfuscationProfiles(): Promise<void> {
+      const msg = await HttpUtils.get('api/awg_obfuscation_profiles')
+      if (!msg.success || msg.obj == null) {
+        return
+      }
+      const o = msg.obj as Record<string, unknown>
+      if (Array.isArray(o.awg_obfuscation_profiles)) {
+        this.awgObfuscationProfiles = o.awg_obfuscation_profiles as any[]
+      } else if (Array.isArray(o.awgObfuscationProfiles)) {
+        this.awgObfuscationProfiles = o.awgObfuscationProfiles as any[]
+      }
     },
     async loadInbounds(ids: number[]): Promise<Inbound[]> {
       const options = ids.length > 0 ? {id: ids.join(",")} : {}
@@ -85,6 +107,9 @@ const Data = defineStore('Data', {
         if (object === 'groups') objectName = 'group'
         else if (object === 'tls' || object === 'config') objectName = object
         else if (object === 'l3router_peer') objectName = 'l3router_peer'
+        else if (object === 'geo_catalog') objectName = 'geo_catalog'
+        else if (object === 'routing_profiles') objectName = 'routing_profile'
+        else if (object === 'awg_obfuscation_profiles') objectName = 'awg_obfuscation_profile'
         else objectName = object.substring(0, object.length - 1)
         push.success({
           title: i18n.global.t('success'),

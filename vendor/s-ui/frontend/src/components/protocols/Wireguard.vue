@@ -1,5 +1,5 @@
 <template>
-  <v-card subtitle="Wireguard">
+  <v-card :subtitle="wireguardCardSubtitle">
     <v-row>
       <v-col cols="12" sm="8">
         <v-text-field v-model="data.private_key" :label="$t('types.wg.privKey')" append-icon="mdi-key-star" @click:append="newKey()" hide-details />
@@ -48,7 +48,7 @@
       <v-col cols="12" sm="6" md="4" v-if="data.system">
         <v-text-field :label="$t('types.wg.ifName')" hide-details v-model="ifName" />
       </v-col>
-      <v-col cols="12" sm="6" md="4" v-if="optionCloak">
+      <v-col cols="12" sm="6" md="4" v-if="optionCloak && !hideWgOnlyOptions">
         <v-select
           v-model="cloakDetourTag"
           :items="detourTags"
@@ -71,10 +71,10 @@
             <v-list-item><v-switch v-model="optionWorker" color="primary" :label="$t('types.wg.worker')" hide-details /></v-list-item>
             <v-list-item><v-switch v-model="optionMtu" color="primary" label="MTU" hide-details /></v-list-item>
             <v-list-item><v-switch v-model="optionKeepalive" color="primary" label="Keepalive" hide-details /></v-list-item>
-            <v-list-item>
+            <v-list-item v-if="!hideWgOnlyOptions">
               <v-switch v-model="optionForwardAllow" color="primary" label="FORWARD allow (wg peer-to-peer)" hide-details />
             </v-list-item>
-            <v-list-item>
+            <v-list-item v-if="!hideWgOnlyOptions">
               <v-switch v-model="optionCloak" color="primary" label="WG Cloak" hide-details />
             </v-list-item>
           </v-list>
@@ -123,7 +123,14 @@ import { push } from 'notivue'
 import Data from '@/store/modules/data'
 
 export default {
-  props: ['data', 'userGroups', 'clients'],
+  props: {
+    data: { type: Object, required: true },
+    userGroups: { type: Array, default: () => [] },
+    clients: { type: Array, default: () => [] },
+    hideWgOnlyOptions: { type: Boolean, default: false },
+    /** Optional card subtitle (e.g. AWG uses WireGuard-compatible server block). */
+    cardSubtitle: { type: String, default: '' },
+  },
   emits: ['newWgKey', 'getWgPubKey'],
   data() {
     return {
@@ -179,8 +186,10 @@ export default {
     },
     peerSubnetOctet(): number {
       const list = Array.isArray(this.$props.data.address) ? this.$props.data.address : []
+      const isAwg = this.$props.data.type === 'awg'
+      const re = isAwg ? /^10\.1\.(\d{1,3})\.\d{1,3}\/\d+$/ : /^10\.0\.(\d{1,3})\.\d{1,3}\/\d+$/
       for (const raw of list) {
-        const m = String(raw).trim().match(/^10\.0\.(\d{1,3})\.\d{1,3}\/\d+$/)
+        const m = String(raw).trim().match(re)
         if (!m) continue
         const oct = Number(m[1])
         if (Number.isInteger(oct) && oct >= 0 && oct <= 254) return oct
@@ -190,6 +199,7 @@ export default {
     findLowestFreePeerIP(): string {
       const subnet = this.peerSubnetOctet()
       const used = new Set<string>()
+      const prefix = this.$props.data.type === 'awg' ? '10.1' : '10.0'
       const serverAddrs = Array.isArray(this.$props.data.address) ? this.$props.data.address : []
       serverAddrs.forEach((a: string) => used.add(String(a).trim()))
       const peers = Array.isArray(this.$props.data.peers) ? this.$props.data.peers : []
@@ -198,13 +208,17 @@ export default {
         arr.forEach((x: string) => used.add(String(x).trim()))
       })
       for (let host = 2; host < 255; host += 1) {
-        const ip = `10.0.${subnet}.${host}/32`
+        const ip = `${prefix}.${subnet}.${host}/32`
         if (!used.has(ip)) return ip
       }
       return ''
     },
   },
   computed: {
+    wireguardCardSubtitle(): string {
+      const s = String(this.$props.cardSubtitle ?? '').trim()
+      return s.length > 0 ? s : 'Wireguard'
+    },
     peerHeaders() {
       return [
         { title: this.$t('types.wg.colId'), key: 'row_id' },

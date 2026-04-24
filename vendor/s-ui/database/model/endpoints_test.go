@@ -43,3 +43,39 @@ func TestEndpointMarshalJSON_WireGuardStripsForwardAllow(t *testing.T) {
 	}
 }
 
+func TestEndpointMarshalJSON_AwgStripsUIPeersAndProfileRef(t *testing.T) {
+	options := map[string]interface{}{
+		"address":                  []string{"10.9.0.1/24"},
+		"private_key":              "srv",
+		"listen_port":              51821,
+		"obfuscation_profile_id":   float64(3),
+		"member_client_ids":        []interface{}{float64(1)},
+		"jc":                       float64(4),
+		"peers": []map[string]interface{}{
+			{
+				"public_key": "pk", "allowed_ips": []string{"10.9.0.2/32"},
+				"client_id": float64(1), "managed": true, "private_key": "sec",
+			},
+		},
+	}
+	raw, _ := json.Marshal(options)
+	ep := Endpoint{Type: "awg", Tag: "awg-test", Options: raw}
+	out, err := ep.MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(out)
+	if strings.Contains(s, "obfuscation_profile_id") {
+		t.Fatalf("obfuscation_profile_id leaked: %s", s)
+	}
+	if strings.Contains(s, "member_client_ids") {
+		t.Fatalf("member_client_ids leaked: %s", s)
+	}
+	if strings.Contains(s, `"managed"`) {
+		t.Fatalf("managed leaked: %s", s)
+	}
+	if !strings.Contains(s, "jc") {
+		t.Fatalf("expected jc in output: %s", s)
+	}
+}
+

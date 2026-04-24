@@ -43,7 +43,7 @@ func TestValidateAndNormalizeWireGuardOptions_TrimsEmptyAddresses(t *testing.T) 
 	options := map[string]interface{}{
 		"address": []interface{}{"10.8.0.1/24", " ", ""},
 	}
-	if err := validateAndNormalizeWireGuardOptions(options); err != nil {
+	if err := validateAndNormalizeWGFamilyOptions(options, wireGuardType); err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
 	}
 	addr, ok := options["address"].([]string)

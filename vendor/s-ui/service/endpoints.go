@@ -34,6 +34,7 @@ type EndpointRuntimeAction struct {
 const (
 	l3RouterType              = "l3router"
 	wireGuardType             = "wireguard"
+	awgType                   = "awg"
 	l3RouterDefaultOverlayDst = "198.18.0.1:33333"
 	l3PeerIPAllocKey          = "peer_ip_alloc"
 )
@@ -182,13 +183,24 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 					return nil, err
 				}
 			}
+		} else if endpoint.Type == awgType {
+			changed, err := s.syncSingleAwgEndpoint(tx, &endpoint)
+			if err != nil {
+				return nil, err
+			}
+			if changed {
+				err = tx.Save(&endpoint).Error
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 		runtimeAction = &EndpointRuntimeAction{
 			Action:      act,
 			EndpointID:  endpoint.Id,
 			OldTag:      oldTag,
 			Tag:         endpoint.Tag,
-			NeedsReload: endpoint.Type == l3RouterType || endpoint.Type == wireGuardType,
+			NeedsReload: endpoint.Type == l3RouterType || endpoint.Type == wireGuardType || endpoint.Type == awgType,
 		}
 	case "del":
 		var tag string
@@ -206,7 +218,7 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 		if err != nil {
 			return nil, err
 		}
-		runtimeAction = &EndpointRuntimeAction{Action: act, Tag: tag, NeedsReload: endpointType == l3RouterType || endpointType == wireGuardType}
+		runtimeAction = &EndpointRuntimeAction{Action: act, Tag: tag, NeedsReload: endpointType == l3RouterType || endpointType == wireGuardType || endpointType == awgType}
 	default:
 		return nil, common.NewErrorf("unknown action: %s", act)
 	}
@@ -241,11 +253,17 @@ func (s *EndpointService) SyncAllL3RouterPeers(tx *gorm.DB) (bool, error) {
 func (s *EndpointService) SyncAllWireGuardPeers(tx *gorm.DB) (bool, error) {
 	changedAny := false
 	var endpoints []model.Endpoint
-	if err := tx.Model(model.Endpoint{}).Where("type = ?", wireGuardType).Find(&endpoints).Error; err != nil {
+	if err := tx.Model(model.Endpoint{}).Where("type IN ?", []string{wireGuardType, awgType}).Find(&endpoints).Error; err != nil {
 		return false, err
 	}
 	for i := range endpoints {
-		changed, err := s.syncSingleWireGuardEndpoint(tx, &endpoints[i])
+		var changed bool
+		var err error
+		if endpoints[i].Type == awgType {
+			changed, err = s.syncSingleAwgEndpoint(tx, &endpoints[i])
+		} else {
+			changed, err = s.syncSingleWireGuardEndpoint(tx, &endpoints[i])
+		}
 		if err != nil {
 			return false, err
 		}
@@ -506,6 +524,14 @@ type wireGuardClientIdentity struct {
 }
 
 func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *model.Endpoint) (bool, error) {
+	return s.syncSingleWGFamilyEndpoint(tx, endpoint, wireGuardType)
+}
+
+func (s *EndpointService) syncSingleAwgEndpoint(tx *gorm.DB, endpoint *model.Endpoint) (bool, error) {
+	return s.syncSingleWGFamilyEndpoint(tx, endpoint, awgType)
+}
+
+func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *model.Endpoint, epType string) (bool, error) {
 	var options map[string]interface{}
 	if len(endpoint.Options) > 0 {
 		if err := json.Unmarshal(endpoint.Options, &options); err != nil {
@@ -517,7 +543,7 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 	if options == nil {
 		options = make(map[string]interface{})
 	}
-	if err := validateAndNormalizeWireGuardOptions(options); err != nil {
+	if err := validateAndNormalizeWGFamilyOptions(options, epType); err != nil {
 		return false, err
 	}
 	changed := false
@@ -570,7 +596,7 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 		norm := wgNormalizeAllowedIPList(toStringSlice(p["allowed_ips"]))
 		if len(norm) == 0 {
 			if !poolOK {
-				return false, common.NewError("wireguard endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation")
+				return false, common.NewErrorf("%s endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation", epType)
 			}
 			ip := wgPickLowestFreePeerIP(used, poolPrefix)
 			p["allowed_ips"] = []string{ip}
@@ -606,7 +632,7 @@ func (s *EndpointService) syncSingleWireGuardEndpoint(tx *gorm.DB, endpoint *mod
 		}
 		if len(allowedIPs) == 0 {
 			if !poolOK {
-				return false, common.NewError("wireguard endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation")
+				return false, common.NewErrorf("%s endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation", epType)
 			}
 			ip := wgPickLowestFreePeerIP(used, poolPrefix)
 			allowedIPs = []string{ip}
@@ -883,11 +909,11 @@ func wgCollectUsedPeerIPs(peers []map[string]interface{}, options map[string]int
 	return used
 }
 
-func validateAndNormalizeWireGuardOptions(options map[string]interface{}) error {
+func validateAndNormalizeWGFamilyOptions(options map[string]interface{}, epType string) error {
 	if options == nil {
 		return nil
 	}
-	if boolFromAnyWG(options["cloak_enabled"]) {
+	if epType == wireGuardType && boolFromAnyWG(options["cloak_enabled"]) {
 		options["cloak_enabled"] = true
 		tag := strings.TrimSpace(fmt.Sprint(options["cloak_detour_tag"]))
 		if tag == "" || strings.EqualFold(tag, "<nil>") {
@@ -906,7 +932,7 @@ func validateAndNormalizeWireGuardOptions(options map[string]interface{}) error 
 	if len(addresses) > 0 {
 		for _, raw := range addresses {
 			if err := wgValidateEndpointAddress(raw); err != nil {
-				return common.NewErrorf("wireguard address %q invalid: %v", raw, err)
+				return common.NewErrorf("%s address %q invalid: %v", epType, raw, err)
 			}
 		}
 		if err := wgValidateNoHostSubnetConflict(addresses); err != nil {
@@ -921,7 +947,7 @@ func validateAndNormalizeWireGuardOptions(options map[string]interface{}) error 
 		}
 		for _, raw := range rawIPs {
 			if _, ok := wgNormalizeCIDROrIP(raw); !ok {
-				return common.NewErrorf("wireguard peer[%d] allowed_ips contains invalid value: %q", i+1, raw)
+				return common.NewErrorf("%s peer[%d] allowed_ips contains invalid value: %q", epType, i+1, raw)
 			}
 		}
 	}

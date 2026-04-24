@@ -1,6 +1,7 @@
 package sub
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -47,12 +48,17 @@ const defaultJson = `
 
 type JsonService struct {
 	service.SettingService
+	service.RoutingProfilesService
+	service.AwgObfuscationProfilesService
 	LinkService
 }
 
-func (j *JsonService) GetJson(subId string, format string) (*string, []string, error) {
+func (j *JsonService) GetJson(subId string, requestHost string) (*string, []string, error) {
 	jsonConfig, client, err := j.assembleJsonMap(subId)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := j.patchJsonForAwg(&jsonConfig, client, requestHost); err != nil {
 		return nil, nil, err
 	}
 	return j.marshalJsonResponse(jsonConfig, client)
@@ -60,12 +66,15 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 
 // GetJsonL3Router returns the same profile as GetJson, but replaces the first tun inbound with
 // L3 overlay settings when the client has an L3RouterPeer row; otherwise identical to GetJson.
-func (j *JsonService) GetJsonL3Router(subId string) (*string, []string, error) {
+func (j *JsonService) GetJsonL3Router(subId string, requestHost string) (*string, []string, error) {
 	jsonConfig, client, err := j.assembleJsonMap(subId)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err := patchJsonInboundsForL3Router(&jsonConfig, client); err != nil {
+		return nil, nil, err
+	}
+	if err := j.patchJsonForAwg(&jsonConfig, client, requestHost); err != nil {
 		return nil, nil, err
 	}
 	return j.marshalJsonResponse(jsonConfig, client)
@@ -82,6 +91,96 @@ func (j *JsonService) GetJsonWG(subId string, requestHost string) (*string, []st
 	}
 	_ = patchJsonForWireGuard(&jsonConfig, client, j.resolveWGServerHost(requestHost))
 	return j.marshalJsonResponse(jsonConfig, client)
+}
+
+// GetJsonRule returns JSON subscription with merged routing profiles applied as managed sing-box rules.
+func (j *JsonService) GetJsonRule(subId string, requestHost string) (*string, []string, error) {
+	jsonConfig, client, err := j.assembleJsonMap(subId)
+	if err != nil {
+		return nil, nil, err
+	}
+	profiles, err := j.RoutingProfilesService.ResolveProfilesForClient(database.GetDB(), client.Id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(profiles) > 0 {
+		managedRules := j.RoutingProfilesService.BuildMergedSingboxManagedRules(profiles)
+		ensureManagedRuleSetDefinitions(j, &jsonConfig, managedRules, requestHost)
+		applyManagedRulesToRoute(&jsonConfig, managedRules)
+	}
+	if err := j.patchJsonForAwg(&jsonConfig, client, requestHost); err != nil {
+		return nil, nil, err
+	}
+	return j.marshalJsonResponse(jsonConfig, client)
+}
+
+// GetJsonHapp returns JSON subscription plus embedded Happ routing payload/link for resolved profiles.
+func (j *JsonService) GetJsonHapp(subId string, requestHost string) (*string, []string, error) {
+	ss := SubService{}
+	client, err := ss.getClientBySubId(subId)
+	if err != nil {
+		return nil, nil, err
+	}
+	profiles, err := j.RoutingProfilesService.ResolveProfilesForClient(database.GetDB(), client.Id)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	resultLines := make([]string, 0, 8)
+	if len(profiles) > 0 {
+		managedRules := j.RoutingProfilesService.BuildMergedSingboxManagedRules(profiles)
+		if len(managedRules) > 0 {
+			baseURL := buildHappGeoDatBaseURL(j, requestHost)
+			link, err := j.RoutingProfilesService.BuildMergedHappRoutingLinkWithGeoBase(profiles, baseURL)
+			if err != nil {
+				return nil, nil, err
+			}
+			// Happ docs: routing link should be present in subscription body.
+			resultLines = append(resultLines, link)
+		}
+	}
+	linksArray := j.LinkService.GetLinks(&client.Links, "all", "")
+	resultLines = append(resultLines, linksArray...)
+	result := strings.Join(resultLines, "\n")
+	subEncode, _ := j.SettingService.GetSubEncode()
+	if subEncode {
+		result = base64.StdEncoding.EncodeToString([]byte(result))
+	}
+	updateInterval, _ := j.SettingService.GetSubUpdates()
+	headers := util.GetHeaders(client, updateInterval)
+	return &result, headers, nil
+}
+
+func buildHappGeoDatBaseURL(j *JsonService, requestHost string) string {
+	if base := buildSubBaseURL(j, requestHost); base != "" {
+		return base
+	}
+	requestHost = strings.TrimSpace(requestHost)
+	if requestHost == "" {
+		return ""
+	}
+	subPath, _ := j.SettingService.GetSubPath()
+	subPath = strings.TrimSpace(subPath)
+	if !strings.HasPrefix(subPath, "/") {
+		subPath = "/" + subPath
+	}
+	return "https://" + requestHost + strings.TrimRight(subPath, "/")
+}
+
+func buildSubBaseURL(j *JsonService, requestHost string) string {
+	requestHost = strings.TrimSpace(requestHost)
+	if finalURI, err := j.SettingService.GetFinalSubURI(requestHost); err == nil {
+		finalURI = strings.TrimSpace(finalURI)
+		if finalURI != "" {
+			return strings.TrimRight(finalURI, "/")
+		}
+	}
+	subURI, _ := j.SettingService.GetSubURI()
+	subURI = strings.TrimSpace(subURI)
+	if subURI != "" {
+		return strings.TrimRight(subURI, "/")
+	}
+	return ""
 }
 
 func (j *JsonService) assembleJsonMap(subId string) (map[string]interface{}, *model.Client, error) {
@@ -353,6 +452,133 @@ func (j *JsonService) addOthers(jsonConfig *map[string]interface{}) error {
 	(*jsonConfig)["route"] = route
 
 	return nil
+}
+
+func applyManagedRulesToRoute(jsonConfig *map[string]interface{}, managedRules []map[string]interface{}) {
+	if len(managedRules) == 0 {
+		return
+	}
+	routeObj, ok := (*jsonConfig)["route"].(map[string]interface{})
+	if !ok || routeObj == nil {
+		routeObj = map[string]interface{}{}
+	}
+	var existing []interface{}
+	if cur, ok := routeObj["rules"].([]interface{}); ok {
+		existing = append(existing, cur...)
+	}
+	for _, r := range managedRules {
+		existing = append(existing, r)
+	}
+	routeObj["rules"] = existing
+	(*jsonConfig)["route"] = routeObj
+}
+
+func extractManagedRuleSetTags(managedRules []map[string]interface{}) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, rule := range managedRules {
+		raw, ok := rule["rule_set"]
+		if !ok {
+			continue
+		}
+		switch v := raw.(type) {
+		case []string:
+			for _, tag := range v {
+				tag = strings.TrimSpace(tag)
+				if tag == "" {
+					continue
+				}
+				if _, exists := seen[tag]; exists {
+					continue
+				}
+				seen[tag] = struct{}{}
+				out = append(out, tag)
+			}
+		case []interface{}:
+			for _, it := range v {
+				tag := strings.TrimSpace(fmt.Sprint(it))
+				if tag == "" {
+					continue
+				}
+				if _, exists := seen[tag]; exists {
+					continue
+				}
+				seen[tag] = struct{}{}
+				out = append(out, tag)
+			}
+		}
+	}
+	return out
+}
+
+func buildManagedRuleSetBaseURL(j *JsonService, requestHost string) string {
+	if base := buildSubBaseURL(j, requestHost); base != "" {
+		return base
+	}
+	requestHost = strings.TrimSpace(requestHost)
+	if requestHost == "" {
+		return ""
+	}
+	subPath, _ := j.SettingService.GetSubPath()
+	subPath = strings.TrimSpace(subPath)
+	if !strings.HasPrefix(subPath, "/") {
+		subPath = "/" + subPath
+	}
+	return "https://" + requestHost + strings.TrimRight(subPath, "/")
+}
+
+func ensureManagedRuleSetDefinitions(j *JsonService, jsonConfig *map[string]interface{}, managedRules []map[string]interface{}, requestHost string) {
+	tags := extractManagedRuleSetTags(managedRules)
+	if len(tags) == 0 {
+		return
+	}
+	baseURL := buildManagedRuleSetBaseURL(j, requestHost)
+	if baseURL == "" {
+		return
+	}
+
+	routeObj, ok := (*jsonConfig)["route"].(map[string]interface{})
+	if !ok || routeObj == nil {
+		routeObj = map[string]interface{}{}
+	}
+	existing := make([]interface{}, 0)
+	existingTag := map[string]struct{}{}
+	if cur, ok := routeObj["rule_set"].([]interface{}); ok {
+		existing = append(existing, cur...)
+		for _, item := range cur {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			tag := strings.TrimSpace(fmt.Sprint(m["tag"]))
+			if tag != "" {
+				existingTag[tag] = struct{}{}
+			}
+		}
+	}
+	for _, tag := range tags {
+		if _, ok := existingTag[tag]; ok {
+			continue
+		}
+		parts := strings.SplitN(tag, "-", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		kind := strings.TrimSpace(parts[0])
+		name := strings.TrimSpace(parts[1])
+		if (kind != "geoip" && kind != "geosite") || name == "" {
+			continue
+		}
+		existing = append(existing, map[string]interface{}{
+			"type":   "remote",
+			"tag":    tag,
+			"format": "binary",
+			"url":    fmt.Sprintf("%s/ruleset/%s/%s.srs", baseURL, kind, name),
+		})
+		existingTag[tag] = struct{}{}
+	}
+	routeObj["rule_set"] = existing
+	(*jsonConfig)["route"] = routeObj
 }
 
 func (j *JsonService) resolveWGServerHost(requestHost string) string {

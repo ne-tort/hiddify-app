@@ -64,7 +64,7 @@ func (a *APIv2Handler) getHandler(c *gin.Context) {
 	switch action {
 	case "load":
 		a.ApiService.LoadData(c)
-	case "inbounds", "outbounds", "endpoints", "services", "tls", "clients", "config", "groups":
+	case "inbounds", "outbounds", "endpoints", "services", "tls", "clients", "config", "groups", "geo_catalog", "routing_profiles", "awg_obfuscation_profiles":
 		err := a.ApiService.LoadPartialData(c, []string{action})
 		if err != nil {
 			jsonMsg(c, action, err)
@@ -90,6 +90,12 @@ func (a *APIv2Handler) getHandler(c *gin.Context) {
 		a.ApiService.GetDb(c)
 	case "checkOutbound":
 		a.ApiService.GetCheckOutbound(c)
+	case "routingProfileHapp":
+		a.ApiService.GetRoutingProfileHapp(c)
+	case "routingProfileSingbox":
+		a.ApiService.GetRoutingProfileSingbox(c)
+	case "awgObfuscationProfileAutofill":
+		a.ApiService.GetAwgObfuscationProfileAutofill(c)
 	default:
 		jsonMsg(c, "failed", common.NewError("unknown action: ", action))
 	}

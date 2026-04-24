@@ -114,6 +114,16 @@ func InitDB(dbPath string) error {
 		&model.InboundUserPolicy{},
 		&model.InboundPolicyGroup{},
 		&model.InboundPolicyClient{},
+		&model.GeoDataset{},
+		&model.GeoCatalogRevision{},
+		&model.GeoTag{},
+		&model.GeoTagItem{},
+		&model.RoutingProfile{},
+		&model.RoutingProfileClientMember{},
+		&model.RoutingProfileGroupMember{},
+		&model.AwgObfuscationProfile{},
+		&model.AwgObfuscationProfileClientMember{},
+		&model.AwgObfuscationProfileGroupMember{},
 	)
 	if err != nil {
 		return err

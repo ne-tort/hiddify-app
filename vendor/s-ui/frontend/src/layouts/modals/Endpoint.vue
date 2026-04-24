@@ -36,6 +36,12 @@
           :clients="clients"
           @getWgPubKey="getWgPubKey"
           @newWgKey="newWgKey" />
+        <Awg v-else-if="endpoint.type == epTypes.Awg"
+          :data="endpoint"
+          :user-groups="userGroups"
+          :clients="clients"
+          @getWgPubKey="getWgPubKey"
+          @newWgKey="newWgKey" />
         <Warp v-if="endpoint.type == epTypes.Warp" :data="endpoint" />
         <TailscaleVue v-if="endpoint.type == epTypes.Tailscale" :data="endpoint" />
         <L3Router v-if="endpoint.type == epTypes.L3Router" :data="endpoint" :user-groups="userGroups" :clients="clients" :is-new="Number(id) === 0" />
@@ -54,20 +60,20 @@
           color="primary"
           variant="tonal"
           :loading="loading"
-          :disabled="Boolean(wireguardValidationError)"
+          :disabled="Boolean(endpointValidationError)"
           @click="saveChanges"
         >
           {{ $t('actions.save') }}
         </v-btn>
       </v-card-actions>
       <v-alert
-        v-if="wireguardValidationError"
+        v-if="endpointValidationError"
         type="error"
         variant="tonal"
         density="compact"
         class="ma-4 mt-0"
       >
-        {{ wireguardValidationError }}
+        {{ endpointValidationError }}
       </v-alert>
     </v-card>
   </v-dialog>
@@ -78,6 +84,7 @@ import { EpTypes, createEndpoint } from '@/types/endpoints'
 import RandomUtil from '@/plugins/randomUtil'
 import Dial from '@/components/Dial.vue'
 import Wireguard from '@/components/protocols/Wireguard.vue'
+import Awg from '@/components/protocols/Awg.vue'
 import Warp from '@/components/protocols/Warp.vue'
 import TailscaleVue from '@/components/protocols/Tailscale.vue'
 import L3Router from '@/components/protocols/L3Router.vue'
@@ -96,8 +103,8 @@ export default {
     clients() {
       return Data().clients ?? []
     },
-    wireguardValidationError(): string | null {
-      if (this.endpoint.type !== EpTypes.Wireguard) return null
+    endpointValidationError(): string | null {
+      if (this.endpoint.type !== EpTypes.Wireguard && this.endpoint.type !== EpTypes.Awg) return null
       return this.validateWireguardFields()
     },
   },
@@ -145,6 +152,24 @@ export default {
             member_client_ids: [],
             ext: {
               public_key: wgKeys.public_key,
+              keys: []
+            }
+          }
+          break
+        case EpTypes.Awg:
+          const awgKeys = (await this.genWgKey())
+          const awgSubnet = this.nextAwgSubnet()
+          prevConfig = {
+            tag: tag,
+            type: EpTypes.Awg,
+            listen_port: this.endpoint.listen_port ?? RandomUtil.randomIntRange(10000, 60000),
+            address: [`10.1.${awgSubnet}.1/24`, 'fe80::1/128'],
+            private_key: awgKeys.private_key,
+            peers: [],
+            member_group_ids: [],
+            member_client_ids: [],
+            ext: {
+              public_key: awgKeys.public_key,
               keys: []
             }
           }
@@ -229,8 +254,8 @@ export default {
           return
         }
       }
-      if (this.endpoint.type === EpTypes.Wireguard && this.wireguardValidationError) {
-        push.error({ message: this.wireguardValidationError })
+      if ((this.endpoint.type === EpTypes.Wireguard || this.endpoint.type === EpTypes.Awg) && this.endpointValidationError) {
+        push.error({ message: this.endpointValidationError })
         return
       }
 
@@ -254,11 +279,12 @@ export default {
       return true
     },
     validateWireguardFields(): string | null {
+      const label = this.endpoint.type === EpTypes.Awg ? 'AWG' : 'WireGuard'
       const addrs = Array.isArray(this.endpoint.address) ? this.endpoint.address : []
       for (let i = 0; i < addrs.length; i += 1) {
         const n = this.normalizeCIDRToken(addrs[i])
         if (!this.isCIDROrIPToken(n)) {
-          return `WireGuard address invalid: ${String(addrs[i])}`
+          return `${label} address invalid: ${String(addrs[i])}`
         }
       }
       const peers = Array.isArray(this.endpoint.peers) ? this.endpoint.peers : []
@@ -267,11 +293,40 @@ export default {
         for (let ai = 0; ai < allowed.length; ai += 1) {
           const n = this.normalizeCIDRToken(allowed[ai])
           if (!this.isCIDROrIPToken(n)) {
-            return `WireGuard peer[${pi + 1}] allowed_ips invalid: ${String(allowed[ai])}`
+            return `${label} peer[${pi + 1}] allowed_ips invalid: ${String(allowed[ai])}`
           }
         }
       }
       return null
+    },
+    nextAwgSubnet(): number {
+      const used = new Set<number>()
+      const endpoints = Data().endpoints ?? []
+      endpoints.forEach((ep: any) => {
+        if (ep?.type !== EpTypes.Awg) return
+        if (Number(ep?.id ?? 0) === Number(this.$props.id ?? 0)) return
+        let addrs: string[] = []
+        if (Array.isArray(ep?.address)) {
+          addrs = ep.address
+        } else if (typeof ep?.address === 'string') {
+          try {
+            const parsed = JSON.parse(ep.address)
+            if (Array.isArray(parsed)) addrs = parsed
+          } catch {
+            addrs = []
+          }
+        }
+        addrs.forEach((addr: string) => {
+          const m = String(addr).trim().match(/^10\.1\.(\d{1,3})\.\d{1,3}\/\d+$/)
+          if (!m) return
+          const oct = Number(m[1])
+          if (Number.isInteger(oct) && oct >= 0 && oct <= 254) used.add(oct)
+        })
+      })
+      for (let i = 0; i <= 254; i += 1) {
+        if (!used.has(i)) return i
+      }
+      return 0
     },
     async genWgKey(){
       this.loading = true
@@ -313,12 +368,14 @@ export default {
     },
   },
   watch: {
-    visible(v) {
-      if (v) {
-        this.updateData(this.$props.id)
+    async visible(v) {
+      if (!v) return
+      await this.updateData(this.$props.id)
+      if (this.endpoint.type === EpTypes.Awg) {
+        await Data().loadAwgObfuscationProfiles()
       }
     },
   },
-  components: { Dial, Wireguard, Warp, TailscaleVue, L3Router }
+  components: { Dial, Wireguard, Awg, Warp, TailscaleVue, L3Router }
 }
 </script>

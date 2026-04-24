@@ -1,9 +1,12 @@
 package sub
 
 import (
+	"errors"
 	"net"
+	"net/http"
 	"strings"
 
+	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/service"
 
@@ -12,6 +15,8 @@ import (
 
 type SubHandler struct {
 	service.SettingService
+	service.RuleSetService
+	service.GeoDatService
 	SubService
 	JsonService
 	ClashService
@@ -43,6 +48,8 @@ func subscriptionRequestHost(c *gin.Context) string {
 }
 
 func (s *SubHandler) initRouter(g *gin.RouterGroup) {
+	g.GET("/geodat/:kind", s.geoDatFile)
+	g.GET("/ruleset/:kind/:tag", s.ruleSetFile)
 	g.GET("/:subid", s.subs)
 	g.HEAD("/:subid", s.subHeaders)
 }
@@ -56,9 +63,13 @@ func (s *SubHandler) subs(c *gin.Context) {
 	if isFormat {
 		switch format {
 		case "json":
-			result, headers, err = s.JsonService.GetJson(subId, format)
+			result, headers, err = s.JsonService.GetJson(subId, subscriptionRequestHost(c))
+		case "json-rule":
+			result, headers, err = s.JsonService.GetJsonRule(subId, subscriptionRequestHost(c))
+		case "happ":
+			result, headers, err = s.JsonService.GetJsonHapp(subId, subscriptionRequestHost(c))
 		case "json-l3router":
-			result, headers, err = s.JsonService.GetJsonL3Router(subId)
+			result, headers, err = s.JsonService.GetJsonL3Router(subId, subscriptionRequestHost(c))
 		case "json-wg":
 			result, headers, err = s.JsonService.GetJsonWG(subId, subscriptionRequestHost(c))
 		case "clash":
@@ -81,6 +92,64 @@ func (s *SubHandler) subs(c *gin.Context) {
 	s.addHeaders(c, headers)
 
 	c.String(200, *result)
+}
+
+func (s *SubHandler) geoDatFile(c *gin.Context) {
+	kindWithExt := strings.TrimSpace(c.Param("kind"))
+	if !strings.HasSuffix(strings.ToLower(kindWithExt), ".dat") {
+		c.String(http.StatusBadRequest, "invalid geodat extension")
+		return
+	}
+	kind := strings.TrimSuffix(kindWithExt, ".dat")
+	result, err := s.GeoDatService.BuildGeoDat(database.GetDB(), kind)
+	if err != nil {
+		if errors.Is(err, service.ErrGeoDatInvalidKind) {
+			c.String(http.StatusBadRequest, "invalid geodat kind")
+			return
+		}
+		if errors.Is(err, service.ErrGeoDatNotFound) {
+			c.String(http.StatusNotFound, "Not Found")
+			return
+		}
+		c.String(http.StatusServiceUnavailable, "Geodat unavailable")
+		return
+	}
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.Header("ETag", result.ETag)
+	if inm := strings.TrimSpace(c.GetHeader("If-None-Match")); inm != "" && inm == result.ETag {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	c.Data(http.StatusOK, "application/octet-stream", result.Bytes)
+}
+
+func (s *SubHandler) ruleSetFile(c *gin.Context) {
+	kind := c.Param("kind")
+	tagWithExt := strings.TrimSpace(c.Param("tag"))
+	if !strings.HasSuffix(strings.ToLower(tagWithExt), ".srs") {
+		c.String(http.StatusBadRequest, "invalid ruleset extension")
+		return
+	}
+	tag := strings.TrimSuffix(tagWithExt, ".srs")
+	result, err := s.RuleSetService.BuildRuleSetSRS(database.GetDB(), kind, tag)
+	if err != nil {
+		if errors.Is(err, service.ErrRuleSetNotFound) {
+			c.String(http.StatusNotFound, "Not Found")
+			return
+		}
+		logger.Warning("ruleset build failed: ", err)
+		c.String(http.StatusServiceUnavailable, "Ruleset unavailable")
+		return
+	}
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.Header("ETag", result.ETag)
+	if inm := strings.TrimSpace(c.GetHeader("If-None-Match")); inm != "" && inm == result.ETag {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	c.Data(http.StatusOK, "application/octet-stream", result.Bytes)
 }
 
 func (s *SubHandler) subHeaders(c *gin.Context) {

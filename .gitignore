@@ -136,3 +136,11 @@ tools/wgcf/wgcf-teams.zip
 tools/wgcf/wgcf-teams/wgcf-teams.exe
 tools/wgcf/wgcf-account.toml
 tools/wgcf/wgcf-profile.conf
+
+# Local naiveproxy reference clone(s) for parity audit
+/vendor/naiveproxy/
+/vendor/naiveproxy-clean/
+/vendor/naiveproxy_repo/
+
+# Local clone of AmneziaWG-Architect (study only; vendor TS lives under vendor/s-ui/frontend)
+/third_party/AmneziaWG-Architect/

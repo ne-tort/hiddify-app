@@ -41,6 +41,18 @@
             </v-row>
             <v-row>
               <v-col style="text-align: center;">
+                <v-chip>{{ $t('setting.jsonSubRule') }}</v-chip><br />
+                <QrcodeVue :value="clientSub + '?format=json-rule'" :size="size" @click="copyToClipboard(clientSub + '?format=json-rule')" :margin="1" style="border-radius: 1rem; cursor: copy;" />
+              </v-col>
+            </v-row>
+            <v-row>
+              <v-col style="text-align: center;">
+                <v-chip>{{ $t('setting.jsonSubHapp') }}</v-chip><br />
+                <QrcodeVue :value="clientSub + '?format=happ'" :size="size" @click="copyToClipboard(clientSub + '?format=happ')" :margin="1" style="border-radius: 1rem; cursor: copy;" />
+              </v-col>
+            </v-row>
+            <v-row>
+              <v-col style="text-align: center;">
                 <v-chip>{{ $t('setting.sub') }}</v-chip><br />
                 <QrcodeVue :value="clientSub" :size="size" @click="copyToClipboard(clientSub)" :margin="1" style="border-radius: 1rem; cursor: copy;" />
               </v-col>
@@ -60,7 +72,7 @@
             <v-row>
               <v-col style="text-align: center;">
                 <v-chip>SING-BOX (scan only)</v-chip><br />
-                <QrcodeVue :value="singbox" :size="size" :margin="1" style="border-radius: .8rem; cursor: not-allowed;" />
+                <QrcodeVue :value="singboxRule" :size="size" :margin="1" style="border-radius: .8rem; cursor: not-allowed;" />
               </v-col>
             </v-row>
           </v-window-item>
@@ -139,6 +151,10 @@ export default {
     singbox() {
       const url = Data().subURI + this.client.name + "?format=json"
       return "sing-box://import-remote-profile?url=" +  encodeURIComponent(url) + "#" + this.client.name
+    },
+    singboxRule() {
+      const url = Data().subURI + this.client.name + "?format=json-rule"
+      return "sing-box://import-remote-profile?url=" +  encodeURIComponent(url) + "#" + this.client.name + "-rule"
     },
     clientLinks() {
       return this.client.links?? []

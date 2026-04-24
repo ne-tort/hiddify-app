@@ -104,7 +104,7 @@
           </v-overlay>
           <v-icon
           class="me-2"
-          v-if="item.type == 'wireguard' && item.peers?.length>0"
+          v-if="(item.type == 'wireguard' || item.type == 'awg') && item.peers?.length>0"
           @click="showQrCode(item.id)"
         >
           mdi-qrcode

@@ -617,7 +617,7 @@ func NormalizeWireGuardOutboundsToEndpointsJSON(jsonConfig *map[string]interface
 	keep := make([]map[string]interface{}, 0, len(outbounds))
 	for _, ob := range outbounds {
 		typ, _ := ob["type"].(string)
-		if typ != "wireguard" {
+		if typ != "wireguard" && typ != "awg" {
 			keep = append(keep, ob)
 			continue
 		}
@@ -626,7 +626,12 @@ func NormalizeWireGuardOutboundsToEndpointsJSON(jsonConfig *map[string]interface
 			keep = append(keep, ob)
 			continue
 		}
-		ep := legacyWireGuardOutboundMapToEndpoint(ob)
+		var ep map[string]interface{}
+		if typ == "awg" {
+			ep = legacyAwgOutboundMapToEndpoint(ob)
+		} else {
+			ep = legacyWireGuardOutboundMapToEndpoint(ob)
+		}
 		if ep == nil {
 			keep = append(keep, ob)
 			continue
@@ -674,6 +679,39 @@ func legacyWireGuardOutboundMapToEndpoint(ob map[string]interface{}) map[string]
 	}
 	if noise, ok := ob["noise"]; ok && noise != nil {
 		ep["noise"] = noise
+	}
+	return ep
+}
+
+func legacyAwgOutboundMapToEndpoint(ob map[string]interface{}) map[string]interface{} {
+	localAddrs := toStringSlice(ob["local_address"])
+	if len(localAddrs) == 0 {
+		localAddrs = toStringSlice(ob["address"])
+	}
+	priv := strings.TrimSpace(fmt.Sprint(ob["private_key"]))
+	if priv == "" || len(localAddrs) == 0 {
+		return nil
+	}
+	peersJSON := buildWireGuardPeersFromLegacyOutboundMap(ob, localAddrs)
+	if len(peersJSON) == 0 {
+		return nil
+	}
+	tag := strings.TrimSpace(fmt.Sprint(ob["tag"]))
+	ep := map[string]interface{}{
+		"type":        awgEndpointType,
+		"tag":         tag,
+		"address":     stringSliceToIface(localAddrs),
+		"private_key": priv,
+		"peers":       peersJSON,
+	}
+	if mtu := intFromAny(ob["mtu"]); mtu > 0 {
+		ep["mtu"] = mtu
+	}
+	if w := intFromAny(ob["workers"]); w > 0 {
+		ep["workers"] = w
+	}
+	if detour := strings.TrimSpace(fmt.Sprint(ob["detour"])); detour != "" {
+		ep["detour"] = detour
 	}
 	return ep
 }
