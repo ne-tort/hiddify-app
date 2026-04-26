@@ -12,6 +12,7 @@ func TestEndpointMarshalJSON_WireGuardStripsForwardAllow(t *testing.T) {
 		"private_key":      "k",
 		"listen_port":      51820,
 		"forward_allow":    true,
+		"internet_allow":   false,
 		"cloak_enabled":    true,
 		"cloak_detour_tag": "vless-main",
 		"peers": []map[string]interface{}{
@@ -34,6 +35,9 @@ func TestEndpointMarshalJSON_WireGuardStripsForwardAllow(t *testing.T) {
 	}
 	if strings.Contains(string(out), "forward_allow") {
 		t.Fatalf("forward_allow leaked to runtime json: %s", string(out))
+	}
+	if strings.Contains(string(out), "internet_allow") {
+		t.Fatalf("internet_allow leaked to runtime json: %s", string(out))
 	}
 	if strings.Contains(string(out), "cloak_enabled") {
 		t.Fatalf("cloak_enabled leaked to runtime json: %s", string(out))
@@ -76,6 +80,36 @@ func TestEndpointMarshalJSON_AwgStripsUIPeersAndProfileRef(t *testing.T) {
 	}
 	if !strings.Contains(s, "jc") {
 		t.Fatalf("expected jc in output: %s", s)
+	}
+}
+
+func TestEndpointMarshalJSON_WireGuardStripsHubClientAndPeerExit(t *testing.T) {
+	options := map[string]interface{}{
+		"address":         []string{"10.8.0.2/32"},
+		"private_key":     "k",
+		"hub_client_mode": true,
+		"peers": []map[string]interface{}{
+			{
+				"public_key":  "hubpk",
+				"address":     "1.2.3.4",
+				"port":        float64(51820),
+				"peer_exit":   true,
+				"allowed_ips": []string{"10.8.0.0/24"},
+			},
+		},
+	}
+	raw, _ := json.Marshal(options)
+	ep := Endpoint{Type: "wireguard", Tag: "wg-c", Options: raw}
+	out, err := ep.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "hub_client_mode") {
+		t.Fatalf("hub_client_mode leaked: %s", s)
+	}
+	if strings.Contains(s, "peer_exit") {
+		t.Fatalf("peer_exit leaked: %s", s)
 	}
 }
 

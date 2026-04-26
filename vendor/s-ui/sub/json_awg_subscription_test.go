@@ -2,6 +2,8 @@ package sub
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/alireza0/s-ui/database/model"
@@ -38,6 +40,8 @@ func TestPatchJsonForAwgDB_injectsEndpointAndObfuscation(t *testing.T) {
 		"listen_port":              15555,
 		"private_key":              serverPriv.String(),
 		"address":                  []string{"10.20.0.1/24"},
+		"system":                   true,
+		"name":                     "awg",
 		"member_client_ids":        []interface{}{float64(1)},
 		"obfuscation_profile_id": float64(prof.Id),
 		"jc":                       float64(99),
@@ -89,6 +93,9 @@ func TestPatchJsonForAwgDB_injectsEndpointAndObfuscation(t *testing.T) {
 	if !ok || ep0["type"] != "awg" || ep0["tag"] != "awg-test" {
 		t.Fatalf("bad awg endpoint: %#v", ep0)
 	}
+	if !boolFromAnySub(ep0["system"]) || strings.TrimSpace(fmt.Sprint(ep0["name"])) != "awg" {
+		t.Fatalf("expected system/name to be preserved, got %#v", ep0)
+	}
 	if intFromAny(ep0["jc"]) != 99 {
 		t.Fatalf("inline jc should override profile: got %v", ep0["jc"])
 	}
@@ -99,6 +106,146 @@ func TestPatchJsonForAwgDB_injectsEndpointAndObfuscation(t *testing.T) {
 	p0, _ := peers[0].(map[string]interface{})
 	if p0["address"] != "awg.example" || intFromAny(p0["port"]) != 15555 {
 		t.Fatalf("peer: %#v", p0)
+	}
+	gotA := toStringSlice(p0["allowed_ips"])
+	if len(gotA) < 2 {
+		t.Fatalf("expected awg allowed_ips 0.0.0.0/0 and ::/0, got %#v", p0["allowed_ips"])
+	}
+	seen0, seen6 := false, false
+	for _, a := range gotA {
+		switch a {
+		case "0.0.0.0/0":
+			seen0 = true
+		case "::/0":
+			seen6 = true
+		}
+	}
+	if !seen0 || !seen6 {
+		t.Fatalf("expected awg allowed_ips 0.0.0.0/0 and ::/0, got %#v", p0["allowed_ips"])
+	}
+}
+
+func TestPatchJsonForAwgDB_InternetDisabledUsesTunnelCIDR(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Endpoint{}, &model.Client{}); err != nil {
+		t.Fatal(err)
+	}
+	serverPriv, _ := wgtypes.GeneratePrivateKey()
+	clientPriv, _ := wgtypes.GeneratePrivateKey()
+	opts := map[string]interface{}{
+		"listen_port":      16667,
+		"private_key":      serverPriv.String(),
+		"internet_allow":   false,
+		"address":          []string{"10.5.0.1/24"},
+		"member_client_ids": []interface{}{float64(1)},
+		"peers": []map[string]interface{}{
+			{
+				"client_id":   float64(1),
+				"private_key": clientPriv.String(),
+				"public_key":  clientPriv.PublicKey().String(),
+				"allowed_ips": []string{"10.5.0.2/32"},
+			},
+		},
+	}
+	optRaw, _ := json.Marshal(opts)
+	ep := model.Endpoint{Type: "awg", Tag: "awg-no-internet", Options: optRaw}
+	if err := db.Create(&ep).Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]interface{}{
+		"wireguard": map[string]interface{}{
+			"private_key": clientPriv.String(),
+			"public_key":  clientPriv.PublicKey().String(),
+		},
+	})
+	cl := model.Client{Id: 1, Name: "u1", Enable: true, Config: cfg, Inbounds: json.RawMessage(`[]`)}
+	if err := db.Create(&cl).Error; err != nil {
+		t.Fatal(err)
+	}
+	var jc map[string]interface{}
+	_ = json.Unmarshal([]byte(defaultJson), &jc)
+	jc["outbounds"] = []interface{}{
+		map[string]interface{}{"type": "selector", "tag": "proxy", "outbounds": []interface{}{"auto", "direct", "awg-no-internet"}},
+	}
+	j := &JsonService{}
+	if err := j.patchJsonForAwgDB(db, &jc, &cl, "awg.example"); err != nil {
+		t.Fatal(err)
+	}
+	eps, _ := jc["endpoints"].([]interface{})
+	ep0, _ := eps[len(eps)-1].(map[string]interface{})
+	peers, _ := ep0["peers"].([]interface{})
+	p0, _ := peers[0].(map[string]interface{})
+	got := toStringSlice(p0["allowed_ips"])
+	if len(got) == 0 || got[0] != "10.5.0.0/24" {
+		t.Fatalf("expected tunnel cidr when internet disabled, got %v", got)
+	}
+	for _, a := range got {
+		if strings.Contains(a, ":") {
+			t.Fatalf("no IPv6 in peer.allowed_ips when internet off, got %v", got)
+		}
+	}
+}
+
+func TestPatchJsonForAwgDB_InternetDisabledNoV6WhenServerHasULA(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Endpoint{}, &model.Client{}); err != nil {
+		t.Fatal(err)
+	}
+	serverPriv, _ := wgtypes.GeneratePrivateKey()
+	clientPriv, _ := wgtypes.GeneratePrivateKey()
+	opts := map[string]interface{}{
+		"listen_port":       16668,
+		"private_key":       serverPriv.String(),
+		"internet_allow":    false,
+		"address":           []string{"10.5.0.1/24", "fdac:0:0:2::1/64"},
+		"member_client_ids": []interface{}{float64(1)},
+		"peers": []map[string]interface{}{
+			{
+				"client_id":   float64(1),
+				"private_key": clientPriv.String(),
+				"public_key":  clientPriv.PublicKey().String(),
+				"allowed_ips": []string{"10.5.0.2/32", "fdac:0:0:2::2/128"},
+			},
+		},
+	}
+	optRaw, _ := json.Marshal(opts)
+	ep := model.Endpoint{Type: "awg", Tag: "awg-nov6", Options: optRaw}
+	if err := db.Create(&ep).Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]interface{}{
+		"wireguard": map[string]interface{}{
+			"private_key": clientPriv.String(),
+			"public_key":  clientPriv.PublicKey().String(),
+		},
+	})
+	cl := model.Client{Id: 1, Name: "u1", Enable: true, Config: cfg, Inbounds: json.RawMessage(`[]`)}
+	if err := db.Create(&cl).Error; err != nil {
+		t.Fatal(err)
+	}
+	var jc map[string]interface{}
+	_ = json.Unmarshal([]byte(defaultJson), &jc)
+	jc["outbounds"] = []interface{}{
+		map[string]interface{}{"type": "selector", "tag": "proxy", "outbounds": []interface{}{"auto", "direct", "awg-nov6"}},
+	}
+	j := &JsonService{}
+	if err := j.patchJsonForAwgDB(db, &jc, &cl, "awg.example"); err != nil {
+		t.Fatal(err)
+	}
+	eps, _ := jc["endpoints"].([]interface{})
+	ep0, _ := eps[len(eps)-1].(map[string]interface{})
+	peers, _ := ep0["peers"].([]interface{})
+	p0, _ := peers[0].(map[string]interface{})
+	for _, a := range toStringSlice(p0["allowed_ips"]) {
+		if strings.Contains(a, ":") {
+			t.Fatalf("no IPv6 in peer.allowed_ips when internet off, got %v", toStringSlice(p0["allowed_ips"]))
+		}
 	}
 }
 

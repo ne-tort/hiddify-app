@@ -1,0 +1,13 @@
+name: stand-awg-single-client
+services:
+  client-awg:
+    image: sing-box-l3router:local
+    container_name: stand-awg-single-client
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: "no"
+    volumes:
+      - ./client-awg.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]

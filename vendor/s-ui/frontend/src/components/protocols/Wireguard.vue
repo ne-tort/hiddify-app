@@ -5,20 +5,27 @@
         <v-text-field v-model="data.private_key" :label="$t('types.wg.privKey')" append-icon="mdi-key-star" @click:append="newKey()" hide-details />
       </v-col>
       <v-col cols="12" sm="8">
-        <v-text-field v-model="public_key" readonly :label="$t('tls.pubKey')" append-icon="mdi-refresh" @click:append="getWgPubKey()" hide-details />
+        <v-text-field
+          v-model="public_key"
+          :readonly="!hubClientMode"
+          :label="$t('tls.pubKey')"
+          append-icon="mdi-refresh"
+          @click:append="getWgPubKey()"
+          hide-details
+        />
       </v-col>
       <v-col cols="12" sm="8">
         <v-text-field v-model="address" :label="$t('types.wg.localIp') + ' ' + $t('commaSeparated')" hide-details />
       </v-col>
-      <v-col cols="12" sm="6">
+      <v-col v-if="!hubClientMode" cols="12" sm="6">
         <GroupMultiSelect v-model="data.member_group_ids" :user-groups="userGroups" :label="$t('l3router.groups')" />
       </v-col>
-      <v-col cols="12" sm="6">
+      <v-col v-if="!hubClientMode" cols="12" sm="6">
         <v-select v-model="data.member_client_ids" :items="clientItems" item-title="title" item-value="value" multiple chips closable-chips :label="$t('l3router.clients')" density="compact" />
       </v-col>
     </v-row>
     <v-row>
-      <v-col cols="12" sm="6" md="4">
+      <v-col v-if="!hubClientMode" cols="12" sm="6" md="4">
         <v-text-field :label="$t('in.port')" hide-details type="number" min="1" v-model.number="data.listen_port" />
       </v-col>
       <v-col cols="12" sm="6" md="4" v-if="data.udp_timeout != undefined">
@@ -59,7 +66,7 @@
       </v-col>
     </v-row>
     <v-card-actions>
-      <v-btn color="primary" variant="tonal" @click="addPeer">{{ $t('actions.add') }}</v-btn>
+      <v-btn color="primary" variant="tonal" :disabled="hubClientMode" @click="addPeer">{{ $t('actions.add') }}</v-btn>
       <v-spacer />
       <v-menu v-model="menu" :close-on-content-click="false" location="start">
         <template #activator="{ props }">
@@ -71,23 +78,90 @@
             <v-list-item><v-switch v-model="optionWorker" color="primary" :label="$t('types.wg.worker')" hide-details /></v-list-item>
             <v-list-item><v-switch v-model="optionMtu" color="primary" label="MTU" hide-details /></v-list-item>
             <v-list-item><v-switch v-model="optionKeepalive" color="primary" label="Keepalive" hide-details /></v-list-item>
-            <v-list-item v-if="!hideWgOnlyOptions">
-              <v-switch v-model="optionForwardAllow" color="primary" label="FORWARD allow (wg peer-to-peer)" hide-details />
+            <v-list-item><v-switch v-model="optionIPv6" color="primary" :label="$t('types.wg.ipv6')" hide-details /></v-list-item>
+            <v-list-item>
+              <v-switch v-model="optionForwardAllow" color="primary" :label="$t('types.wg.peerToPeer')" hide-details />
+            </v-list-item>
+            <v-list-item>
+              <v-switch v-model="optionInternetAllow" color="primary" :label="$t('types.wg.internet')" hide-details />
             </v-list-item>
             <v-list-item v-if="!hideWgOnlyOptions">
               <v-switch v-model="optionCloak" color="primary" label="WG Cloak" hide-details />
+            </v-list-item>
+            <v-list-item>
+              <v-switch v-model="optionHubClientMode" color="primary" :label="$t('types.wg.hubClientMode')" hide-details />
             </v-list-item>
           </v-list>
         </v-card>
       </v-menu>
     </v-card-actions>
   </v-card>
-  <v-card v-if="data.peers != undefined">
+  <v-card v-if="hubClientMode">
+    <v-card-subtitle>{{ $t('types.wg.peers') }}</v-card-subtitle>
+    <v-row class="px-3 pb-3">
+      <v-col cols="12" sm="8">
+        <v-text-field
+          v-model="hubPeerAddress"
+          :label="$t('types.wg.hubHost')"
+          hide-details
+        />
+      </v-col>
+      <v-col cols="12" sm="4">
+        <v-text-field
+          v-model.number="hubPeerPort"
+          :label="$t('types.wg.hubPort')"
+          type="number"
+          min="1"
+          max="65535"
+          hide-details
+        />
+      </v-col>
+      <v-col cols="12" sm="8">
+        <v-text-field
+          v-model="hubPeerPublicKey"
+          :label="$t('types.wg.pubKey')"
+          hide-details
+        />
+      </v-col>
+      <v-col cols="12">
+        <v-text-field
+          :model-value="joinArray(upstreamPeer.allowed_ips)"
+          @update:model-value="setAllowed(upstreamPeer, $event)"
+          :label="$t('types.wg.allowedIp') + ' ' + $t('commaSeparated')"
+          hide-details
+        />
+      </v-col>
+    </v-row>
+  </v-card>
+  <v-card v-else-if="data.peers != undefined">
     <v-card-subtitle>{{ $t('types.wg.peers') }}</v-card-subtitle>
     <v-data-table :headers="peerHeaders" :items="data.peers" density="comfortable" class="elevation-2 rounded">
       <template #item.row_id="{ index }">{{ index + 1 }}</template>
+      <template #header.peer_exit>
+        <v-tooltip location="top">
+          <template #activator="{ props: htip }">
+            <v-icon v-bind="htip" size="small" class="ms-1">mdi-transit-connection-variant</v-icon>
+          </template>
+          <span>{{ $t('types.wg.exitNodeTooltip') }}</span>
+        </v-tooltip>
+      </template>
       <template #item.allowed_ips="{ item }">
         <v-text-field :model-value="joinArray(peerRow(item).allowed_ips)" @update:model-value="setAllowed(peerRow(item), $event)" density="compact" hide-details />
+      </template>
+      <template #item.peer_exit="{ item }">
+        <v-tooltip location="top">
+          <template #activator="{ props: tip }">
+            <v-btn
+              v-bind="tip"
+              icon="mdi-transit-connection-variant"
+              size="small"
+              :color="peerRow(item).peer_exit === true ? 'primary' : undefined"
+              :variant="peerRow(item).peer_exit === true ? 'tonal' : 'text'"
+              @click="togglePeerExit(peerRow(item))"
+            />
+          </template>
+          <span>{{ $t('types.wg.exitNodeTooltip') }}</span>
+        </v-tooltip>
       </template>
       <template #item.client_name="{ item }">{{ peerRow(item).client_name || '-' }}</template>
       <template #item.private_key="{ item }">
@@ -110,7 +184,13 @@
         </v-chip>
       </template>
       <template #item.actions="{ index, item }">
-        <v-btn icon="mdi-delete" variant="text" color="error" :disabled="peerRow(item).managed" @click="delPeer(Number(index))" />
+        <v-btn
+          icon="mdi-delete"
+          variant="text"
+          color="error"
+          :disabled="peerRow(item).managed || hubClientMode"
+          @click="delPeer(Number(index))"
+        />
       </template>
     </v-data-table>
   </v-card>
@@ -121,6 +201,7 @@ import GroupMultiSelect from '@/components/GroupMultiSelect.vue'
 import HttpUtils from '@/plugins/httputil'
 import { push } from 'notivue'
 import Data from '@/store/modules/data'
+import { createPeerDraft, ensurePeersArray, sanitizeWgAwgByMode } from '@/components/protocols/useWgAwgFormModel'
 
 export default {
   props: {
@@ -151,6 +232,21 @@ export default {
     delPeer(id: number) {
       this.$props.data.peers.splice(id, 1)
     },
+    togglePeerExit(row: Record<string, unknown>) {
+      if (row.peer_exit === true) {
+        row.peer_exit = false
+        return
+      }
+      const peers = this.$props.data.peers as unknown[]
+      for (const p of peers) {
+        const o = p && typeof p === 'object' ? (p as Record<string, unknown>) : null
+        if (!o) {
+          continue
+        }
+        o.peer_exit = false
+      }
+      row.peer_exit = true
+    },
     newKey() {
       this.$emit('newWgKey')
     },
@@ -173,6 +269,13 @@ export default {
     setAllowed(item: any, value: string) {
       item.allowed_ips = String(value ?? '').trim().length > 0 ? String(value).split(',').map((x) => x.trim()) : []
     },
+    ensureUpstreamPeer() {
+      ensurePeersArray(this.$props.data)
+      if (!this.$props.data.peers[0]) {
+        this.$props.data.peers.push(createPeerDraft())
+      }
+      return this.$props.data.peers[0]
+    },
     async genWgKeySafe() {
       const fallback = { private_key: '', public_key: '' }
       const msg = await HttpUtils.get('api/keypairs', { k: 'wireguard' })
@@ -184,31 +287,38 @@ export default {
       })
       return out
     },
-    peerSubnetOctet(): number {
+    peerIPv4Base(): string {
       const list = Array.isArray(this.$props.data.address) ? this.$props.data.address : []
-      const isAwg = this.$props.data.type === 'awg'
-      const re = isAwg ? /^10\.1\.(\d{1,3})\.\d{1,3}\/\d+$/ : /^10\.0\.(\d{1,3})\.\d{1,3}\/\d+$/
       for (const raw of list) {
-        const m = String(raw).trim().match(re)
-        if (!m) continue
-        const oct = Number(m[1])
-        if (Number.isInteger(oct) && oct >= 0 && oct <= 254) return oct
+        const value = String(raw ?? '').trim()
+        if (!value.includes('.')) continue
+        const host = value.split('/')[0]?.trim() ?? ''
+        const parts = host.split('.').map((x) => Number(x))
+        if (parts.length !== 4) continue
+        if (parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) continue
+        return `${parts[0]}.${parts[1]}.${parts[2]}`
       }
-      return 1
+      return this.$props.data.type === 'awg' ? '10.1.1' : '10.0.1'
     },
     findLowestFreePeerIP(): string {
-      const subnet = this.peerSubnetOctet()
+      const base = this.peerIPv4Base()
       const used = new Set<string>()
-      const prefix = this.$props.data.type === 'awg' ? '10.1' : '10.0'
       const serverAddrs = Array.isArray(this.$props.data.address) ? this.$props.data.address : []
-      serverAddrs.forEach((a: string) => used.add(String(a).trim()))
+      serverAddrs.forEach((a: string) => {
+        const raw = String(a).trim()
+        used.add(raw)
+        const host = raw.split('/')[0]?.trim() ?? ''
+        if (host.includes('.')) {
+          used.add(`${host}/32`)
+        }
+      })
       const peers = Array.isArray(this.$props.data.peers) ? this.$props.data.peers : []
       peers.forEach((p: any) => {
         const arr = Array.isArray(p?.allowed_ips) ? p.allowed_ips : []
         arr.forEach((x: string) => used.add(String(x).trim()))
       })
       for (let host = 2; host < 255; host += 1) {
-        const ip = `${prefix}.${subnet}.${host}/32`
+        const ip = `${base}.${host}/32`
         if (!used.has(ip)) return ip
       }
       return ''
@@ -219,10 +329,23 @@ export default {
       const s = String(this.$props.cardSubtitle ?? '').trim()
       return s.length > 0 ? s : 'Wireguard'
     },
+    hubClientMode(): boolean {
+      return this.$props.data.hub_client_mode === true
+    },
+    optionHubClientMode: {
+      get(): boolean {
+        return this.$props.data.hub_client_mode === true
+      },
+      set(v: boolean) {
+        this.$props.data.hub_client_mode = v
+        sanitizeWgAwgByMode(this.$props.data)
+      },
+    },
     peerHeaders() {
       return [
         { title: this.$t('types.wg.colId'), key: 'row_id' },
         { title: this.$t('types.wg.colIP'), key: 'allowed_ips' },
+        { title: '', key: 'peer_exit', width: 52, sortable: false },
         { title: this.$t('types.wg.colUser'), key: 'client_name' },
         { title: this.$t('types.wg.colPrivKey'), key: 'private_key', sortable: false },
         { title: this.$t('types.wg.colPubKey'), key: 'public_key', sortable: false },
@@ -263,6 +386,35 @@ export default {
     optionForwardAllow: {
       get(): boolean { return this.$props.data.forward_allow === true },
       set(v:boolean) { this.$props.data.forward_allow = v }
+    },
+    optionInternetAllow: {
+      get(): boolean { return this.$props.data.internet_allow !== false },
+      set(v:boolean) { this.$props.data.internet_allow = v }
+    },
+    optionIPv6: {
+      get(): boolean {
+        const list = Array.isArray(this.$props.data.address) ? this.$props.data.address : []
+        return list.some((x: string) => String(x).includes(':'))
+      },
+      set(v:boolean) {
+        const ula = this.$props.data.type === 'awg' ? 'fdac:0:0:2::1/64' : 'fdac:0:0:1::1/64'
+        let list = Array.isArray(this.$props.data.address) ? [...this.$props.data.address] : []
+        list = list.map((x: string) => {
+          const s = String(x).trim()
+          if (s.toLowerCase().startsWith('fe80:')) return ula
+          return s
+        })
+        const v4 = list.filter((x: string) => !String(x).includes(':'))
+        const v6 = list.filter((x: string) => String(x).includes(':'))
+        if (!v) {
+          this.$props.data.address = v4.length > 0 ? v4 : undefined
+          return
+        }
+        if (v6.length === 0) {
+          v4.push(ula)
+        }
+        this.$props.data.address = [...v4, ...v6]
+      }
     },
     optionCloak: {
       get(): boolean { return this.$props.data.cloak_enabled === true },
@@ -317,6 +469,24 @@ export default {
     public_key: {
       get() { return this.$props.data.ext?.public_key?? '' },
       set(v:string) { this.$props.data.ext.public_key = v }
+    },
+    upstreamPeer() {
+      return this.ensureUpstreamPeer()
+    },
+    hubPeerAddress: {
+      get() { return String(this.upstreamPeer.address ?? '') },
+      set(v: string) { this.upstreamPeer.address = String(v ?? '').trim() }
+    },
+    hubPeerPort: {
+      get() { return Number(this.upstreamPeer.port ?? 51820) },
+      set(v: number) {
+        const n = Number(v)
+        this.upstreamPeer.port = Number.isFinite(n) && n > 0 ? Math.floor(n) : 51820
+      }
+    },
+    hubPeerPublicKey: {
+      get() { return String(this.upstreamPeer.public_key ?? '') },
+      set(v: string) { this.upstreamPeer.public_key = String(v ?? '').trim() }
     }
   },
   watch: {
@@ -336,6 +506,7 @@ export default {
       immediate: true,
       handler(v: unknown) {
         if (!Array.isArray(v)) this.$props.data.peers = []
+        sanitizeWgAwgByMode(this.$props.data)
       },
     },
   },

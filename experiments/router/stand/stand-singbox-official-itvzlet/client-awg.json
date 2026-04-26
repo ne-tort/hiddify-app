@@ -1,0 +1,70 @@
+{
+  "log": {
+    "level": "debug"
+  },
+  "endpoints": [
+    {
+      "type": "awg",
+      "tag": "awg-zJq",
+      "mtu": 1280,
+      "address": [
+        "10.5.0.2/32"
+      ],
+      "private_key": "MLJOnmes0mVq0yTsOglpXb8FXx8eG0TmJa/IiGV5YUk=",
+      "jc": 5,
+      "jmin": 472,
+      "jmax": 566,
+      "s1": 10,
+      "s2": 102,
+      "s3": 61,
+      "s4": 3,
+      "h1": "454895581-454899813",
+      "h2": "1379707843-1379756867",
+      "h3": "2848942682-2848962874",
+      "h4": "3902943645-3902970107",
+      "peers": [
+        {
+          "address": "193.233.216.26",
+          "port": 30387,
+          "public_key": "ba+RWV7SaBgGmigf9UcCmp1REXX0TsrFn68PFvcoU3M=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ]
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "mixed",
+      "listen": "127.0.0.1",
+      "listen_port": 2080,
+      "tag": "mixed-in"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "inbound": [
+          "mixed-in"
+        ],
+        "ip_cidr": [
+          "0.0.0.0/0"
+        ],
+        "outbound": "awg-zJq"
+      }
+    ],
+    "final": "direct",
+    "auto_detect_interface": true
+  }
+}

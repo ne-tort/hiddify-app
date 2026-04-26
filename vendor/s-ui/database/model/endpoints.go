@@ -104,16 +104,18 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 				"member_client_ids",
 				"persistent_keepalive_interval",
 				"forward_allow",
+				"internet_allow",
 				"cloak_enabled",
 				"cloak_detour_tag",
 				"obfuscation_profile_id",
+				"hub_client_mode",
 			} {
 				delete(restFields, k)
 			}
 			if rawPeers, ok := restFields["peers"]; ok {
 				var peers []map[string]interface{}
 				if err := json.Unmarshal(rawPeers, &peers); err == nil {
-					strip := []string{"client_id", "client_name", "group_id", "managed", "private_key", "user", "peer_sid"}
+					strip := []string{"client_id", "client_name", "group_id", "managed", "private_key", "user", "peer_sid", "peer_exit"}
 					for _, p := range peers {
 						for _, k := range strip {
 							delete(p, k)

@@ -2,6 +2,7 @@ package sub
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/alireza0/s-ui/database/model"
@@ -24,7 +25,7 @@ func TestPatchJsonForWireGuardWithDB_addsWGEndpoint(t *testing.T) {
 	opts := map[string]interface{}{
 		"listen_port": 14290,
 		"private_key": serverPriv.String(),
-		"address":     []string{"10.8.0.1/24", "fe80::1/128"},
+		"address":     []string{"10.8.0.1/24", "fdac:0:0:1::1/64"},
 		"peers": []map[string]interface{}{
 			{
 				"client_id":   float64(1),
@@ -99,8 +100,21 @@ func TestPatchJsonForWireGuardWithDB_addsWGEndpoint(t *testing.T) {
 	if !hasWGAddr {
 		t.Fatalf("tun.address must include wg /32, got %v", tunAddrs)
 	}
-	if got := toStringSlice(p0["allowed_ips"]); len(got) == 0 || got[0] != "10.8.0.0/24" {
-		t.Fatalf("peer allowed_ips: %v", got)
+	gotA := toStringSlice(p0["allowed_ips"])
+	if len(gotA) < 2 {
+		t.Fatalf("peer allowed_ips: want 0.0.0.0/0 and ::/0, got %v", gotA)
+	}
+	seen0, seen6 := false, false
+	for _, a := range gotA {
+		switch a {
+		case "0.0.0.0/0":
+			seen0 = true
+		case "::/0":
+			seen6 = true
+		}
+	}
+	if !seen0 || !seen6 {
+		t.Fatalf("peer allowed_ips: want 0.0.0.0/0 and ::/0, got %v", gotA)
 	}
 
 	route, ok := jc["route"].(map[string]interface{})
@@ -119,10 +133,19 @@ func TestPatchJsonForWireGuardWithDB_addsWGEndpoint(t *testing.T) {
 		}
 		foundRule = true
 		cidrs := toStringSlice(m["ip_cidr"])
-		if len(cidrs) == 0 {
-			t.Fatal("wg route ip_cidr empty")
+		if len(cidrs) < 2 {
+			t.Fatalf("wg route ip_cidr: want 0.0.0.0/0 and ::/0, got %v", cidrs)
 		}
-		if cidrs[0] != "10.8.0.0/24" {
+		seen0, seen6 := false, false
+		for _, a := range cidrs {
+			switch a {
+			case "0.0.0.0/0":
+				seen0 = true
+			case "::/0":
+				seen6 = true
+			}
+		}
+		if !seen0 || !seen6 {
 			t.Fatalf("unexpected wg route ip_cidr: %v", cidrs)
 		}
 	}
@@ -134,6 +157,130 @@ func TestPatchJsonForWireGuardWithDB_addsWGEndpoint(t *testing.T) {
 	for _, ob := range out {
 		if ob["tag"] == "wg-client" {
 			t.Fatal("legacy wg outbound must not be present")
+		}
+	}
+}
+
+func TestPatchJsonForWireGuardWithDB_InternetDisabledUsesTunnelCIDR(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Endpoint{}, &model.Client{}); err != nil {
+		t.Fatal(err)
+	}
+	serverPriv, _ := wgtypes.GeneratePrivateKey()
+	clientPriv, _ := wgtypes.GeneratePrivateKey()
+	opts := map[string]interface{}{
+		"listen_port":    14292,
+		"private_key":    serverPriv.String(),
+		"internet_allow": false,
+		"address":        []string{"10.9.0.1/24"},
+		"peers": []map[string]interface{}{
+			{
+				"client_id":   float64(1),
+				"private_key": clientPriv.String(),
+				"public_key":  clientPriv.PublicKey().String(),
+				"allowed_ips": []string{"10.9.0.2/32"},
+			},
+		},
+	}
+	optRaw, _ := json.Marshal(opts)
+	ep := model.Endpoint{Type: "wireguard", Tag: "wg-no-internet", Options: optRaw}
+	if err := db.Create(&ep).Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]interface{}{
+		"wireguard": map[string]interface{}{
+			"private_key": clientPriv.String(),
+			"public_key":  clientPriv.PublicKey().String(),
+		},
+	})
+	cl := model.Client{Id: 1, Name: "u1", Enable: true, Config: cfg, Inbounds: json.RawMessage(`[]`)}
+	if err := db.Create(&cl).Error; err != nil {
+		t.Fatal(err)
+	}
+	var jc map[string]interface{}
+	_ = json.Unmarshal([]byte(defaultJson), &jc)
+	jc["outbounds"] = []interface{}{
+		map[string]interface{}{"type": "selector", "tag": "proxy", "outbounds": []interface{}{"auto", "direct"}},
+		map[string]interface{}{"type": "urltest", "tag": "auto", "outbounds": []interface{}{}},
+		map[string]interface{}{"type": "direct", "tag": "direct"},
+	}
+	if err := patchJsonForWireGuardWithDB(db, &jc, &cl, "wg.example"); err != nil {
+		t.Fatal(err)
+	}
+	eps, _ := jc["endpoints"].([]interface{})
+	ep0, _ := eps[0].(map[string]interface{})
+	peers, _ := ep0["peers"].([]interface{})
+	p0, _ := peers[0].(map[string]interface{})
+	got := toStringSlice(p0["allowed_ips"])
+	if len(got) == 0 || got[0] != "10.9.0.0/24" {
+		t.Fatalf("expected tunnel cidr when internet disabled, got %v", got)
+	}
+	for _, a := range got {
+		if strings.Contains(a, ":") {
+			t.Fatalf("when internet off, no IPv6 in peer.allowed_ips, got %q in %v", a, got)
+		}
+	}
+}
+
+func TestPatchJsonForWireGuardWithDB_InternetDisabledNoV6InPeerWhenServerHasULA(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Endpoint{}, &model.Client{}); err != nil {
+		t.Fatal(err)
+	}
+	serverPriv, _ := wgtypes.GeneratePrivateKey()
+	clientPriv, _ := wgtypes.GeneratePrivateKey()
+	opts := map[string]interface{}{
+		"listen_port":    14293,
+		"private_key":    serverPriv.String(),
+		"internet_allow": false,
+		"address":        []string{"10.9.0.1/24", "fdac:0:0:1::1/64"},
+		"peers": []map[string]interface{}{
+			{
+				"client_id":   float64(1),
+				"private_key": clientPriv.String(),
+				"public_key":  clientPriv.PublicKey().String(),
+				"allowed_ips": []string{"10.9.0.2/32", "fdac:0:0:1::2/128"},
+			},
+		},
+	}
+	optRaw, _ := json.Marshal(opts)
+	ep := model.Endpoint{Type: "wireguard", Tag: "wg-no6", Options: optRaw}
+	if err := db.Create(&ep).Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]interface{}{
+		"wireguard": map[string]interface{}{
+			"private_key": clientPriv.String(),
+			"public_key":  clientPriv.PublicKey().String(),
+		},
+	})
+	cl := model.Client{Id: 1, Name: "u1", Enable: true, Config: cfg, Inbounds: json.RawMessage(`[]`)}
+	if err := db.Create(&cl).Error; err != nil {
+		t.Fatal(err)
+	}
+	var jc map[string]interface{}
+	_ = json.Unmarshal([]byte(defaultJson), &jc)
+	jc["outbounds"] = []interface{}{
+		map[string]interface{}{"type": "selector", "tag": "proxy", "outbounds": []interface{}{"auto", "direct"}},
+		map[string]interface{}{"type": "direct", "tag": "direct"},
+	}
+	if err := patchJsonForWireGuardWithDB(db, &jc, &cl, "example.com"); err != nil {
+		t.Fatal(err)
+	}
+	eps, _ := jc["endpoints"].([]interface{})
+	ep0, _ := eps[0].(map[string]interface{})
+	peers, _ := ep0["peers"].([]interface{})
+	p0, _ := peers[0].(map[string]interface{})
+	got := toStringSlice(p0["allowed_ips"])
+	for _, a := range got {
+		if strings.Contains(a, ":") {
+			t.Fatalf("no IPv6 in subscription peer.allowed_ips when internet off, got %v", got)
 		}
 	}
 }

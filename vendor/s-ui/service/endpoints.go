@@ -85,6 +85,11 @@ func (o *EndpointService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 		return nil, err
 	}
 	for _, endpoint := range endpoints {
+		if endpoint.Type == awgType {
+			if err := o.mergeAwgRuntimeObfuscationOptions(db, endpoint); err != nil {
+				return nil, err
+			}
+		}
 		if endpoint.Type == l3RouterType {
 			var opt map[string]interface{}
 			if len(endpoint.Options) > 0 {
@@ -156,6 +161,24 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 			if err := stripL3RouterClientControlledOptions(&endpoint); err != nil {
 				return nil, err
 			}
+		}
+		if endpoint.Type == wireGuardType || endpoint.Type == awgType {
+			var opt map[string]interface{}
+			if len(endpoint.Options) > 0 {
+				if err := json.Unmarshal(endpoint.Options, &opt); err != nil {
+					return nil, err
+				}
+			} else {
+				opt = make(map[string]interface{})
+			}
+			if err := validateAndNormalizeWGFamilyOptions(opt, endpoint.Type); err != nil {
+				return nil, err
+			}
+			raw, mErr := json.MarshalIndent(opt, "", "  ")
+			if mErr != nil {
+				return nil, mErr
+			}
+			endpoint.Options = raw
 		}
 		// Persist endpoint payload first so ClientShouldHaveL3Router sees fresh member_* options
 		// during l3 identity sync on the same save cycle.
@@ -288,6 +311,11 @@ func (s *EndpointService) ApplyRuntimeAction(action *EndpointRuntimeAction) erro
 		if err := database.GetDB().Where("id = ?", action.EndpointID).First(&endpoint).Error; err != nil {
 			return err
 		}
+		if endpoint.Type == awgType {
+			if err := s.mergeAwgRuntimeObfuscationOptions(database.GetDB(), &endpoint); err != nil {
+				return err
+			}
+		}
 		configData, err := endpoint.MarshalJSON()
 		if err != nil {
 			return err
@@ -313,6 +341,80 @@ func (s *EndpointService) ApplyRuntimeAction(action *EndpointRuntimeAction) erro
 	default:
 		return common.NewErrorf("unknown runtime action: %s", action.Action)
 	}
+}
+
+func (s *EndpointService) mergeAwgRuntimeObfuscationOptions(tx *gorm.DB, endpoint *model.Endpoint) error {
+	if endpoint == nil || endpoint.Type != awgType {
+		return nil
+	}
+	var options map[string]interface{}
+	if len(endpoint.Options) > 0 {
+		if err := json.Unmarshal(endpoint.Options, &options); err != nil {
+			return err
+		}
+	}
+	if options == nil {
+		return nil
+	}
+
+	// For runtime server endpoint we need canonical obfuscation knobs (jc/jmin/jmax/s1..s4/h1..h4)
+	// merged from linked profile. i1..i5 are client-side handshake payload templates and should not
+	// be forced into server runtime endpoint. Hub client mode (dial upstream) keeps i1..i5.
+	if !boolFromAnyWG(options["hub_client_mode"]) {
+		delete(options, "i1")
+		delete(options, "i2")
+		delete(options, "i3")
+		delete(options, "i4")
+		delete(options, "i5")
+	}
+
+	profID := uintFromAny(options["obfuscation_profile_id"])
+	if profID > 0 {
+		profSvc := AwgObfuscationProfilesService{}
+		prof, err := profSvc.GetByID(tx, profID)
+		if err == nil && prof != nil && prof.Enabled {
+			if prof.Jc != nil {
+				options["jc"] = *prof.Jc
+			}
+			if prof.Jmin != nil {
+				options["jmin"] = *prof.Jmin
+			}
+			if prof.Jmax != nil {
+				options["jmax"] = *prof.Jmax
+			}
+			if prof.S1 != nil {
+				options["s1"] = *prof.S1
+			}
+			if prof.S2 != nil {
+				options["s2"] = *prof.S2
+			}
+			if prof.S3 != nil {
+				options["s3"] = *prof.S3
+			}
+			if prof.S4 != nil {
+				options["s4"] = *prof.S4
+			}
+			if prof.H1 != nil && strings.TrimSpace(*prof.H1) != "" {
+				options["h1"] = strings.TrimSpace(*prof.H1)
+			}
+			if prof.H2 != nil && strings.TrimSpace(*prof.H2) != "" {
+				options["h2"] = strings.TrimSpace(*prof.H2)
+			}
+			if prof.H3 != nil && strings.TrimSpace(*prof.H3) != "" {
+				options["h3"] = strings.TrimSpace(*prof.H3)
+			}
+			if prof.H4 != nil && strings.TrimSpace(*prof.H4) != "" {
+				options["h4"] = strings.TrimSpace(*prof.H4)
+			}
+		}
+	}
+
+	raw, err := json.MarshalIndent(options, "", " ")
+	if err != nil {
+		return err
+	}
+	endpoint.Options = raw
+	return nil
 }
 
 func stripL3RouterClientControlledOptions(ep *model.Endpoint) error {
@@ -583,7 +685,9 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 		return false, err
 	}
 
-	used := wgCollectUsedPeerIPs(existingPeers, options)
+	// Build used set from endpoint interface addresses only; peer IPs are normalized below and
+	// re-added in order, so subnet migration can remap old peer /32 addresses safely.
+	used := wgCollectUsedPeerIPs(nil, options)
 
 	for _, p := range manualPeers {
 		peerKeyChanged, err := ensureWireGuardManualPeerKeys(p)
@@ -603,6 +707,12 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 			used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
 			changed = true
 		} else {
+			if poolOK {
+				if rebased, rebasedChanged := wgRebasePeerAllowedIPsToPool(norm, poolPrefix, used); rebasedChanged {
+					norm = rebased
+					changed = true
+				}
+			}
 			if !slicesEqualString(norm, toStringSlice(p["allowed_ips"])) {
 				changed = true
 			}
@@ -629,6 +739,12 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 		var allowedIPs []string
 		if existing != nil {
 			allowedIPs = wgNormalizeAllowedIPList(toStringSlice(existing["allowed_ips"]))
+			if poolOK {
+				if rebased, rebasedChanged := wgRebasePeerAllowedIPsToPool(allowedIPs, poolPrefix, used); rebasedChanged {
+					allowedIPs = rebased
+					changed = true
+				}
+			}
 		}
 		if len(allowedIPs) == 0 {
 			if !poolOK {
@@ -652,6 +768,9 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 			"private_key": id.PrivateKey,
 			"public_key":  id.PublicKey,
 			"allowed_ips": allowedIPs,
+		}
+		if existing != nil && boolFromAnyWG(existing["peer_exit"]) {
+			row["peer_exit"] = true
 		}
 		if endpointKeepalive > 0 {
 			row["persistent_keepalive_interval"] = endpointKeepalive
@@ -913,6 +1032,9 @@ func validateAndNormalizeWGFamilyOptions(options map[string]interface{}, epType 
 	if options == nil {
 		return nil
 	}
+	if _, exists := options["internet_allow"]; !exists {
+		options["internet_allow"] = true
+	}
 	if epType == wireGuardType && boolFromAnyWG(options["cloak_enabled"]) {
 		options["cloak_enabled"] = true
 		tag := strings.TrimSpace(fmt.Sprint(options["cloak_detour_tag"]))
@@ -940,6 +1062,74 @@ func validateAndNormalizeWGFamilyOptions(options map[string]interface{}, epType 
 		}
 	}
 	peers := normalizePeerMaps(options["peers"])
+	if boolFromAnyWG(options["hub_client_mode"]) {
+		options["hub_client_mode"] = true
+		delete(options, "listen_port")
+		options["member_group_ids"] = []interface{}{}
+		options["member_client_ids"] = []interface{}{}
+		if len(peers) != 1 {
+			return common.NewErrorf("%s hub_client_mode requires exactly one peer (upstream hub)", epType)
+		}
+		p := peers[0]
+		if boolFromAnyWG(p["peer_exit"]) {
+			return common.NewErrorf("%s hub_client_mode cannot combine with exit peer on the same endpoint", epType)
+		}
+		addr := strings.TrimSpace(fmt.Sprint(p["address"]))
+		if addr == "" || strings.EqualFold(addr, "<nil>") {
+			return common.NewErrorf("%s hub peer: address (hub hostname or IP) is required", epType)
+		}
+		port := intFromAny(p["port"])
+		if port <= 0 || port > 65535 {
+			return common.NewErrorf("%s hub peer: port must be 1-65535", epType)
+		}
+		pub := strings.TrimSpace(fmt.Sprint(p["public_key"]))
+		if pub == "" || strings.EqualFold(pub, "<nil>") {
+			return common.NewErrorf("%s hub peer: public_key (hub) is required", epType)
+		}
+		if len(wgWireGuardEndpointAddressKeys(options)) == 0 {
+			return common.NewErrorf("%s hub_client_mode: local address is required", epType)
+		}
+		aips := toStringSlice(p["allowed_ips"])
+		if len(aips) == 0 {
+			return common.NewErrorf("%s hub peer: allowed_ips is required (e.g. VPN prefix 10.x.0.0/24, not 0.0.0.0/0)", epType)
+		}
+		for _, c := range aips {
+			t := strings.TrimSpace(c)
+			if t == "0.0.0.0/0" || t == "::/0" {
+				return common.NewErrorf("%s hub_client_mode: peer allowed_ips must not be full default route (keeps node internet off-tunnel)", epType)
+			}
+			if _, ok := wgNormalizeCIDROrIP(t); !ok {
+				return common.NewErrorf("%s hub peer allowed_ips invalid: %q", epType, c)
+			}
+		}
+		options["peers"] = peers
+		return nil
+	}
+	delete(options, "hub_client_mode")
+
+	exitCount := 0
+	for _, p := range peers {
+		if boolFromAnyWG(p["peer_exit"]) {
+			exitCount++
+		}
+	}
+	if exitCount > 1 {
+		return common.NewErrorf("%s at most one peer can be an exit node", epType)
+	}
+	if exitCount == 1 {
+		if err := CheckDefaultRouteNotThroughTunnel(); err != nil {
+			return err
+		}
+	}
+	for i := range peers {
+		if !boolFromAnyWG(peers[i]["peer_exit"]) {
+			continue
+		}
+		allowed := toStringSlice(peers[i]["allowed_ips"])
+		peers[i]["allowed_ips"] = mergeExitPeerAllowedIPs(allowed)
+	}
+	options["peers"] = peers
+
 	for i := range peers {
 		rawIPs := toStringSlice(peers[i]["allowed_ips"])
 		if len(rawIPs) == 0 {
@@ -952,6 +1142,30 @@ func validateAndNormalizeWGFamilyOptions(options map[string]interface{}, epType 
 		}
 	}
 	return nil
+}
+
+// mergeExitPeerAllowedIPs appends 0.0.0.0/0 and ::/0 (if missing) for cryptokey exit routing, deduplicated.
+func mergeExitPeerAllowedIPs(allowed []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, s := range allowed {
+		k := strings.TrimSpace(s)
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	for _, want := range []string{"0.0.0.0/0", "::/0"} {
+		if _, ok := seen[want]; !ok {
+			out = append(out, want)
+			seen[want] = struct{}{}
+		}
+	}
+	return out
 }
 
 func boolFromAnyWG(v interface{}) bool {
@@ -1050,7 +1264,7 @@ func localIPv4PrefixesForWGConflictCheck() []netip.Prefix {
 	for _, iface := range ifaces {
 		name := strings.ToLower(strings.TrimSpace(iface.Name))
 		// Skip loopback and virtual interfaces typically managed by tunnels.
-		if iface.Flags&net.FlagLoopback != 0 || strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "tun") {
+		if iface.Flags&net.FlagLoopback != 0 || strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "awg") || strings.HasPrefix(name, "tun") {
 			continue
 		}
 		addrs, err := iface.Addrs()
@@ -1096,6 +1310,77 @@ func wgNormalizeCIDROrIP(raw string) (string, bool) {
 		return netip.PrefixFrom(addr, 128).Masked().String(), true
 	}
 	return "", false
+}
+
+func wgIPv4ToUint32(addr netip.Addr) uint32 {
+	a := addr.As4()
+	return uint32(a[0])<<24 | uint32(a[1])<<16 | uint32(a[2])<<8 | uint32(a[3])
+}
+
+func wgUint32ToIPv4(v uint32) netip.Addr {
+	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+}
+
+func wgMapHostBitsToPool(addr netip.Addr, pool netip.Prefix) (netip.Prefix, bool) {
+	if !addr.Is4() || !pool.Addr().Is4() || pool.Bits() >= 32 {
+		return netip.Prefix{}, false
+	}
+	hostBits := 32 - pool.Bits()
+	if hostBits <= 0 {
+		return netip.Prefix{}, false
+	}
+	hostMask := uint32((1 << hostBits) - 1)
+	srcHost := wgIPv4ToUint32(addr) & hostMask
+	// Avoid network and broadcast addresses.
+	if srcHost == 0 {
+		srcHost = 1
+	}
+	if srcHost == hostMask {
+		srcHost = hostMask - 1
+	}
+	netBase := wgIPv4ToUint32(pool.Masked().Addr())
+	mapped := wgUint32ToIPv4(netBase | srcHost)
+	if !pool.Contains(mapped) {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(mapped, 32).Masked(), true
+}
+
+// Rebase single-host allowed IPs to the current endpoint IPv4 pool (used when endpoint subnet changes).
+// Keeps list order and avoids collisions with already used addresses.
+func wgRebasePeerAllowedIPsToPool(allowed []string, pool netip.Prefix, used map[string]struct{}) ([]string, bool) {
+	if len(allowed) == 0 || !pool.Addr().Is4() {
+		return allowed, false
+	}
+	out := append([]string(nil), allowed...)
+	changed := false
+	for i, raw := range out {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil || !p.Addr().Is4() || p.Bits() != 32 {
+			continue
+		}
+		if pool.Contains(p.Addr()) {
+			if _, exists := used[p.String()]; !exists {
+				used[p.String()] = struct{}{}
+			}
+			continue
+		}
+		mapped, ok := wgMapHostBitsToPool(p.Addr(), pool)
+		if !ok {
+			continue
+		}
+		candidate := mapped.String()
+		if _, exists := used[candidate]; exists {
+			// Collision after rebasing: pick next free host in the pool.
+			candidate = wgPickLowestFreePeerIP(used, pool)
+		}
+		used[candidate] = struct{}{}
+		if candidate != out[i] {
+			out[i] = candidate
+			changed = true
+		}
+	}
+	return out, changed
 }
 
 func slicesEqualString(a, b []string) bool {

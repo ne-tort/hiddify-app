@@ -1,0 +1,90 @@
+{
+  "log": {
+    "level": "debug"
+  },
+  "endpoints": [
+    {
+      "type": "awg",
+      "tag": "awg-zJq",
+      "mtu": 1408,
+      "address": [
+        "10.5.0.2/32"
+      ],
+      "private_key": "cIkJkzSbZYTonjkfBa7SF8O2k//52UtbiSAWzmNaWlk=",
+      "jc": 5,
+      "jmin": 472,
+      "jmax": 566,
+      "s1": 10,
+      "s2": 102,
+      "s3": 61,
+      "s4": 3,
+      "h1": "454895581-454899813",
+      "h2": "1379707843-1379756867",
+      "h3": "2848942682-2848962874",
+      "h4": "3902943645-3902970107",
+      "i1": "<b 0xc300000001115d446f77c2493e8053e4b16571535d58c406386ca53c262d002210d8a5><t><r 1000><r 211>",
+      "i2": "<b 0xd20000000114e597368d39e6a0606916e191b305fc4ebc3baeef126dffeafb29bdc9f3a1647919298fe61bd9acb88403ca><t><r 1000><r 211>",
+      "i3": "<b 0xe0000000010acb098b3422da14044e8910132a033107ae1c864a00528702863c891b4e3544><r 1000><r 218><t>",
+      "i4": "<b 0xf967><t><r 60><b 0x5fcbbc0a2a30eae0c3baf7a9faf0><rd 7>",
+      "i5": "<b 0x42371c35d9feba2fa643fe90547b2ad29b6d35446bdc><r 500><t><rd 6>",
+      "peers": [
+        {
+          "address": "193.233.216.26",
+          "port": 30387,
+          "public_key": "ba+RWV7SaBgGmigf9UcCmp1REXX0TsrFn68PFvcoU3M=",
+          "allowed_ips": [
+            "0.0.0.0/0",
+            "::/0"
+          ],
+          "persistent_keepalive_interval": 25
+        }
+      ]
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": [
+        "172.19.0.1/30",
+        "10.5.0.2/32"
+      ],
+      "auto_route": true,
+      "strict_route": true,
+      "mtu": 1408,
+      "stack": "gvisor"
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 2080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "final": "direct",
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "inbound": [
+          "tun-in",
+          "mixed-in"
+        ],
+        "ip_cidr": [
+          "0.0.0.0/0",
+          "::/0"
+        ],
+        "outbound": "awg-zJq"
+      }
+    ]
+  }
+}

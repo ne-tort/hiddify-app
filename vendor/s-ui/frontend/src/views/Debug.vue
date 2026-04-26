@@ -37,6 +37,15 @@
             <v-col cols="12" sm="6" md="4">
               <v-select
                 hide-details
+                :items="runtimeLogLevels"
+                v-model="runtimeLogLevel"
+                label="Sing-box log level"
+                @update:model-value="applyRuntimeLogLevel"
+              />
+            </v-col>
+            <v-col cols="12" sm="6" md="4">
+              <v-select
+                hide-details
                 :items="logLevels"
                 v-model="logLevel"
                 label="Log level"
@@ -76,20 +85,24 @@ import api from '@/plugins/api'
 import { i18n } from '@/locales'
 import { push } from 'notivue'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import Data from '@/store/modules/data'
 
 const loading = ref(false)
 const activeTab = ref<'config' | 'console'>('config')
 const configText = ref('')
 const logLines = ref<string[]>([])
 const logLevel = ref('info')
+const runtimeLogLevel = ref('info')
 const logCount = ref(50)
 const logsAutoRefresh = ref(true)
 const logLevels = [
+  { title: 'TRACE', value: 'trace' },
   { title: 'DEBUG', value: 'debug' },
   { title: 'INFO', value: 'info' },
   { title: 'WARNING', value: 'warning' },
   { title: 'ERROR', value: 'err' },
 ]
+const runtimeLogLevels = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'panic']
 const errorMessage = ref('')
 let logsTimer: number | null = null
 
@@ -134,6 +147,13 @@ const loadConfig = async () => {
     })
     const raw = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data, null, 2)
     configText.value = normalizeConfigText(raw)
+    try {
+      const cfg = JSON.parse(raw)
+      const lvl = String(cfg?.log?.level ?? '').trim().toLowerCase()
+      runtimeLogLevel.value = runtimeLogLevels.includes(lvl) ? lvl : 'info'
+    } catch {
+      runtimeLogLevel.value = 'info'
+    }
   } catch (e: any) {
     errorMessage.value = e?.response?.data || e?.message || String(e)
     push.error({
@@ -142,6 +162,23 @@ const loadConfig = async () => {
     })
   } finally {
     loading.value = false
+  }
+}
+
+const applyRuntimeLogLevel = async () => {
+  const data = Data()
+  const cfg = JSON.parse(JSON.stringify(data.config ?? {}))
+  if (!cfg.log || typeof cfg.log !== 'object') {
+    cfg.log = {}
+  }
+  cfg.log.level = runtimeLogLevel.value
+  const ok = await data.save('config', 'set', cfg)
+  if (!ok) {
+    return
+  }
+  await loadConfig()
+  if (activeTab.value === 'console') {
+    await loadLogs()
   }
 }
 
@@ -186,6 +223,8 @@ const downloadConfig = () => {
 }
 
 onMounted(() => {
+  const lvl = String(Data().config?.log?.level ?? '').trim().toLowerCase()
+  runtimeLogLevel.value = runtimeLogLevels.includes(lvl) ? lvl : 'info'
   void loadConfig()
 })
 

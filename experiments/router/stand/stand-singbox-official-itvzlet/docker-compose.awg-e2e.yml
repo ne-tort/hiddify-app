@@ -1,0 +1,16 @@
+# AWG-only client (no VLESS). Requires local image: sing-box-l3router:local
+# Build: cd ../l3router && $env:L3ROUTER_GO_TAGS='with_gvisor,with_clash_api,with_utls,with_l3router,with_awg'; python run.py build
+#   && docker compose -f docker-compose.l3router-static-clients.yml build
+name: stand-awg-e2e
+services:
+  awg-client:
+    image: sing-box-l3router:local
+    container_name: stand-awg-e2e-client
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    restart: "no"
+    volumes:
+      - ./client-awg-e2e.json:/etc/sing-box/config.json:ro
+    command: ["run", "-c", "/etc/sing-box/config.json"]

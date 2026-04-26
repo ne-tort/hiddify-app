@@ -208,6 +208,13 @@ export default {
     restartApp: "Перезапустить приложение",
     restartSb: "Перезапустить Singbox",
     apply: "Применить",
+    import: "Импорт",
+  },
+  endpointImport: {
+    title: "Импорт JSON для endpoint",
+    hint: "JSON применяется к текущей форме и не сохраняется автоматически.",
+    file: "Загрузить JSON файл",
+    applied: "JSON импортирован в форму",
   },
   login: {
     title: "Вход",
@@ -366,6 +373,15 @@ export default {
       colMode: "Режим",
       modeManaged: "sync",
       modeManual: "ручной",
+      peerToPeer: "Peer-to-peer",
+      internet: "Интернет",
+      ipv6: "IPv6",
+      hubClientMode: "Клиент к хабу",
+      exitNodeTooltip: "Пир как exit node",
+      hubHost: "Хост или IP хаба",
+      hubPort: "Порт",
+      defaultRouteTunnelErr:
+        "Маршрут по умолчанию в системе идёт через туннельный интерфейс. Настройте default через физический uplink (например eth0), прежде чем включать exit node.",
     },
     lb: {
       defaultOut: "Исходящий по умолчанию",

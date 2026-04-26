@@ -1,6 +1,7 @@
 package sub
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -229,11 +230,14 @@ func (j *JsonService) assembleJsonMap(subId string) (map[string]interface{}, *mo
 }
 
 func (j *JsonService) marshalJsonResponse(jsonConfig map[string]interface{}, client *model.Client) (*string, []string, error) {
-	result, err := json.MarshalIndent(jsonConfig, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(jsonConfig); err != nil {
 		return nil, nil, err
 	}
-	resultStr := string(result)
+	resultStr := strings.TrimSuffix(buf.String(), "\n")
 
 	updateInterval, _ := j.SettingService.GetSubUpdates()
 	headers := util.GetHeaders(client, updateInterval)

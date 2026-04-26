@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"net/netip"
+	"testing"
+)
 
 func TestWGValidateEndpointAddress_AcceptsHostAddress(t *testing.T) {
 	if err := wgValidateEndpointAddress("10.0.0.1/24"); err != nil {
@@ -52,6 +55,41 @@ func TestValidateAndNormalizeWireGuardOptions_TrimsEmptyAddresses(t *testing.T) 
 	}
 	if len(addr) != 1 || addr[0] != "10.8.0.1/24" {
 		t.Fatalf("unexpected normalized address: %#v", addr)
+	}
+}
+
+func TestWGRebasePeerAllowedIPsToPool_RebasesHostPreservingOrder(t *testing.T) {
+	pool, err := netip.ParsePrefix("10.6.0.1/24")
+	if err != nil {
+		t.Fatalf("parse pool: %v", err)
+	}
+	used := map[string]struct{}{"10.6.0.1/32": {}}
+	in := []string{"10.5.0.2/32", "10.5.0.3/32"}
+	out, changed := wgRebasePeerAllowedIPsToPool(in, pool, used)
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+	if len(out) != 2 || out[0] != "10.6.0.2/32" || out[1] != "10.6.0.3/32" {
+		t.Fatalf("unexpected rebased allowed_ips: %#v", out)
+	}
+}
+
+func TestWGRebasePeerAllowedIPsToPool_ResolvesCollisions(t *testing.T) {
+	pool, err := netip.ParsePrefix("10.6.0.1/24")
+	if err != nil {
+		t.Fatalf("parse pool: %v", err)
+	}
+	used := map[string]struct{}{
+		"10.6.0.1/32": {},
+		"10.6.0.2/32": {},
+	}
+	in := []string{"10.5.0.2/32"}
+	out, changed := wgRebasePeerAllowedIPsToPool(in, pool, used)
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+	if len(out) != 1 || out[0] != "10.6.0.3/32" {
+		t.Fatalf("unexpected collision fallback result: %#v", out)
 	}
 }
 

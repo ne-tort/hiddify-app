@@ -207,6 +207,14 @@ export default {
     close: "Close",
     restartApp: "Restart App",
     restartSb: "Restart Singbox",
+    apply: "Apply",
+    import: "Import",
+  },
+  endpointImport: {
+    title: "Endpoint JSON import",
+    hint: "Imported JSON fills the current form and is not saved automatically.",
+    file: "Upload JSON file",
+    applied: "JSON imported to form",
   },
   login: {
     title: "Login",
@@ -365,6 +373,15 @@ export default {
       colMode: "Mode",
       modeManaged: "managed",
       modeManual: "manual",
+      peerToPeer: "Peer-to-peer",
+      internet: "Internet",
+      ipv6: "IPv6",
+      hubClientMode: "Client to hub",
+      exitNodeTooltip: "Peer as exit node",
+      hubHost: "Hub host or IP",
+      hubPort: "Port",
+      defaultRouteTunnelErr:
+        "The system default route uses a tunnel-like interface. Fix routing so the default is via a physical uplink (e.g. eth0) before enabling exit node.",
     },
     lb: {
       defaultOut: "Default Outbound",

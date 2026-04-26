@@ -1325,20 +1325,26 @@ class _ReplaceTextWithFieldState extends State<_ReplaceTextWithField> {
   Widget build(BuildContext context) {
     if (possibleValues.containsKey(widget.keyPath)) {
       final options = possibleValues[widget.keyPath]!;
+      final selected = options.contains(_text) ? _text : null;
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Transform.scale(
             scale: 0.75,
             child: DropdownButton<String>(
-              hint: Text('Select ${widget.keyPath.replaceAll("config.outbounds", "")}'),
-              value: _text,
+              hint: Text(
+                selected == null && _text.isNotEmpty
+                    ? _text
+                    : 'Select ${widget.keyPath.replaceAll("config.outbounds", "")}',
+              ),
+              value: selected,
               icon: const Icon(Icons.arrow_downward),
               iconSize: 24,
               elevation: 16,
               underline: Container(height: 2),
               onChanged: (String? newValue) {
-                widget.onChanged(newValue!);
+                if (newValue == null) return;
+                widget.onChanged(newValue);
                 _text = newValue;
                 setState(() {
                   _text = newValue;

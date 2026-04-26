@@ -1,8 +1,27 @@
 <template>
-  <v-dialog transition="dialog-bottom-transition" width="800">
+  <EndpointImport
+    :visible="importModal.visible"
+    :endpoint="endpoint"
+    @close="importModal.visible = false"
+    @applied="onImportApplied"
+  />
+  <v-dialog
+    :model-value="visible"
+    transition="dialog-bottom-transition"
+    width="800"
+    @update:model-value="(v) => { if (!v) closeModal() }"
+  >
     <v-card class="rounded-lg">
       <v-card-title>
         {{ $t('actions.' + title) + " " + $t('objects.endpoint') }}
+        <v-btn
+          v-if="endpoint.type == epTypes.Wireguard || endpoint.type == epTypes.Awg"
+          class="ms-3"
+          size="small"
+          variant="text"
+          icon="mdi-file-import-outline"
+          @click="importModal.visible = true"
+        />
       </v-card-title>
       <v-divider></v-divider>
       <v-card-text style="padding: 0 16px; overflow-y: scroll;">
@@ -93,6 +112,8 @@ import { push } from 'notivue'
 import { i18n } from '@/locales'
 import Data from '@/store/modules/data'
 import { isValidPrivateSubnetField, privateSubnetRuleMessage } from '@/utils/l3Subnet'
+import EndpointImport from '@/layouts/modals/EndpointImport.vue'
+import { sanitizeWgAwgByMode } from '@/components/protocols/useWgAwgFormModel'
 export default {
   props: ['visible', 'data', 'id', 'tags'],
   emits: ['close'],
@@ -115,6 +136,9 @@ export default {
       tab: "t1",
       loading: false,
       epTypes: EpTypes,
+      importModal: {
+        visible: false,
+      },
     }
   },
   methods: {
@@ -145,7 +169,7 @@ export default {
           prevConfig = {
             tag: tag,
             listen_port: this.endpoint.listen_port ?? RandomUtil.randomIntRange(10000, 60000),
-            address: [`10.0.${wgSubnet}.1/24`, 'fe80::1/128'],
+            address: [`10.0.${wgSubnet}.1/24`, 'fdac:0:0:1::1/64'],
             private_key: wgKeys.private_key,
             peers: [],
             member_group_ids: [],
@@ -163,7 +187,7 @@ export default {
             tag: tag,
             type: EpTypes.Awg,
             listen_port: this.endpoint.listen_port ?? RandomUtil.randomIntRange(10000, 60000),
-            address: [`10.1.${awgSubnet}.1/24`, 'fe80::1/128'],
+            address: [`10.1.${awgSubnet}.1/24`, 'fdac:0:0:2::1/64'],
             private_key: awgKeys.private_key,
             peers: [],
             member_group_ids: [],
@@ -195,6 +219,9 @@ export default {
           break
       }
       this.endpoint = createEndpoint(this.endpoint.type, prevConfig)
+      if (this.endpoint.type === EpTypes.Wireguard || this.endpoint.type === EpTypes.Awg) {
+        sanitizeWgAwgByMode(this.endpoint as any)
+      }
       if (this.endpoint.type === EpTypes.L3Router && this.$props.id === 0) {
         await this.fetchNextL3PrivateSubnet()
       }
@@ -366,6 +393,17 @@ export default {
       }
       this.loading = false
     },
+    onImportApplied(warnings: string[]) {
+      if (this.endpoint.type === EpTypes.Wireguard || this.endpoint.type === EpTypes.Awg) {
+        sanitizeWgAwgByMode(this.endpoint as any)
+      }
+      if (warnings.length > 0) {
+        push.warning({ message: warnings[0] })
+      } else {
+        push.success({ message: String(this.$t('endpointImport.applied')) })
+      }
+      this.importModal.visible = false
+    },
   },
   watch: {
     async visible(v) {
@@ -376,6 +414,6 @@ export default {
       }
     },
   },
-  components: { Dial, Wireguard, Awg, Warp, TailscaleVue, L3Router }
+  components: { Dial, Wireguard, Awg, Warp, TailscaleVue, L3Router, EndpointImport }
 }
 </script>

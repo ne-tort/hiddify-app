@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -18,6 +19,10 @@ const (
 	wgForwardNftJumpComment    = "sui-wg-forward-jump"
 	wgForwardIptChainName      = "SUI_WG_FORWARD"
 	wgForwardNftChainName      = "SUI_WG_FORWARD"
+	wgInternetRuleCommentPrefix = "sui-wg-internet-ep-"
+	wgInternetNftJumpComment    = "sui-wg-internet-jump"
+	wgInternetIptChainName      = "SUI_WG_INTERNET"
+	wgInternetNftChainName      = "SUI_WG_INTERNET"
 )
 
 var wgInterfaceNameRe = regexp.MustCompile(`^[a-zA-Z0-9_.:-]{1,64}$`)
@@ -29,44 +34,66 @@ type wgForwardRuleSpec struct {
 	Comment    string
 }
 
+type wgInternetRuleSpec struct {
+	EndpointID  uint
+	IIF         string
+	SourceCIDR  string
+	FwdComment  string
+	RetComment  string
+	NatComment  string
+}
+
 func (s *EndpointService) ReconcileWireGuardForwardRules(db *gorm.DB) error {
-	specs, err := loadWireGuardForwardRuleSpecs(db)
+	forwardSpecs, internetSpecs, err := loadWireGuardRuleSpecs(db)
 	if err != nil {
 		return err
 	}
 	backend := detectWGForwardFirewallBackend()
 	switch backend {
 	case "iptables":
-		return applyWGForwardRulesIPTables(specs)
+		if err := applyWGForwardRulesIPTables(forwardSpecs); err != nil {
+			return err
+		}
+		return applyWGInternetRulesIPTables(internetSpecs)
 	case "nft":
-		return applyWGForwardRulesNFT(specs)
+		if err := applyWGForwardRulesNFT(forwardSpecs); err != nil {
+			return err
+		}
+		return applyWGInternetRulesNFT(internetSpecs)
 	default:
 		return nil
 	}
 }
 
-func loadWireGuardForwardRuleSpecs(db *gorm.DB) ([]wgForwardRuleSpec, error) {
+func loadWireGuardRuleSpecs(db *gorm.DB) ([]wgForwardRuleSpec, []wgInternetRuleSpec, error) {
 	if db == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var endpoints []model.Endpoint
-	if err := db.Model(model.Endpoint{}).Where("type = ?", wireGuardType).Find(&endpoints).Error; err != nil {
-		return nil, err
+	if err := db.Model(model.Endpoint{}).Where("type IN ?", []string{wireGuardType, awgType}).Find(&endpoints).Error; err != nil {
+		return nil, nil, err
 	}
 	specs := make([]wgForwardRuleSpec, 0, len(endpoints))
+	internetSpecs := make([]wgInternetRuleSpec, 0, len(endpoints))
 	for _, ep := range endpoints {
 		spec, ok := parseWGForwardSpecFromEndpoint(&ep)
 		if !ok {
-			continue
+			// no-op
+		} else {
+			specs = append(specs, spec)
 		}
-		specs = append(specs, spec)
+		internetSpec, ok := parseWGInternetSpecFromEndpoint(&ep)
+		if ok {
+			internetSpecs = append(internetSpecs, internetSpec)
+		}
 	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].EndpointID < specs[j].EndpointID })
-	return specs, nil
+	sort.Slice(internetSpecs, func(i, j int) bool { return internetSpecs[i].EndpointID < internetSpecs[j].EndpointID })
+	return specs, internetSpecs, nil
 }
 
 func parseWGForwardSpecFromEndpoint(ep *model.Endpoint) (wgForwardRuleSpec, bool) {
-	if ep == nil || ep.Type != wireGuardType || len(ep.Options) == 0 {
+	if ep == nil || (ep.Type != wireGuardType && ep.Type != awgType) || len(ep.Options) == 0 {
 		return wgForwardRuleSpec{}, false
 	}
 	var options map[string]interface{}
@@ -84,8 +111,13 @@ func parseWGForwardSpecFromEndpoint(ep *model.Endpoint) (wgForwardRuleSpec, bool
 		if !wgInterfaceNameRe.MatchString(ifName) {
 			return wgForwardRuleSpec{}, false
 		}
+		ifName = normalizeFirewallInterfacePattern(ifName)
 	} else {
-		ifName = "wg*"
+		if ep.Type == awgType {
+			ifName = "awg*"
+		} else {
+			ifName = "wg*"
+		}
 	}
 	comment := fmt.Sprintf("%s%d", wgForwardRuleCommentPrefix, ep.Id)
 	return wgForwardRuleSpec{
@@ -93,6 +125,47 @@ func parseWGForwardSpecFromEndpoint(ep *model.Endpoint) (wgForwardRuleSpec, bool
 		IIF:        ifName,
 		OIF:        ifName,
 		Comment:    comment,
+	}, true
+}
+
+func parseWGInternetSpecFromEndpoint(ep *model.Endpoint) (wgInternetRuleSpec, bool) {
+	if ep == nil || (ep.Type != wireGuardType && ep.Type != awgType) || len(ep.Options) == 0 {
+		return wgInternetRuleSpec{}, false
+	}
+	var options map[string]interface{}
+	if err := json.Unmarshal(ep.Options, &options); err != nil || options == nil {
+		return wgInternetRuleSpec{}, false
+	}
+	if !boolFromAnyDefaultTrue(options["internet_allow"]) {
+		return wgInternetRuleSpec{}, false
+	}
+	ifName := strings.TrimSpace(fmt.Sprint(options["name"]))
+	if strings.EqualFold(ifName, "<nil>") {
+		ifName = ""
+	}
+	if ifName != "" {
+		if !wgInterfaceNameRe.MatchString(ifName) {
+			return wgInternetRuleSpec{}, false
+		}
+		ifName = normalizeFirewallInterfacePattern(ifName)
+	} else {
+		if ep.Type == awgType {
+			ifName = "awg*"
+		} else {
+			ifName = "wg*"
+		}
+	}
+	sourceCIDR := firstIPv4EndpointCIDR(options["address"])
+	if sourceCIDR == "" {
+		return wgInternetRuleSpec{}, false
+	}
+	return wgInternetRuleSpec{
+		EndpointID: ep.Id,
+		IIF:        ifName,
+		SourceCIDR: sourceCIDR,
+		FwdComment: fmt.Sprintf("%s%d-fwd", wgInternetRuleCommentPrefix, ep.Id),
+		RetComment: fmt.Sprintf("%s%d-ret", wgInternetRuleCommentPrefix, ep.Id),
+		NatComment: fmt.Sprintf("%s%d-nat", wgInternetRuleCommentPrefix, ep.Id),
 	}, true
 }
 
@@ -110,6 +183,28 @@ func boolFromAny(v interface{}) bool {
 	default:
 		return false
 	}
+}
+
+func boolFromAnyDefaultTrue(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	return boolFromAny(v)
+}
+
+func firstIPv4EndpointCIDR(raw interface{}) string {
+	for _, value := range toStringSlice(raw) {
+		value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+		if value == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil || !prefix.Addr().Is4() {
+			continue
+		}
+		return prefix.Masked().String()
+	}
+	return ""
 }
 
 func detectWGForwardFirewallBackend() string {
@@ -147,8 +242,8 @@ func applyWGForwardRulesNFT(specs []wgForwardRuleSpec) error {
 			return err
 		}
 
-		_ = deleteAllNFTJumpRules(family, "DOCKER-USER", wgForwardNftChainName)
-		_ = deleteAllNFTJumpRules(family, "FORWARD", wgForwardNftChainName)
+		_ = deleteAllNFTJumpRulesInTable(family, "filter", "DOCKER-USER", wgForwardNftChainName)
+		_ = deleteAllNFTJumpRulesInTable(family, "filter", "FORWARD", wgForwardNftChainName)
 		if err := runFirewallCmd(
 			"nft", "insert", "rule", family, "filter", anchor,
 			"jump", wgForwardNftChainName, "comment", wgForwardNftJumpComment,
@@ -190,15 +285,15 @@ func applyWGForwardRulesNFT(specs []wgForwardRuleSpec) error {
 	return nil
 }
 
-func deleteAllNFTJumpRules(family, chain, targetChain string) error {
-	out, err := exec.Command("nft", "-a", "list", "chain", family, "filter", chain).CombinedOutput()
+func deleteAllNFTJumpRulesInTable(family, tableName, chain, targetChain string) error {
+	out, err := exec.Command("nft", "-a", "list", "chain", family, tableName, chain).CombinedOutput()
 	if err != nil {
 		return err
 	}
 	handles := parseNFTJumpHandles(string(out), targetChain)
 	sort.Slice(handles, func(i, j int) bool { return handles[i] > handles[j] })
 	for _, h := range handles {
-		if err := runFirewallCmd("nft", "delete", "rule", family, "filter", chain, "handle", strconv.Itoa(h)); err != nil {
+		if err := runFirewallCmd("nft", "delete", "rule", family, tableName, chain, "handle", strconv.Itoa(h)); err != nil {
 			return err
 		}
 	}
@@ -235,6 +330,25 @@ func parseNFTJumpHandles(chainDump, targetChain string) []int {
 	return handles
 }
 
+func normalizeFirewallInterfacePattern(ifName string) string {
+	if strings.TrimSpace(ifName) == "" {
+		return ifName
+	}
+	if strings.HasSuffix(ifName, "*") {
+		return ifName
+	}
+	// sing-tun/amneziawg-go may auto-suffix interface names with an index
+	// (e.g. "awg" -> "awg0"), so firewall matching should use a prefix pattern.
+	return ifName + "*"
+}
+
+func iptablesInterfacePattern(ifName string) string {
+	if strings.HasSuffix(ifName, "*") {
+		return strings.TrimSuffix(ifName, "*") + "+"
+	}
+	return ifName
+}
+
 func applyWGForwardRulesIPTables(specs []wgForwardRuleSpec) error {
 	anchorChain := "FORWARD"
 	if runFirewallCmd("iptables", "-S", "DOCKER-USER") == nil {
@@ -250,12 +364,8 @@ func applyWGForwardRulesIPTables(specs []wgForwardRuleSpec) error {
 	for _, spec := range specs {
 		inIf := spec.IIF
 		outIf := spec.OIF
-		if inIf == "wg*" {
-			inIf = "wg+"
-		}
-		if outIf == "wg*" {
-			outIf = "wg+"
-		}
+		inIf = iptablesInterfacePattern(inIf)
+		outIf = iptablesInterfacePattern(outIf)
 		if err := runFirewallCmd(
 			"iptables", "-A", wgForwardIptChainName,
 			"-i", inIf, "-o", outIf,
@@ -264,6 +374,131 @@ func applyWGForwardRulesIPTables(specs []wgForwardRuleSpec) error {
 		); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func applyWGInternetRulesIPTables(specs []wgInternetRuleSpec) error {
+	anchorChain := "FORWARD"
+	if runFirewallCmd("iptables", "-S", "DOCKER-USER") == nil {
+		anchorChain = "DOCKER-USER"
+	}
+	_ = runFirewallCmd("iptables", "-N", wgInternetIptChainName)
+	_ = runFirewallCmd("iptables", "-F", wgInternetIptChainName)
+	_ = runFirewallCmd("iptables", "-D", "DOCKER-USER", "-j", wgInternetIptChainName)
+	_ = runFirewallCmd("iptables", "-D", "FORWARD", "-j", wgInternetIptChainName)
+	if err := runFirewallCmd("iptables", "-I", anchorChain, "1", "-j", wgInternetIptChainName); err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		inIf := spec.IIF
+		inIf = iptablesInterfacePattern(inIf)
+		// WG/AWG clients to WAN.
+		if err := runFirewallCmd(
+			"iptables", "-A", wgInternetIptChainName,
+			"-i", inIf, "!", "-o", inIf,
+			"-m", "comment", "--comment", spec.FwdComment,
+			"-j", "ACCEPT",
+		); err != nil {
+			return err
+		}
+		// Return path for established internet connections.
+		if err := runFirewallCmd(
+			"iptables", "-A", wgInternetIptChainName,
+			"!", "-i", inIf, "-o", inIf,
+			"-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED",
+			"-m", "comment", "--comment", spec.RetComment,
+			"-j", "ACCEPT",
+		); err != nil {
+			return err
+		}
+	}
+
+	_ = runFirewallCmd("iptables", "-t", "nat", "-N", wgInternetIptChainName)
+	_ = runFirewallCmd("iptables", "-t", "nat", "-F", wgInternetIptChainName)
+	_ = runFirewallCmd("iptables", "-t", "nat", "-D", "POSTROUTING", "-j", wgInternetIptChainName)
+	if err := runFirewallCmd("iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-j", wgInternetIptChainName); err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		outIf := spec.IIF
+		outIf = iptablesInterfacePattern(outIf)
+		if err := runFirewallCmd(
+			"iptables", "-t", "nat", "-A", wgInternetIptChainName,
+			"-s", spec.SourceCIDR, "!", "-o", outIf,
+			"-m", "comment", "--comment", spec.NatComment,
+			"-j", "MASQUERADE",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyWGInternetRulesNFT(specs []wgInternetRuleSpec) error {
+	_ = runFirewallCmd("nft", "delete", "table", "inet", "sui_wg_internet")
+	_ = runFirewallCmd("nft", "flush", "chain", "inet", "filter", "sui_wg_internet")
+	_ = runFirewallCmd("nft", "delete", "chain", "inet", "filter", "sui_wg_internet")
+	_ = runFirewallCmd("nft", "flush", "chain", "ip", "nat", wgInternetNftChainName)
+	_ = runFirewallCmd("nft", "delete", "chain", "ip", "nat", wgInternetNftChainName)
+
+	applied := false
+	for _, family := range []string{"ip", "ip6"} {
+		anchor := "FORWARD"
+		if runFirewallCmd("nft", "list", "chain", family, "filter", "DOCKER-USER") == nil {
+			anchor = "DOCKER-USER"
+		} else if runFirewallCmd("nft", "list", "chain", family, "filter", "FORWARD") != nil {
+			continue
+		}
+		_ = runFirewallCmd("nft", "add", "chain", family, "filter", wgInternetNftChainName)
+		if err := runFirewallCmd("nft", "flush", "chain", family, "filter", wgInternetNftChainName); err != nil {
+			return err
+		}
+		_ = deleteAllNFTJumpRulesInTable(family, "filter", "DOCKER-USER", wgInternetNftChainName)
+		_ = deleteAllNFTJumpRulesInTable(family, "filter", "FORWARD", wgInternetNftChainName)
+		if err := runFirewallCmd(
+			"nft", "insert", "rule", family, "filter", anchor,
+			"jump", wgInternetNftChainName, "comment", wgInternetNftJumpComment,
+		); err != nil {
+			return err
+		}
+		for _, spec := range specs {
+			if err := runFirewallCmd(
+				"nft", "add", "rule", family, "filter", wgInternetNftChainName,
+				"iifname", spec.IIF, "oifname", "!=", spec.IIF, "accept", "comment", spec.FwdComment,
+			); err != nil {
+				return err
+			}
+			if err := runFirewallCmd(
+				"nft", "add", "rule", family, "filter", wgInternetNftChainName,
+				"iifname", "!=", spec.IIF, "oifname", spec.IIF, "ct", "state", "related,established",
+				"accept", "comment", spec.RetComment,
+			); err != nil {
+				return err
+			}
+		}
+		applied = true
+	}
+
+	_ = runFirewallCmd("nft", "add", "chain", "ip", "nat", wgInternetNftChainName)
+	_ = deleteAllNFTJumpRulesInTable("ip", "nat", "POSTROUTING", wgInternetNftChainName)
+	if err := runFirewallCmd("nft", "insert", "rule", "ip", "nat", "POSTROUTING", "jump", wgInternetNftChainName); err != nil {
+		return err
+	}
+	if err := runFirewallCmd("nft", "flush", "chain", "ip", "nat", wgInternetNftChainName); err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		if err := runFirewallCmd(
+			"nft", "add", "rule", "ip", "nat", wgInternetNftChainName,
+			"ip", "saddr", spec.SourceCIDR, "oifname", "!=", spec.IIF, "masquerade", "comment", spec.NatComment,
+		); err != nil {
+			return err
+		}
+	}
+
+	if applied {
+		return nil
 	}
 	return nil
 }

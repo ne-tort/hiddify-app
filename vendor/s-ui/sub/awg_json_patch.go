@@ -136,7 +136,7 @@ func copyAwgEndpointScalarOptions(dst map[string]interface{}, opt map[string]int
 	if dst == nil || opt == nil {
 		return
 	}
-	for _, k := range []string{"mtu", "workers", "system", "name", "udp_timeout", "preallocated_buffers_per_pool", "disable_pauses"} {
+	for _, k := range []string{"system", "name", "mtu", "workers", "udp_timeout", "preallocated_buffers_per_pool", "disable_pauses"} {
 		if v, ok := opt[k]; ok && v != nil {
 			dst[k] = v
 		}
@@ -205,9 +205,21 @@ func (j *JsonService) patchJsonForAwgDB(db *gorm.DB, jsonConfig *map[string]inte
 		if len(localAddrs) == 0 {
 			continue
 		}
-		peerTunnelRoutes := wgInferPeerTunnelRoutes(localAddrs, opt)
-		if len(peerTunnelRoutes) == 0 {
-			peerTunnelRoutes = append([]string(nil), localAddrs...)
+		peerTunnelRoutes := internetFullTunnelPeerRoutes()
+		if !boolFromAnyDefaultTrueSub(opt["internet_allow"]) {
+			peerTunnelRoutes = wgInferPeerTunnelRoutes(localAddrs, opt)
+			if len(peerTunnelRoutes) == 0 {
+				peerTunnelRoutes = append([]string(nil), localAddrs...)
+			}
+			peerTunnelRoutes = onlyIPv4PeerRoutes(peerTunnelRoutes)
+			if len(peerTunnelRoutes) == 0 {
+				v4Peers := cidrStringsIPv4Only(localAddrs)
+				epV4 := endpointOptionsWithIPv4AddressesOnly(opt)
+				peerTunnelRoutes = onlyIPv4PeerRoutes(wgInferPeerTunnelRoutes(v4Peers, epV4))
+				if len(peerTunnelRoutes) == 0 {
+					peerTunnelRoutes = append([]string(nil), cidrStringsIPv4Only(localAddrs)...)
+				}
+			}
 		}
 		peerAllowedCopy := append([]string(nil), peerTunnelRoutes...)
 
@@ -227,7 +239,7 @@ func (j *JsonService) patchJsonForAwgDB(db *gorm.DB, jsonConfig *map[string]inte
 		awgEndpoint := map[string]interface{}{
 			"type":        awgEndpointType,
 			"tag":         ep.Tag,
-			"address":     stringSliceToIface(localAddrs),
+			"address":     listableFromStringSlice(localAddrs),
 			"private_key": clientPriv,
 			"peers":       []interface{}{awgPeer},
 		}

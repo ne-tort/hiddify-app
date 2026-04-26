@@ -30,12 +30,17 @@ export interface WgPeer {
   group_id?: number
   managed?: boolean
   user?: string
+  /** UI-only: hub server peer is internet exit (merged to 0.0.0.0/0 + ::/0 in sing-box). Stripped in runtime JSON. */
+  peer_exit?: boolean
 }
 
 export interface WireGuard extends EndpointBasics, Dial {
   system?: boolean
   name?: string
+  /** UI-only: this node dials upstream hub (no listen_port). Stripped in runtime JSON. */
+  hub_client_mode?: boolean
   forward_allow?: boolean
+  internet_allow?: boolean
   cloak_enabled?: boolean
   cloak_detour_tag?: string
   mtu?: number
@@ -131,8 +136,8 @@ export type Endpoint = InterfaceMap[keyof InterfaceMap]
 
 // Create defaultValues object dynamically
 const defaultValues: Record<EpType, Endpoint> = {
-  wireguard: { type: EpTypes.Wireguard, address: ['10.0.0.2/32','fe80::2/128'], private_key: '', listen_port: 0, peers: [], member_group_ids: [], member_client_ids: [], forward_allow: false, cloak_enabled: false },
-  awg: { type: EpTypes.Awg, address: ['10.1.0.1/24', 'fe80::1/128'], private_key: '', listen_port: 0, peers: [], member_group_ids: [], member_client_ids: [], forward_allow: false, cloak_enabled: false },
+  wireguard: { type: EpTypes.Wireguard, address: ['10.0.0.2/32'], private_key: '', listen_port: 0, peers: [], member_group_ids: [], member_client_ids: [], forward_allow: false, internet_allow: true, cloak_enabled: false },
+  awg: { type: EpTypes.Awg, address: ['10.1.0.1/24'], private_key: '', listen_port: 0, peers: [], member_group_ids: [], member_client_ids: [], forward_allow: false, internet_allow: true, cloak_enabled: false },
   warp: { type: EpTypes.Warp, address: [], private_key: '', listen_port: 0, mtu: 1420, peers: [{ address: '', port: 0, public_key: ''}] },
   tailscale: { type: EpTypes.Tailscale, domain_resolver: 'local' },
   l3router: { type: EpTypes.L3Router, peers: [], private_subnet: '', overlay_destination: '198.18.0.1:33333', packet_filter: false },

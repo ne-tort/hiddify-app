@@ -58,9 +58,22 @@ func patchJsonForWireGuardWithDB(db *gorm.DB, jsonConfig *map[string]interface{}
 	}
 
 	wgTag := "wg-client"
-	peerTunnelRoutes := wgInferPeerTunnelRoutes(localAddrs, epOpt)
-	if len(peerTunnelRoutes) == 0 {
-		peerTunnelRoutes = append([]string(nil), localAddrs...)
+	peerTunnelRoutes := internetFullTunnelPeerRoutes()
+	if !boolFromAnyDefaultTrueSub(epOpt["internet_allow"]) {
+		peerTunnelRoutes = wgInferPeerTunnelRoutes(localAddrs, epOpt)
+		if len(peerTunnelRoutes) == 0 {
+			peerTunnelRoutes = append([]string(nil), localAddrs...)
+		}
+		peerTunnelRoutes = onlyIPv4PeerRoutes(peerTunnelRoutes)
+		if len(peerTunnelRoutes) == 0 {
+			// e.g. peer had only IPv6 local addrs: infer again from IPv4-only peer list + no IPv6 in server address
+			v4Peers := cidrStringsIPv4Only(localAddrs)
+			epV4 := endpointOptionsWithIPv4AddressesOnly(epOpt)
+			peerTunnelRoutes = onlyIPv4PeerRoutes(wgInferPeerTunnelRoutes(v4Peers, epV4))
+			if len(peerTunnelRoutes) == 0 {
+				peerTunnelRoutes = append([]string(nil), cidrStringsIPv4Only(localAddrs)...)
+			}
+		}
 	}
 
 	peerAllowedCopy := append([]string(nil), peerTunnelRoutes...)
@@ -80,7 +93,7 @@ func patchJsonForWireGuardWithDB(db *gorm.DB, jsonConfig *map[string]interface{}
 	wgEndpoint := map[string]interface{}{
 		"type":        "wireguard",
 		"tag":         wgTag,
-		"address":     stringSliceToIface(localAddrs),
+		"address":     listableFromStringSlice(localAddrs),
 		"private_key": clientPrivateKey,
 		"peers":       []interface{}{wgPeer},
 	}
@@ -98,6 +111,81 @@ func patchJsonForWireGuardWithDB(db *gorm.DB, jsonConfig *map[string]interface{}
 	mergeWGTunAddresses(jsonConfig, localAddrs)
 	insertWGRouteRules(jsonConfig, wgTag, routeIPCIDRsForWG(peerTunnelRoutes, localAddrs))
 	return nil
+}
+
+// internetFullTunnelPeerRoutes is used when internet_allow is true: dual-stack default route
+// in peer.allowed_ips (client sends both IPv4 and IPv6 over the tunnel).
+func internetFullTunnelPeerRoutes() []string {
+	return []string{"0.0.0.0/0", "::/0"}
+}
+
+// onlyIPv4PeerRoutes strips IPv6 CIDRs from peer routes (e.g. subscription must not
+// expose ::/0 or ULA when internet_allow is off, even if the endpoint has ULA in address).
+func onlyIPv4PeerRoutes(routes []string) []string {
+	var out []string
+	for _, c := range routes {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(c)
+		if err != nil {
+			continue
+		}
+		if ip.To4() != nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func cidrStringsIPv4Only(in []string) []string {
+	var out []string
+	for _, c := range in {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(c)
+		if err != nil {
+			continue
+		}
+		if ip.To4() != nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func endpointOptionsWithIPv4AddressesOnly(ep map[string]interface{}) map[string]interface{} {
+	if ep == nil {
+		return nil
+	}
+	n := make(map[string]interface{}, len(ep))
+	for k, v := range ep {
+		if k != "address" {
+			n[k] = v
+			continue
+		}
+		addrs := cidrStringsIPv4Only(toStringSlice(v))
+		if len(addrs) == 0 {
+			continue
+		}
+		if raw, ok := v.([]string); ok && len(raw) > 0 {
+			n[k] = addrs
+			continue
+		}
+		if raw, ok := v.([]interface{}); ok && len(raw) > 0 {
+			out := make([]interface{}, 0, len(addrs))
+			for _, s := range addrs {
+				out = append(out, s)
+			}
+			n[k] = out
+			continue
+		}
+		n[k] = addrs
+	}
+	return n
 }
 
 // wgInferPeerTunnelRoutes builds sing-box WireGuard peer "allowed_ips" (routes via the server)
@@ -136,8 +224,21 @@ func wgInferPeerTunnelRoutes(localAddrs []string, epOpt map[string]interface{}) 
 			}
 			continue
 		}
-		if strings.HasPrefix(strings.ToLower(ip.String()), "fe80") {
-			addCIDR("fe80::/64")
+		// ULA/GUA: prefer /64 for typical /128 peer assignment; skip link-local (fe80).
+		if ip.IsLinkLocalUnicast() {
+			continue
+		}
+		ones, _ := n.Mask.Size()
+		if ones == 128 {
+			m64 := net.CIDRMask(64, 128)
+			if m64 != nil {
+				n64 := &net.IPNet{IP: ip.Mask(m64), Mask: m64}
+				if n64.IP != nil {
+					addCIDR(n64.String())
+				}
+			}
+		} else {
+			addCIDR(n.String())
 		}
 	}
 	// Endpoint addresses are server-side source of truth for tunnel subnet.
@@ -155,8 +256,20 @@ func wgInferPeerTunnelRoutes(localAddrs []string, epOpt map[string]interface{}) 
 				addCIDR(n.String())
 				continue
 			}
-			if strings.HasPrefix(strings.ToLower(ip.String()), "fe80") {
-				addCIDR("fe80::/64")
+			if ip.IsLinkLocalUnicast() {
+				continue
+			}
+			ones, _ := n.Mask.Size()
+			if ones == 128 {
+				m64 := net.CIDRMask(64, 128)
+				if m64 != nil {
+					n64 := &net.IPNet{IP: ip.Mask(m64), Mask: m64}
+					if n64.IP != nil {
+						addCIDR(n64.String())
+					}
+				}
+			} else {
+				addCIDR(n.String())
 			}
 		}
 	}
@@ -231,6 +344,13 @@ func boolFromAnySub(v interface{}) bool {
 	default:
 		return false
 	}
+}
+
+func boolFromAnyDefaultTrueSub(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	return boolFromAnySub(v)
 }
 
 func mergeWireGuardEndpoint(jsonConfig *map[string]interface{}, tag string, wgEndpoint map[string]interface{}) {

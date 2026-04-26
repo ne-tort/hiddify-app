@@ -213,3 +213,12 @@ func stringSliceToIface(s []string) []interface{} {
 	}
 	return out
 }
+
+// listableFromStringSlice emits sing-box "Listable" fields in compact form:
+// single item as string, multiple as array.
+func listableFromStringSlice(s []string) interface{} {
+	if len(s) == 1 {
+		return s[0]
+	}
+	return stringSliceToIface(s)
+}
