@@ -11,6 +11,10 @@ export function ensurePeersArray(endpoint: AnyRecord): AnyRecord[] {
 
 export function sanitizeWgAwgByMode(endpoint: AnyRecord): void {
   const peers = ensurePeersArray(endpoint)
+  if (endpoint.system !== true) {
+    delete endpoint.gso_enabled
+    delete endpoint.kernel_path_enabled
+  }
   if (endpoint.hub_client_mode === true) {
     endpoint.listen_port = undefined
     endpoint.member_group_ids = []

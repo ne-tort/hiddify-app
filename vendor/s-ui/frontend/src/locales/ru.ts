@@ -377,6 +377,8 @@ export default {
       internet: "Интернет",
       ipv6: "IPv6",
       hubClientMode: "Клиент к хабу",
+      awgGsoEnabled: "AWG: GSO (kernel)",
+      awgKernelPathEnabled: "AWG: чистый kernel path (без sing-box path)",
       exitNodeTooltip: "Пир как exit node",
       hubHost: "Хост или IP хаба",
       hubPort: "Порт",

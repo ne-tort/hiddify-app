@@ -73,6 +73,9 @@ func NewConfigService(core *core.Core) *ConfigService {
 		if err := (&EndpointService{}).ReconcileWireGuardForwardRules(db); err != nil {
 			logger.Warning("wireguard forward rules reconcile on startup failed: ", err)
 		}
+		if err := (&EndpointService{}).ReconcileWireGuardExitRules(db); err != nil {
+			logger.Warning("wireguard exit rules reconcile on startup failed: ", err)
+		}
 	}
 	return &ConfigService{}
 }
@@ -163,6 +166,14 @@ func (s *ConfigService) StartCore() error {
 		startCoreMu.Unlock()
 		logger.Error("start sing-box err:", err.Error())
 		return err
+	}
+	if db := database.GetDB(); db != nil {
+		if recErr := s.EndpointService.ReconcileWireGuardForwardRules(db); recErr != nil {
+			logger.Warning("wireguard forward rules reconcile after core start failed: ", recErr)
+		}
+		if recErr := s.EndpointService.ReconcileWireGuardExitRules(db); recErr != nil {
+			logger.Warning("wireguard exit rules reconcile after core start failed: ", recErr)
+		}
 	}
 	logger.Info("sing-box started")
 	return nil
@@ -383,7 +394,10 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 	}
 	if obj == "endpoints" {
 		if recErr := s.EndpointService.ReconcileWireGuardForwardRules(database.GetDB()); recErr != nil {
-			logger.Warning("wireguard forward rules reconcile on save failed: ", recErr)
+			return nil, recErr
+		}
+		if recErr := s.EndpointService.ReconcileWireGuardExitRules(database.GetDB()); recErr != nil {
+			return nil, recErr
 		}
 	}
 	// Try to start core if it is not running

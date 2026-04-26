@@ -377,6 +377,8 @@ export default {
       internet: "Internet",
       ipv6: "IPv6",
       hubClientMode: "Client to hub",
+      awgGsoEnabled: "AWG: GSO (kernel)",
+      awgKernelPathEnabled: "AWG: pure kernel path (bypass sing-box path)",
       exitNodeTooltip: "Peer as exit node",
       hubHost: "Hub host or IP",
       hubPort: "Port",

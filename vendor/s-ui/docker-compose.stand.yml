@@ -23,6 +23,7 @@ services:
     environment:
       SUI_WEB_TLS_CERT: /etc/letsencrypt/live/itvzlet.ai-qwerty.ru/fullchain.pem
       SUI_WEB_TLS_KEY: /etc/letsencrypt/live/itvzlet.ai-qwerty.ru/privkey.pem
+      SBOX_AWG_DISABLE_GSO: ${SBOX_AWG_DISABLE_GSO:-}
     volumes:
       - "./db:/app/db"
       - "./cert:/app/cert"

@@ -35,6 +35,8 @@ const (
 	l3RouterType              = "l3router"
 	wireGuardType             = "wireguard"
 	awgType                   = "awg"
+	awgGSOEnabledKey          = "gso_enabled"
+	awgKernelPathEnabledKey   = "kernel_path_enabled"
 	l3RouterDefaultOverlayDst = "198.18.0.1:33333"
 	l3PeerIPAllocKey          = "peer_ip_alloc"
 )
@@ -1051,6 +1053,27 @@ func validateAndNormalizeWGFamilyOptions(options map[string]interface{}, epType 
 	if len(addresses) > 0 {
 		options["address"] = addresses
 	}
+	systemEnabled := boolFromAnyWG(options["system"])
+	if epType == awgType {
+		if !systemEnabled {
+			delete(options, awgGSOEnabledKey)
+			delete(options, awgKernelPathEnabledKey)
+		} else {
+			kernelPathEnabled := false
+			if raw, exists := options[awgKernelPathEnabledKey]; exists {
+				kernelPathEnabled = boolFromAnyWG(raw)
+			}
+			gsoEnabled := true
+			if raw, exists := options[awgGSOEnabledKey]; exists {
+				gsoEnabled = boolFromAnyWG(raw)
+			}
+			options[awgKernelPathEnabledKey] = kernelPathEnabled
+			options[awgGSOEnabledKey] = gsoEnabled
+		}
+	} else {
+		delete(options, awgGSOEnabledKey)
+		delete(options, awgKernelPathEnabledKey)
+	}
 	if len(addresses) > 0 {
 		for _, raw := range addresses {
 			if err := wgValidateEndpointAddress(raw); err != nil {
@@ -1122,11 +1145,15 @@ func validateAndNormalizeWGFamilyOptions(options map[string]interface{}, epType 
 		}
 	}
 	for i := range peers {
-		if !boolFromAnyWG(peers[i]["peer_exit"]) {
+		if boolFromAnyWG(peers[i]["peer_exit"]) {
+			allowed := toStringSlice(peers[i]["allowed_ips"])
+			peers[i]["allowed_ips"] = mergeExitPeerAllowedIPs(allowed)
 			continue
 		}
-		allowed := toStringSlice(peers[i]["allowed_ips"])
-		peers[i]["allowed_ips"] = mergeExitPeerAllowedIPs(allowed)
+		// On exit-node switch, remove auto-added defaults from managed non-exit peers.
+		if boolFromAnyWG(peers[i]["managed"]) {
+			peers[i]["allowed_ips"] = stripExitPeerAllowedIPs(toStringSlice(peers[i]["allowed_ips"]))
+		}
 	}
 	options["peers"] = peers
 
@@ -1164,6 +1191,21 @@ func mergeExitPeerAllowedIPs(allowed []string) []string {
 			out = append(out, want)
 			seen[want] = struct{}{}
 		}
+	}
+	return out
+}
+
+func stripExitPeerAllowedIPs(allowed []string) []string {
+	var out []string
+	for _, s := range allowed {
+		k := strings.TrimSpace(s)
+		if k == "" {
+			continue
+		}
+		if k == "0.0.0.0/0" || k == "::/0" {
+			continue
+		}
+		out = append(out, k)
 	}
 	return out
 }
@@ -1233,7 +1275,7 @@ func wgValidateNoHostSubnetConflict(addresses []string) error {
 	}
 	for _, raw := range addresses {
 		p, err := netip.ParsePrefix(strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/")))
-			if err != nil {
+		if err != nil {
 			continue
 		}
 		if !p.Addr().Is4() {

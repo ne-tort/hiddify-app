@@ -55,3 +55,44 @@ func TestMergeExitPeerAllowedIPs(t *testing.T) {
 		t.Fatalf("merge: %#v", out)
 	}
 }
+
+func TestStripExitPeerAllowedIPs(t *testing.T) {
+	out := stripExitPeerAllowedIPs([]string{"10.8.0.2/32", "0.0.0.0/0", "::/0"})
+	if len(out) != 1 || out[0] != "10.8.0.2/32" {
+		t.Fatalf("strip: %#v", out)
+	}
+}
+
+func TestValidateAndNormalizeWGFamilyOptions_AWGKernelFlagsDefaults(t *testing.T) {
+	opt := map[string]interface{}{
+		"system":  true,
+		"address": []string{"10.5.0.1/24"},
+	}
+	if err := validateAndNormalizeWGFamilyOptions(opt, awgType); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := opt["gso_enabled"].(bool); !ok || !got {
+		t.Fatalf("expected gso_enabled=true by default, got %#v", opt["gso_enabled"])
+	}
+	if got, ok := opt["kernel_path_enabled"].(bool); !ok || got {
+		t.Fatalf("expected kernel_path_enabled=false by default, got %#v", opt["kernel_path_enabled"])
+	}
+}
+
+func TestValidateAndNormalizeWGFamilyOptions_AWGKernelFlagsClearedInUserspace(t *testing.T) {
+	opt := map[string]interface{}{
+		"system":              false,
+		"gso_enabled":         false,
+		"kernel_path_enabled": true,
+		"address":             []string{"10.5.0.1/24"},
+	}
+	if err := validateAndNormalizeWGFamilyOptions(opt, awgType); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := opt["gso_enabled"]; ok {
+		t.Fatalf("gso_enabled should be removed in userspace mode, got %#v", opt["gso_enabled"])
+	}
+	if _, ok := opt["kernel_path_enabled"]; ok {
+		t.Fatalf("kernel_path_enabled should be removed in userspace mode, got %#v", opt["kernel_path_enabled"])
+	}
+}

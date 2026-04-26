@@ -91,6 +91,24 @@
             <v-list-item>
               <v-switch v-model="optionHubClientMode" color="primary" :label="$t('types.wg.hubClientMode')" hide-details />
             </v-list-item>
+            <v-list-item v-if="isAwg">
+              <v-switch
+                v-model="optionAwgGsoEnabled"
+                color="primary"
+                :label="$t('types.wg.awgGsoEnabled')"
+                :disabled="!data.system"
+                hide-details
+              />
+            </v-list-item>
+            <v-list-item v-if="isAwg">
+              <v-switch
+                v-model="optionAwgKernelPathEnabled"
+                color="primary"
+                :label="$t('types.wg.awgKernelPathEnabled')"
+                :disabled="!data.system"
+                hide-details
+              />
+            </v-list-item>
           </v-list>
         </v-card>
       </v-menu>
@@ -329,6 +347,9 @@ export default {
       const s = String(this.$props.cardSubtitle ?? '').trim()
       return s.length > 0 ? s : 'Wireguard'
     },
+    isAwg(): boolean {
+      return this.$props.data.type === 'awg'
+    },
     hubClientMode(): boolean {
       return this.$props.data.hub_client_mode === true
     },
@@ -429,6 +450,30 @@ export default {
         }
       }
     },
+    optionAwgGsoEnabled: {
+      get(): boolean {
+        return this.$props.data.gso_enabled !== false
+      },
+      set(v: boolean) {
+        if (!this.isAwg || this.$props.data.system !== true) {
+          this.$props.data.gso_enabled = undefined
+          return
+        }
+        this.$props.data.gso_enabled = v
+      },
+    },
+    optionAwgKernelPathEnabled: {
+      get(): boolean {
+        return this.$props.data.kernel_path_enabled === true
+      },
+      set(v: boolean) {
+        if (!this.isAwg || this.$props.data.system !== true) {
+          this.$props.data.kernel_path_enabled = undefined
+          return
+        }
+        this.$props.data.kernel_path_enabled = v
+      },
+    },
     cloakDetourTag: {
       get() { return this.$props.data.cloak_detour_tag ?? undefined },
       set(v:string | null) {
@@ -490,6 +535,12 @@ export default {
     }
   },
   watch: {
+    'data.system': {
+      immediate: true,
+      handler() {
+        sanitizeWgAwgByMode(this.$props.data)
+      },
+    },
     'data.member_group_ids': {
       immediate: true,
       handler(v: unknown) {
