@@ -331,16 +331,43 @@ def _compose_profile_args_shell() -> str:
     return " " + " ".join(parts) if parts else ""
 
 
+def _compose_env_args_shell() -> str:
+    """
+    Прокидывает переменные окружения из локального run.py в удалённый `docker compose`.
+    Нужны для TLS путей/режимов (например self-signed без домена).
+    """
+    allowed_keys = [
+        "SUI_WEB_TLS_CERT",
+        "SUI_WEB_TLS_KEY",
+        "SUI_SUB_TLS_CERT",
+        "SUI_SUB_TLS_KEY",
+        "SUI_TLS_FALLBACK_CERT",
+        "SUI_TLS_FALLBACK_KEY",
+        "SUI_TLS_SELF_SIGNED",
+        "SUI_TLS_SELF_SIGNED_DAYS",
+        "SUI_TLS_SELF_SIGNED_CN",
+        "SBOX_AWG_DISABLE_GSO",
+    ]
+    parts: list[str] = []
+    for key in allowed_keys:
+        val = os.environ.get(key)
+        if val is None or val == "":
+            continue
+        parts.append(f"{key}={shlex.quote(val)}")
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def cmd_down(cfg: dict) -> None:
     """Остановить стек на VPS (перед сменой образа с тем же тегом — контейнеры пересоздаются при up)."""
     _require_cfg(cfg)
     d = _remote_compose_dir(cfg)
     c = cfg["compose"]
     prof = _compose_profile_args_shell()
+    env_args = _compose_env_args_shell()
     # mkdir — первый деплой на чистый VPS; down только если есть compose (иначе зелёное поле).
     script = (
         f"set -e; mkdir -p {d}/db {d}/cert; "
-        f"cd {d} && if [ -f {shlex.quote(c)} ]; then docker compose -f {shlex.quote(c)}{prof} down --remove-orphans; fi"
+        f"cd {d} && if [ -f {shlex.quote(c)} ]; then{env_args} docker compose -f {shlex.quote(c)}{prof} down --remove-orphans; fi"
     )
     print(f"[run] down: {script}", file=sys.stderr)
     _ssh(cfg, script, check=True)
@@ -352,7 +379,8 @@ def cmd_up(cfg: dict) -> None:
     d = _remote_compose_dir(cfg)
     c = cfg["compose"]
     prof = _compose_profile_args_shell()
-    script = f"set -e; cd {d} && docker compose -f {c}{prof} up -d --no-build"
+    env_args = _compose_env_args_shell()
+    script = f"set -e; cd {d} &&{env_args} docker compose -f {c}{prof} up -d --no-build"
     print(f"[run] up: {script}", file=sys.stderr)
     _ssh(cfg, script, check=True)
 
@@ -376,8 +404,9 @@ def cmd_remote_build(cfg: dict) -> None:
     d = _remote_compose_dir(cfg)
     c = cfg["compose"]
     prof = _compose_profile_args_shell()
+    env_args = _compose_env_args_shell()
     script = (
-        f"set -e; cd {d} && docker compose -f {c}{prof} build && docker compose -f {c}{prof} up -d"
+        f"set -e; cd {d} &&{env_args} docker compose -f {c}{prof} build &&{env_args} docker compose -f {c}{prof} up -d"
     )
     print(f"[run] remote-build: {script}", file=sys.stderr)
     _ssh(cfg, script, check=True)
@@ -524,7 +553,7 @@ def main() -> None:
     ap = sub.add_parser("all", help="deploy + verify")
     sub.add_parser(
         "binary",
-        help="Только загрузить локальный sui в контейнер (нужен deploy/deploy.env с DOCKER_* )",
+        help="Загрузить локальный ../sui в контейнер (хост: SUI_RUN_HOST или SUI_DEPLOY_HOST, см. AGENTS.md)",
     )
     sub.add_parser(
         "redeploy-binary",

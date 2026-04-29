@@ -27,6 +27,11 @@ func (a *APIHandler) initRouter(g *gin.RouterGroup) {
 			checkLogin(c)
 		}
 	})
+	g.GET("/client/:id/files/awg-conf", a.ApiService.GetClientAwgConfFiles)
+	g.GET("/client/:id/files/awg-conf/:endpointId/download", a.ApiService.DownloadClientAwgConf)
+	g.GET("/client/:id/files/wg-conf", a.ApiService.GetClientWgConfFiles)
+	g.GET("/client/:id/files/wg-conf/:endpointId/download", a.ApiService.DownloadClientWgConf)
+	g.GET("/client/:id/rules-links", a.ApiService.GetClientRulesLinks)
 	g.POST("/:postAction", a.postHandler)
 	g.GET("/:getAction", a.getHandler)
 }

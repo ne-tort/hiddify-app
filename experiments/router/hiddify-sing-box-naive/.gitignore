@@ -1,0 +1,32 @@
+_htest/
+/data/*
+*.log
+*.db
+/.idea/
+/vendor/
+/*.json
+/*.srs
+/*.db
+/site/
+/bin/
+/dist/
+/sing-box
+/sing-box.exe
+/sing-box-linux-amd64
+/build/
+/*.jar
+/*.aar
+/*.xcframework/
+.DS_Store
+/config.d/
+/venv/
+CLAUDE.md
+AGENTS.md
+/.claude/
+
+# Local Go test binaries and bench output (Windows / profiling)
+*.test.exe
+replace/wireguard-go/device/runtime*.out
+
+# Локальный scratch под sing-box (целиком не в репозитории)
+/tmp/

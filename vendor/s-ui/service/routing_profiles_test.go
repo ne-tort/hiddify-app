@@ -52,7 +52,7 @@ func TestRoutingProfilesService_SaveAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build happ link: %v", err)
 	}
-	if !strings.HasPrefix(link, "happ://routing/onadd/") {
+	if !strings.HasPrefix(link, "happ://routing/add/") {
 		t.Fatalf("unexpected happ link: %s", link)
 	}
 
@@ -150,5 +150,8 @@ func TestRoutingProfilesService_BuildMergedHappPayloadWithGeoBase(t *testing.T) 
 	}
 	if out["Geositeurl"] != "https://example.com/sub/geodat/geosite.dat" {
 		t.Fatalf("unexpected Geositeurl: %v", out["Geositeurl"])
+	}
+	if out["RouteOrder"] != "block-direct-proxy" {
+		t.Fatalf("unexpected RouteOrder: %v", out["RouteOrder"])
 	}
 }

@@ -1,0 +1,35 @@
+{
+  "log": {
+    "level": "debug"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 2083
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "naive",
+      "tag": "naive-out",
+      "server": "itvzlet2.ai-qwerty.ru",
+      "server_port": 27409,
+      "username": "test2",
+      "password": "Mpeti7CiXn",
+      "quic": false,
+      "force_ipv4_dns": true,
+      "udp_over_tcp": {
+        "enabled": true
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "itvzlet2.ai-qwerty.ru"
+      }
+    }
+  ],
+  "route": {
+    "final": "naive-out"
+  }
+}

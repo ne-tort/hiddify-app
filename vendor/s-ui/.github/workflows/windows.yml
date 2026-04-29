@@ -19,7 +19,8 @@ on:
 
 env:
   NODE_VERSION: "25"
-  TAGS: "with_quic,with_grpc,with_utls,with_acme,with_gvisor,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_tailscale,with_l3router"
+  # Sync with hiddify-core: go run ./cmd/print_core_build_tags -windows
+  TAGS: "with_gvisor,with_quic,with_wireguard,with_awg,with_l3router,with_utls,with_clash_api,with_grpc,with_acme,with_naive_outbound,with_conntrack,badlinkname,tfogo_checklinkname0,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_purego"
   LIBCRONET_BASE_URL: "https://github.com/SagerNet/cronet-go/releases/latest/download"
 
 jobs:

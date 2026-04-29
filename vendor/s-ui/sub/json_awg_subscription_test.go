@@ -380,3 +380,86 @@ func TestPatchJsonForAwgDB_disabledLinkedProfileSkipsResolve(t *testing.T) {
 		t.Fatalf("jc must not come from resolved profile when explicit link is disabled; got %v", ep0["jc"])
 	}
 }
+
+func TestAwgObfuscationConsistency_JSONAndConfUseSameEffectiveValues(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&model.Endpoint{},
+		&model.Client{},
+		&model.AwgObfuscationProfile{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	jc, jmin := 8, 470
+	h1 := "111-222"
+	prof := model.AwgObfuscationProfile{Name: "p", Enabled: true, Jc: &jc, Jmin: &jmin, H1: &h1}
+	if err := db.Create(&prof).Error; err != nil {
+		t.Fatal(err)
+	}
+	serverPriv, _ := wgtypes.GeneratePrivateKey()
+	clientPriv, _ := wgtypes.GeneratePrivateKey()
+	opts := map[string]interface{}{
+		"listen_port":            16669,
+		"private_key":            serverPriv.String(),
+		"obfuscation_profile_id": float64(prof.Id),
+		"member_client_ids":      []interface{}{float64(1)},
+		"jc":                     float64(9),
+		"i1":                     "<b 0x999><t>",
+		"peers": []map[string]interface{}{
+			{
+				"client_id":   float64(1),
+				"private_key": clientPriv.String(),
+				"public_key":  clientPriv.PublicKey().String(),
+				"allowed_ips": []string{"10.5.0.2/32"},
+			},
+		},
+	}
+	optRaw, _ := json.Marshal(opts)
+	ep := model.Endpoint{Type: "awg", Tag: "awg-consistency", Options: optRaw}
+	if err := db.Create(&ep).Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]interface{}{
+		"wireguard": map[string]interface{}{
+			"private_key": clientPriv.String(),
+			"public_key":  clientPriv.PublicKey().String(),
+		},
+	})
+	cl := model.Client{Id: 1, Name: "u1", Enable: true, Config: cfg, Inbounds: json.RawMessage(`[]`)}
+	if err := db.Create(&cl).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var jcMap map[string]interface{}
+	_ = json.Unmarshal([]byte(defaultJson), &jcMap)
+	jcMap["outbounds"] = []interface{}{
+		map[string]interface{}{"type": "selector", "tag": "proxy", "outbounds": []interface{}{"auto", "direct", "awg-consistency"}},
+	}
+	j := &JsonService{}
+	if err := j.patchJsonForAwgDB(db, &jcMap, &cl, "awg.example"); err != nil {
+		t.Fatal(err)
+	}
+	eps, _ := jcMap["endpoints"].([]interface{})
+	jsonEp, _ := eps[len(eps)-1].(map[string]interface{})
+
+	confSvc := AWGConfService{}
+	confObfs, err := confSvc.resolveAWGObfuscationMap(db, opts, cl.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intFromAny(jsonEp["jc"]) != intFromAny(confObfs["jc"]) || intFromAny(confObfs["jc"]) != 9 {
+		t.Fatalf("jc mismatch json=%v conf=%v", jsonEp["jc"], confObfs["jc"])
+	}
+	if intFromAny(jsonEp["jmin"]) != intFromAny(confObfs["jmin"]) || intFromAny(confObfs["jmin"]) != 470 {
+		t.Fatalf("jmin mismatch json=%v conf=%v", jsonEp["jmin"], confObfs["jmin"])
+	}
+	if strings.TrimSpace(fmt.Sprint(jsonEp["h1"])) != strings.TrimSpace(fmt.Sprint(confObfs["h1"])) || strings.TrimSpace(fmt.Sprint(confObfs["h1"])) != "111-222" {
+		t.Fatalf("h1 mismatch json=%v conf=%v", jsonEp["h1"], confObfs["h1"])
+	}
+	if strings.TrimSpace(fmt.Sprint(jsonEp["i1"])) != strings.TrimSpace(fmt.Sprint(confObfs["i1"])) {
+		t.Fatalf("i1 mismatch json=%v conf=%v", jsonEp["i1"], confObfs["i1"])
+	}
+}

@@ -312,7 +312,17 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 				if key == "name" || key == "alterId" || (key == "flow" && inData.TlsId == 0) {
 					continue
 				}
+				// Naive: HTTP/2 vs HTTP/3 is decided by inbound network, not saved client prefs (they would
+				// overwrite out_json and reintroduce quic:true after switching server to TCP-only).
+				if protocol == "naive" && (key == "quic" || key == "quic_congestion_control") {
+					continue
+				}
 				outbound[key] = value
+			}
+			if protocol == "naive" {
+				if full, err := inData.MarshalFull(); err == nil {
+					util.ApplyNaiveOutboundFromInbound(&outbound, *full)
+				}
 			}
 		}
 
@@ -586,22 +596,7 @@ func ensureManagedRuleSetDefinitions(j *JsonService, jsonConfig *map[string]inte
 }
 
 func (j *JsonService) resolveWGServerHost(requestHost string) string {
-	if domain, err := j.SettingService.GetSubDomain(); err == nil {
-		domain = strings.TrimSpace(domain)
-		if domain != "" {
-			return domain
-		}
-	}
-	if uri, err := j.SettingService.GetSubURI(); err == nil {
-		if h := hostFromSubscriptionURI(strings.TrimSpace(uri)); h != "" {
-			return h
-		}
-	}
-	requestHost = strings.TrimSpace(requestHost)
-	if requestHost != "" {
-		return requestHost
-	}
-	return ""
+	return resolveWGServerHostWithSettings(j.SettingService, requestHost)
 }
 
 func hostFromSubscriptionURI(uri string) string {

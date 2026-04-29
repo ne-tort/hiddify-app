@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/util/common"
@@ -416,13 +417,13 @@ func (s *RoutingProfilesService) BuildHappPayload(row model.RoutingProfile) (jso
 	return out, nil
 }
 
-// BuildHappRoutingLink returns happ://routing/onadd/{base64json}.
+// BuildHappRoutingLink returns happ://routing/add/{base64json}.
 func (s *RoutingProfilesService) BuildHappRoutingLink(row model.RoutingProfile) (string, error) {
 	payload, err := s.BuildHappPayload(row)
 	if err != nil {
 		return "", err
 	}
-	return "happ://routing/onadd/" + base64.RawURLEncoding.EncodeToString(payload), nil
+	return "happ://routing/add/" + base64.StdEncoding.EncodeToString(payload), nil
 }
 
 // BuildSingboxManagedRules emits managed route rules from profile tokens.
@@ -587,16 +588,6 @@ func (s *RoutingProfilesService) BuildMergedHappPayloadWithGeoBase(rows []model.
 		}
 		return in
 	}
-	routeOrder := make([]string, 0, 3)
-	if len(blockSites) > 0 || len(blockIPs) > 0 {
-		routeOrder = append(routeOrder, "block")
-	}
-	if len(directSites) > 0 || len(directIPs) > 0 {
-		routeOrder = append(routeOrder, "direct")
-	}
-	if len(proxySites) > 0 || len(proxyIPs) > 0 {
-		routeOrder = append(routeOrder, "proxy")
-	}
 	payload := map[string]interface{}{
 		"DirectSites": ensureList(directSites),
 		"DirectIp":    ensureList(directIPs),
@@ -604,7 +595,24 @@ func (s *RoutingProfilesService) BuildMergedHappPayloadWithGeoBase(rows []model.
 		"ProxyIp":     ensureList(proxyIPs),
 		"BlockSites":  ensureList(blockSites),
 		"BlockIp":     ensureList(blockIPs),
-		"RouteOrder":  routeOrder,
+		// Happ mobile is strict about this field shape.
+		"RouteOrder": "block-direct-proxy",
+		// Keep compatibility defaults aligned with Happ exported routing profile.
+		"Name":             "Default",
+		"GlobalProxy":      "true",
+		"FakeDNS":          "false",
+		"DomainStrategy":   "IPIfNonMatch",
+		"RemoteDNSType":    "DoH",
+		"RemoteDNSIP":      "1.1.1.1",
+		"RemoteDNSDomain":  "https://cloudflare-dns.com/dns-query",
+		"DomesticDNSType":  "DoH",
+		"DomesticDNSIP":    "8.8.8.8",
+		"DomesticDNSDomain":"https://dns.google/dns-query",
+		"DnsHosts": map[string]string{
+			"cloudflare-dns.com": "1.1.1.1",
+			"dns.google":         "8.8.8.8",
+		},
+		"LastUpdated": time.Now().Unix(),
 	}
 	geoBaseURL = strings.TrimRight(strings.TrimSpace(geoBaseURL), "/")
 	if geoBaseURL != "" {
@@ -623,7 +631,7 @@ func (s *RoutingProfilesService) BuildMergedHappRoutingLinkWithGeoBase(rows []mo
 	if err != nil {
 		return "", err
 	}
-	return "happ://routing/onadd/" + base64.RawURLEncoding.EncodeToString(payload), nil
+	return "happ://routing/add/" + base64.StdEncoding.EncodeToString(payload), nil
 }
 
 func (s *RoutingProfilesService) BuildMergedSingboxManagedRules(rows []model.RoutingProfile) []map[string]interface{} {

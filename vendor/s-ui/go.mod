@@ -217,6 +217,8 @@ replace github.com/amnezia-vpn/amneziawg-go => ../../hiddify-core/hiddify-sing-b
 replace github.com/sagernet/tailscale => ../../hiddify-core/hiddify-sing-box/replace/tailscale
 
 replace github.com/sagernet/sing-tun => ../../hiddify-core/hiddify-sing-box/replace/sing-tun
+replace github.com/sagernet/cronet-go => ../../hiddify-core/hiddify-sing-box/replace/cronet-go
+replace github.com/sagernet/cronet-go/all => ../../hiddify-core/hiddify-sing-box/replace/cronet-go-all
 
 replace github.com/Psiphon-Labs/quic-go => ../../hiddify-core/hiddify-sing-box/replace/psiphon-quic-go
 

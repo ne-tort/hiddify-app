@@ -95,8 +95,18 @@ if ($NoCGO) {
     Write-Host "Building with CGO..." -ForegroundColor Yellow
 }
 
+# Build tags: same as hiddify client / hiddify-core (Windows needs with_purego for cronet/naive)
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$hiddifyCore = Join-Path $repoRoot "hiddify-core"
+if (-not (Test-Path $hiddifyCore)) {
+    Write-Host "hiddify-core not found at $hiddifyCore (monorepo). Clone hiddify-app with hiddify-core or set tags manually." -ForegroundColor Red
+    exit 1
+}
+$tagStr = & go -C $hiddifyCore run ./cmd/print_core_build_tags -windows 2>&1
+if ($LASTEXITCODE -ne 0) { throw "print_core_build_tags: $tagStr" }
+
 # Build command
-$buildCmd = "go build -ldflags `"-w -s`" -tags `"with_quic,with_grpc,with_utls,with_acme,with_gvisor,with_tailscale`" -o sui.exe main.go"
+$buildCmd = "go build -ldflags `"-w -s -checklinkname=0`" -tags `"$tagStr`" -o sui.exe main.go"
 
 try {
     Invoke-Expression $buildCmd

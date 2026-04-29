@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestMergeAwgRuntimeObfuscationOptions_MergesProfileAndDropsIFields(t *testing.T) {
+func TestMergeAwgRuntimeObfuscationOptions_InlineOverrideWinsAndDropsIFields(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestMergeAwgRuntimeObfuscationOptions_MergesProfileAndDropsIFields(t *testi
 		"obfuscation_profile_id": float64(prof.Id),
 		"i1":                     "<payload>",
 		"i2":                     "<payload2>",
-		"jc":                     float64(1), // should be overridden by linked profile
+		"jc":                     float64(1), // should override linked profile
 	}
 	raw, _ := json.Marshal(opt)
 	ep := model.Endpoint{Type: awgType, Tag: "awg-x", Options: raw}
@@ -62,7 +62,10 @@ func TestMergeAwgRuntimeObfuscationOptions_MergesProfileAndDropsIFields(t *testi
 	if _, ok := merged["i2"]; ok {
 		t.Fatalf("i2 must be removed from runtime options: %#v", merged)
 	}
-	if intFromAny(merged["jc"]) != jc || intFromAny(merged["jmin"]) != jmin || intFromAny(merged["jmax"]) != jmax {
+	if intFromAny(merged["jc"]) != 1 {
+		t.Fatalf("inline jc should override profile jc: %#v", merged)
+	}
+	if intFromAny(merged["jmin"]) != jmin || intFromAny(merged["jmax"]) != jmax {
 		t.Fatalf("profile ints were not merged: %#v", merged)
 	}
 	if intFromAny(merged["s1"]) != s1 || intFromAny(merged["s2"]) != s2 || intFromAny(merged["s3"]) != s3 || intFromAny(merged["s4"]) != s4 {

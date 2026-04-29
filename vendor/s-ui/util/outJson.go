@@ -126,19 +126,59 @@ func addTls(out *map[string]interface{}, tls *model.Tls) {
 	(*out)["tls"] = tlsConfig
 }
 
+// ApplyNaiveOutboundFromInbound sets naive outbound QUIC fields from the server inbound (subscription
+// and FillOutJson). Must be used wherever client config is merged over out_json — QUIC follows inbound network.
+func ApplyNaiveOutboundFromInbound(out *map[string]interface{}, inbound map[string]interface{}) {
+	naiveOut(out, inbound)
+}
+
 func naiveOut(out *map[string]interface{}, inbound map[string]interface{}) {
-	if quic_congestion_control, ok := inbound["quic_congestion_control"].(string); ok {
-		(*out)["quic"] = true
-		switch quic_congestion_control {
-		case "bbr_standard":
-			(*out)["quic_congestion_control"] = "bbr"
-		case "bbr2_variant":
-			(*out)["quic_congestion_control"] = "bbr2"
-		default:
-			(*out)["quic_congestion_control"] = quic_congestion_control
-		}
+	// On many Windows/IPv4-only setups Cronet may still attempt AAAA/IPv6 resolver paths unless
+	// force_ipv4_dns is enabled, which causes repeated UDP/IPv6 errors and unstable browsing.
+	// Keep user override if explicitly set in client config.
+	if _, exists := (*out)["force_ipv4_dns"]; !exists {
+		(*out)["force_ipv4_dns"] = true
 	}
 
+	// sing-box: outbound "quic": true means HTTP/3 over QUIC (UDP). Inbound with network "tcp"
+	// only is HTTP/2 over TLS — must not emit quic:true. s-ui stores quic_congestion_control for
+	// both modes; previously any non-empty value wrongly forced client QUIC (Hiddify + naive broke).
+	net, _ := inbound["network"].(string)
+	if net == "" {
+		net = "tcp" // sing-box default; old rows may omit network
+	}
+	if net == "tcp" {
+		(*out)["quic"] = false
+		delete(*out, "quic_congestion_control")
+		return
+	}
+	quic_congestion_control, hasQcc := inbound["quic_congestion_control"].(string)
+	if net == "udp" {
+		(*out)["quic"] = true
+		if hasQcc && quic_congestion_control != "" {
+			switch quic_congestion_control {
+			case "bbr_standard":
+				(*out)["quic_congestion_control"] = "bbr"
+			case "bbr2_variant":
+				(*out)["quic_congestion_control"] = "bbr2"
+			default:
+				(*out)["quic_congestion_control"] = quic_congestion_control
+			}
+		}
+		return
+	}
+	if !hasQcc || quic_congestion_control == "" {
+		return
+	}
+	(*out)["quic"] = true
+	switch quic_congestion_control {
+	case "bbr_standard":
+		(*out)["quic_congestion_control"] = "bbr"
+	case "bbr2_variant":
+		(*out)["quic_congestion_control"] = "bbr2"
+	default:
+		(*out)["quic_congestion_control"] = quic_congestion_control
+	}
 }
 
 func shadowsocksOut(out *map[string]interface{}, inbound map[string]interface{}) {

@@ -120,6 +120,15 @@ def _merge_config() -> dict:
         cfg["docker_wait_timeout"] = int(wt)
     elif "docker_wait_timeout" not in cfg:
         cfg["docker_wait_timeout"] = int(cfg.get("docker_wait_timeout") or 120)
+
+    # С `run.py` / `run.env` используются SUI_RUN_HOST и SUI_RUN_USER; SUI_DEPLOY_* остаётся
+    # приоритетом, если задано явно (тот же смысл, что в run.py _cfg()).
+    if not (str(cfg.get("host") or "").strip()):
+        rh = (os.environ.get("SUI_RUN_HOST") or "").strip()
+        if rh:
+            cfg["host"] = rh
+    if not (os.environ.get("SUI_DEPLOY_USER") or "").strip() and (os.environ.get("SUI_RUN_USER") or "").strip():
+        cfg["user"] = (os.environ.get("SUI_RUN_USER") or "").strip()
     return cfg
 
 

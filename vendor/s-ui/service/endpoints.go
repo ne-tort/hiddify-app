@@ -370,45 +370,15 @@ func (s *EndpointService) mergeAwgRuntimeObfuscationOptions(tx *gorm.DB, endpoin
 		delete(options, "i5")
 	}
 
-	profID := uintFromAny(options["obfuscation_profile_id"])
-	if profID > 0 {
-		profSvc := AwgObfuscationProfilesService{}
-		prof, err := profSvc.GetByID(tx, profID)
-		if err == nil && prof != nil && prof.Enabled {
-			if prof.Jc != nil {
-				options["jc"] = *prof.Jc
-			}
-			if prof.Jmin != nil {
-				options["jmin"] = *prof.Jmin
-			}
-			if prof.Jmax != nil {
-				options["jmax"] = *prof.Jmax
-			}
-			if prof.S1 != nil {
-				options["s1"] = *prof.S1
-			}
-			if prof.S2 != nil {
-				options["s2"] = *prof.S2
-			}
-			if prof.S3 != nil {
-				options["s3"] = *prof.S3
-			}
-			if prof.S4 != nil {
-				options["s4"] = *prof.S4
-			}
-			if prof.H1 != nil && strings.TrimSpace(*prof.H1) != "" {
-				options["h1"] = strings.TrimSpace(*prof.H1)
-			}
-			if prof.H2 != nil && strings.TrimSpace(*prof.H2) != "" {
-				options["h2"] = strings.TrimSpace(*prof.H2)
-			}
-			if prof.H3 != nil && strings.TrimSpace(*prof.H3) != "" {
-				options["h3"] = strings.TrimSpace(*prof.H3)
-			}
-			if prof.H4 != nil && strings.TrimSpace(*prof.H4) != "" {
-				options["h4"] = strings.TrimSpace(*prof.H4)
-			}
+	effectiveObfs, err := ResolveEffectiveAwgObfuscation(tx, options, 0)
+	if err != nil {
+		return err
+	}
+	for k, v := range effectiveObfs {
+		if !boolFromAnyWG(options["hub_client_mode"]) && (k == "i1" || k == "i2" || k == "i3" || k == "i4" || k == "i5") {
+			continue
 		}
+		options[k] = v
 	}
 
 	raw, err := json.MarshalIndent(options, "", " ")

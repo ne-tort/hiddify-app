@@ -24,6 +24,7 @@
         >
           <v-tab value="sub">{{ $t('setting.sub') }}</v-tab>
           <v-tab value="link">{{ $t('client.links') }}</v-tab>
+          <v-tab value="files">{{ $t('client.files') }}</v-tab>
         </v-tabs>
         <v-window v-model="tab" style="margin-top: 10px;">
           <v-window-item value="sub">
@@ -77,12 +78,50 @@
             </v-row>
           </v-window-item>
           <v-window-item value="link">
+            <v-row v-if="ruleLinks.length > 0">
+              <v-col style="text-align: center;">
+                <v-chip color="secondary">{{ $t('client.rules') }}</v-chip>
+              </v-col>
+            </v-row>
+            <v-row v-for="r in ruleLinks">
+              <v-col style="text-align: center;">
+                <v-chip>{{ r.remark ?? $t('client.rules') }}</v-chip><br />
+                <QrcodeVue :value="r.uri" :size="size" @click="copyToClipboard(r.uri)" :margin="1" style="border-radius: .5rem; cursor: copy;" />
+              </v-col>
+            </v-row>
+            <v-row v-if="ruleLinks.length > 0">
+              <v-col style="text-align: center;">
+                <v-divider />
+              </v-col>
+            </v-row>
             <v-row v-for="l in clientLinks">
               <v-col style="text-align: center;">
                 <v-chip>{{ l.remark?? $t('client.' + l.type) }}</v-chip><br />
                 <QrcodeVue :value="l.uri" :size="size" @click="copyToClipboard(l.uri)" :margin="1" style="border-radius: .5rem; cursor: copy;" />
               </v-col>
             </v-row>
+          </v-window-item>
+          <v-window-item value="files">
+            <v-row v-if="allFiles.length === 0">
+              <v-col style="text-align: center;">
+                <v-chip>{{ $t('client.noFiles') }}</v-chip>
+              </v-col>
+            </v-row>
+            <v-list v-else density="compact">
+              <v-list-item v-for="f in allFiles" :key="`${f.family}-${f.endpoint_id}`">
+                <template #title>
+                  <span>{{ f.endpoint_tag }}</span>
+                </template>
+                <template #subtitle>
+                  <span>{{ f.family === 'awg' ? 'AWG' : 'WG' }}</span>
+                </template>
+                <template #append>
+                  <v-btn size="small" variant="outlined" @click="downloadConfigFile(f)">
+                    {{ $t('client.downloadConf') }}
+                  </v-btn>
+                </template>
+              </v-list-item>
+            </v-list>
           </v-window-item>
         </v-window>
       </v-card-text>
@@ -96,6 +135,7 @@ import Data from '@/store/modules/data'
 import Clipboard from 'clipboard'
 import { i18n } from '@/locales'
 import { push } from 'notivue'
+import HttpUtils from '@/plugins/httputil'
 
 export default {
   props: ['id', 'visible'],
@@ -103,6 +143,9 @@ export default {
     return {
       tab: "sub",
       client: <any>{},
+      awgFiles: <any[]>[],
+      wgFiles: <any[]>[],
+      ruleLinks: <any[]>[],
       loading: false,
     }
   },
@@ -111,7 +154,22 @@ export default {
       this.loading = true
       const newData = await Data().loadClients(this.$props.id)
       this.client = newData
+      const files = await HttpUtils.get(`api/client/${this.$props.id}/files/awg-conf`)
+      this.awgFiles = files.success ? (files.obj?.files ?? []) : []
+      const wgFiles = await HttpUtils.get(`api/client/${this.$props.id}/files/wg-conf`)
+      this.wgFiles = wgFiles.success ? (wgFiles.obj?.files ?? []) : []
+      const rules = await HttpUtils.get(`api/client/${this.$props.id}/rules-links`)
+      this.ruleLinks = rules.success ? (rules.obj?.rules_links ?? []) : []
       this.loading = false
+    },
+    downloadConfigFile(file: any) {
+      if (!file?.download_url) return
+      const link = document.createElement('a')
+      link.href = file.download_url
+      link.rel = 'noopener'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
     },
     copyToClipboard(txt:string) {
       const hiddenButton = document.createElement('button')
@@ -158,6 +216,11 @@ export default {
     },
     clientLinks() {
       return this.client.links?? []
+    },
+    allFiles() {
+      const awg = (this.awgFiles ?? []).map((f: any) => ({ ...f, family: 'awg' }))
+      const wg = (this.wgFiles ?? []).map((f: any) => ({ ...f, family: 'wg' }))
+      return [...awg, ...wg]
     },
     size() {
       if (window.innerWidth > 380) return 300

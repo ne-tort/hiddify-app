@@ -148,6 +148,26 @@ func TestParseWGInternetSpecFromEndpoint_Disabled(t *testing.T) {
 	}
 }
 
+func TestParseWGInternetSpecFromEndpoint_HubClientModeUsesPeerAllowedRange(t *testing.T) {
+	opt, _ := json.Marshal(map[string]interface{}{
+		"hub_client_mode": true,
+		"address":         []interface{}{"10.5.0.2/32"},
+		"peers": []interface{}{
+			map[string]interface{}{
+				"allowed_ips": []interface{}{"10.5.0.0/24", "0.0.0.0/0"},
+			},
+		},
+	})
+	ep := &model.Endpoint{Id: 24, Type: "awg", Options: opt}
+	spec, ok := parseWGInternetSpecFromEndpoint(ep)
+	if !ok {
+		t.Fatal("expected internet spec in hub_client_mode")
+	}
+	if spec.SourceCIDR != "10.5.0.0/24" {
+		t.Fatalf("expected source cidr from peer allowed_ips, got %q", spec.SourceCIDR)
+	}
+}
+
 func TestBoolFromAny(t *testing.T) {
 	cases := []struct {
 		in   interface{}

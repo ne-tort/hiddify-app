@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/sagernet/sing-box/adapter"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/network"
@@ -52,6 +53,9 @@ func (c *ConnTracker) generateConnectionID() string {
 }
 
 func (c *ConnTracker) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
+	if metadata.InboundType == C.TypeNaive {
+		return conn
+	}
 	connID := c.generateConnectionID()
 	connInfo := &ConnectionInfo{
 		ID:      connID,
@@ -66,6 +70,9 @@ func (c *ConnTracker) RoutedConnection(ctx context.Context, conn net.Conn, metad
 }
 
 func (c *ConnTracker) RoutedPacketConnection(ctx context.Context, conn network.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) network.PacketConn {
+	if metadata.InboundType == C.TypeNaive {
+		return conn
+	}
 	connID := c.generateConnectionID()
 	connInfo := &ConnectionInfo{
 		ID:         connID,

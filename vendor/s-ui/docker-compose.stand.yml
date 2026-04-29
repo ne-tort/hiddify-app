@@ -21,8 +21,11 @@ services:
     hostname: "s-ui-local"
     network_mode: host
     environment:
-      SUI_WEB_TLS_CERT: /etc/letsencrypt/live/itvzlet.ai-qwerty.ru/fullchain.pem
-      SUI_WEB_TLS_KEY: /etc/letsencrypt/live/itvzlet.ai-qwerty.ru/privkey.pem
+      SUI_WEB_TLS_CERT: ${SUI_WEB_TLS_CERT:-/app/cert/fullchain.pem}
+      SUI_WEB_TLS_KEY: ${SUI_WEB_TLS_KEY:-/app/cert/privkey.pem}
+      SUI_TLS_SELF_SIGNED: ${SUI_TLS_SELF_SIGNED:-0}
+      SUI_TLS_SELF_SIGNED_DAYS: ${SUI_TLS_SELF_SIGNED_DAYS:-36500}
+      SUI_TLS_SELF_SIGNED_CN: ${SUI_TLS_SELF_SIGNED_CN:-localhost}
       SBOX_AWG_DISABLE_GSO: ${SBOX_AWG_DISABLE_GSO:-}
     volumes:
       - "./db:/app/db"

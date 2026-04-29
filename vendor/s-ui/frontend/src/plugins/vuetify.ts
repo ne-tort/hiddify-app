@@ -23,9 +23,24 @@ export default createVuetify({
     },
     VSelect: {
       variant: 'solo-filled',
+      autocomplete: 'off',
+      autocorrect: 'off',
+      autocapitalize: 'off',
+      spellcheck: false,
+    },
+    VAutocomplete: {
+      variant: 'solo-filled',
+      autocomplete: 'off',
+      autocorrect: 'off',
+      autocapitalize: 'off',
+      spellcheck: false,
     },
     VCombobox: {
       variant: 'solo-filled',
+      autocomplete: 'off',
+      autocorrect: 'off',
+      autocapitalize: 'off',
+      spellcheck: false,
     },
     VTextarea: {
       variant: 'solo-filled',

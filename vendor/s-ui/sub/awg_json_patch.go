@@ -14,11 +14,6 @@ import (
 
 const awgEndpointType = "awg"
 
-var awgInlineObfuscationKeys = []string{
-	"jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
-	"h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
-}
-
 func parseMemberUintSlice(raw interface{}) []uint {
 	switch v := raw.(type) {
 	case []interface{}:
@@ -64,31 +59,6 @@ func clientHasWGStyleMemberAccess(db *gorm.DB, opt map[string]interface{}, clien
 		}
 	}
 	return false
-}
-
-func mergeAwgInlineObfuscation(dst map[string]interface{}, opt map[string]interface{}) {
-	if dst == nil || opt == nil {
-		return
-	}
-	intKeys := map[string]struct{}{
-		"jc": {}, "jmin": {}, "jmax": {}, "s1": {}, "s2": {}, "s3": {}, "s4": {},
-	}
-	for _, k := range awgInlineObfuscationKeys {
-		val, ok := opt[k]
-		if !ok || val == nil {
-			continue
-		}
-		if s, ok2 := val.(string); ok2 && strings.TrimSpace(s) == "" {
-			continue
-		}
-		if _, isInt := intKeys[k]; isInt {
-			if n, okn := jsonNumberToInt(val); okn {
-				dst[k] = n
-			}
-			continue
-		}
-		dst[k] = val
-	}
 }
 
 // jsonNumberToInt normalizes JSON-decoded numbers (float64 from encoding/json) for sing-box integer fields.
@@ -252,22 +222,13 @@ func (j *JsonService) patchJsonForAwgDB(db *gorm.DB, jsonConfig *map[string]inte
 			awgEndpoint["workers"] = w
 		}
 
-		// Obfuscation merge order (plan): linked profile (if id set and enabled) OR membership-resolved profile;
-		// never fall back to Resolve when the endpoint explicitly references a disabled/missing profile id.
-		profID := uintFromAny(opt["obfuscation_profile_id"])
-		explicitProfile := profID > 0
-		var prof *model.AwgObfuscationProfile
-		if explicitProfile {
-			if row, err := j.AwgObfuscationProfilesService.GetByID(db, profID); err == nil && row != nil && row.Enabled {
-				prof = row
-			}
-		} else {
-			prof, _ = j.AwgObfuscationProfilesService.ResolveObfuscationProfileForClient(db, client.Id)
+		effectiveObfs, err := service.ResolveEffectiveAwgObfuscation(db, opt, client.Id)
+		if err != nil {
+			return err
 		}
-		if prof != nil {
-			service.MergeAwgProfileIntoMap(awgEndpoint, prof)
+		for k, v := range effectiveObfs {
+			awgEndpoint[k] = v
 		}
-		mergeAwgInlineObfuscation(awgEndpoint, opt)
 		normalizeAwgObfuscationIntsInMap(awgEndpoint)
 
 		mergeWireGuardEndpoint(jsonConfig, ep.Tag, awgEndpoint)

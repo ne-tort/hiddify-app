@@ -140,6 +140,9 @@ func InitDB(dbPath string) error {
 	if err = MigrateInboundPolicyModeAliases(db); err != nil {
 		return err
 	}
+	if err = NormalizeEndpointJSONStorage(db); err != nil {
+		return err
+	}
 	err = initUser()
 	if err != nil {
 		return err

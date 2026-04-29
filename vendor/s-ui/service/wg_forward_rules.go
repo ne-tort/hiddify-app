@@ -156,6 +156,13 @@ func parseWGInternetSpecFromEndpoint(ep *model.Endpoint) (wgInternetRuleSpec, bo
 		}
 	}
 	sourceCIDR := firstIPv4EndpointCIDR(options["address"])
+	// Hub client mode usually keeps local tunnel address as /32.
+	// For internet egress NAT we need client subnet from peer allowed_ips (e.g. 10.5.0.0/24).
+	if boolFromAny(options["hub_client_mode"]) {
+		if peerCIDR := firstIPv4PeerAllowedCIDR(options["peers"]); peerCIDR != "" {
+			sourceCIDR = peerCIDR
+		}
+	}
 	if sourceCIDR == "" {
 		return wgInternetRuleSpec{}, false
 	}
@@ -167,6 +174,35 @@ func parseWGInternetSpecFromEndpoint(ep *model.Endpoint) (wgInternetRuleSpec, bo
 		RetComment: fmt.Sprintf("%s%d-ret", wgInternetRuleCommentPrefix, ep.Id),
 		NatComment: fmt.Sprintf("%s%d-nat", wgInternetRuleCommentPrefix, ep.Id),
 	}, true
+}
+
+func firstIPv4PeerAllowedCIDR(raw interface{}) string {
+	peers, ok := raw.([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, peerRaw := range peers {
+		peerMap, ok := peerRaw.(map[string]interface{})
+		if !ok || peerMap == nil {
+			continue
+		}
+		for _, value := range toStringSlice(peerMap["allowed_ips"]) {
+			value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+			if value == "" {
+				continue
+			}
+			prefix, err := netip.ParsePrefix(value)
+			if err != nil || !prefix.Addr().Is4() {
+				continue
+			}
+			// Skip full defaults; we need concrete VPN source range for NAT.
+			if prefix.Bits() == 0 {
+				continue
+			}
+			return prefix.Masked().String()
+		}
+	}
+	return ""
 }
 
 func boolFromAny(v interface{}) bool {

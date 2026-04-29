@@ -1,0 +1,5 @@
+{
+  "listen": "socks://127.0.0.1:2080",
+  "proxy": "https://test2:Mpeti7CiXn@itvzlet.ai-qwerty.ru:27408",
+  "log": "naive-client.log"
+}

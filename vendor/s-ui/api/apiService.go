@@ -2,17 +2,20 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/logger"
+	"github.com/alireza0/s-ui/sub"
 	"github.com/alireza0/s-ui/service"
 	"github.com/alireza0/s-ui/util"
 	"github.com/alireza0/s-ui/util/common"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func parseUIntQuery(c *gin.Context, key string) uint {
@@ -523,6 +526,152 @@ func (a *ApiService) GetAwgObfuscationProfileAutofill(c *gin.Context) {
 		return
 	}
 	jsonObj(c, payload, nil)
+}
+
+func (a *ApiService) GetClientAwgConfFiles(c *gin.Context) {
+	clientID64, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 32)
+	if err != nil || clientID64 == 0 {
+		jsonMsg(c, "", common.NewErrorf("invalid client id"))
+		return
+	}
+	confSvc := sub.AWGConfService{}
+	files, err := confSvc.ListClientFiles(database.GetDB(), uint(clientID64))
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	for i := range files {
+		files[i].DownloadURL = "api/client/" + strconv.FormatUint(clientID64, 10) + "/files/awg-conf/" + strconv.FormatUint(uint64(files[i].EndpointID), 10) + "/download"
+	}
+	jsonObj(c, map[string]interface{}{
+		"files": files,
+	}, nil)
+}
+
+func (a *ApiService) buildHappGeoBaseURLForHost(requestHost string) string {
+	requestHost = strings.TrimSpace(requestHost)
+	if finalURI, err := a.SettingService.GetFinalSubURI(requestHost); err == nil {
+		finalURI = strings.TrimSpace(finalURI)
+		if finalURI != "" {
+			return strings.TrimRight(finalURI, "/")
+		}
+	}
+	subURI, _ := a.SettingService.GetSubURI()
+	subURI = strings.TrimSpace(subURI)
+	if subURI != "" {
+		return strings.TrimRight(subURI, "/")
+	}
+	if requestHost == "" {
+		return ""
+	}
+	subPath, _ := a.SettingService.GetSubPath()
+	subPath = strings.TrimSpace(subPath)
+	if !strings.HasPrefix(subPath, "/") {
+		subPath = "/" + subPath
+	}
+	return "https://" + requestHost + strings.TrimRight(subPath, "/")
+}
+
+func (a *ApiService) buildClientRulesLinks(db *gorm.DB, clientID uint, geoBaseURL string) ([]map[string]interface{}, error) {
+	profiles, err := a.RoutingProfilesService.ResolveProfilesForClient(db, clientID)
+	if err != nil {
+		return nil, err
+	}
+	if len(profiles) == 0 {
+		return []map[string]interface{}{}, nil
+	}
+	happLink, err := a.RoutingProfilesService.BuildMergedHappRoutingLinkWithGeoBase(profiles, geoBaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return []map[string]interface{}{
+		{
+			"type":   "happ",
+			"remark": "Routing Rules",
+			"uri":    happLink,
+		},
+	}, nil
+}
+
+func (a *ApiService) GetClientRulesLinks(c *gin.Context) {
+	clientID64, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 32)
+	if err != nil || clientID64 == 0 {
+		jsonMsg(c, "", common.NewErrorf("invalid client id"))
+		return
+	}
+	geoBaseURL := a.buildHappGeoBaseURLForHost(getHostname(c))
+	links, err := a.buildClientRulesLinks(database.GetDB(), uint(clientID64), geoBaseURL)
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	jsonObj(c, map[string]interface{}{
+		"rules_links": links,
+	}, nil)
+}
+
+func (a *ApiService) DownloadClientAwgConf(c *gin.Context) {
+	clientID64, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 32)
+	if err != nil || clientID64 == 0 {
+		c.String(http.StatusBadRequest, "invalid client id")
+		return
+	}
+	endpointID64, err := strconv.ParseUint(strings.TrimSpace(c.Param("endpointId")), 10, 32)
+	if err != nil || endpointID64 == 0 {
+		c.String(http.StatusBadRequest, "invalid endpoint id")
+		return
+	}
+	confSvc := sub.AWGConfService{}
+	filename, payload, err := confSvc.BuildClientFile(database.GetDB(), uint(clientID64), uint(endpointID64), getHostname(c))
+	if err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+		return
+	}
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.Header("Content-Disposition", "attachment; filename="+filename)
+	c.Writer.Write(payload)
+}
+
+func (a *ApiService) GetClientWgConfFiles(c *gin.Context) {
+	clientID64, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 32)
+	if err != nil || clientID64 == 0 {
+		jsonMsg(c, "", common.NewErrorf("invalid client id"))
+		return
+	}
+	confSvc := sub.WGConfService{}
+	files, err := confSvc.ListClientFiles(database.GetDB(), uint(clientID64))
+	if err != nil {
+		jsonMsg(c, "", err)
+		return
+	}
+	for i := range files {
+		files[i].DownloadURL = "api/client/" + strconv.FormatUint(clientID64, 10) + "/files/wg-conf/" + strconv.FormatUint(uint64(files[i].EndpointID), 10) + "/download"
+	}
+	jsonObj(c, map[string]interface{}{
+		"files": files,
+	}, nil)
+}
+
+func (a *ApiService) DownloadClientWgConf(c *gin.Context) {
+	clientID64, err := strconv.ParseUint(strings.TrimSpace(c.Param("id")), 10, 32)
+	if err != nil || clientID64 == 0 {
+		c.String(http.StatusBadRequest, "invalid client id")
+		return
+	}
+	endpointID64, err := strconv.ParseUint(strings.TrimSpace(c.Param("endpointId")), 10, 32)
+	if err != nil || endpointID64 == 0 {
+		c.String(http.StatusBadRequest, "invalid endpoint id")
+		return
+	}
+	confSvc := sub.WGConfService{}
+	filename, payload, err := confSvc.BuildClientFile(database.GetDB(), uint(clientID64), uint(endpointID64), getHostname(c))
+	if err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+		return
+	}
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.Header("Content-Disposition", "attachment; filename="+filename)
+	c.Writer.Write(payload)
 }
 
 func (a *ApiService) GetRoutingProfileSingbox(c *gin.Context) {
