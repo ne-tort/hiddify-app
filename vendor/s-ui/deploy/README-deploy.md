@@ -1,6 +1,12 @@
-# Деплой s-ui на VPS (образец l3router stand)
+# Деплой s-ui: `deploy_sui.py` (бинарник / systemd / Docker)
 
-Скрипт [`deploy_sui.py`](deploy_sui.py) повторяет идеи из `experiments/router/stand/l3router/l3router_stand/deploy.py`: загрузка бинарника по `scp`, проверка SHA-256, перезапуск **systemd** или обновление бинарника в **Docker**-контейнере.
+## Рекомендуемый путь для полного стенда
+
+Передача **готового Docker-образа** на VPS и `compose up --no-build` — **`python run.py deploy`** из корня `vendor/s-ui` (переменные `SUI_RUN_*` в `run.env`, см. `run.env.example`). Кратко: [`../AGENTS.md`](../AGENTS.md), TLS: [`TLS.md`](TLS.md).
+
+---
+
+Скрипт [`deploy_sui.py`](deploy_sui.py) — **низкоуровневый** вариант (как в l3router stand): загрузка **одного** бинарника `sui` по `scp`, проверка SHA-256, перезапуск **systemd** или обновление бинарника в **Docker**-контейнере. Используйте, когда не нужен полный образ, а только заливка/рестарт. Из корня s-ui тот же сценарий: `python run.py binary` / `restart` (хост/пользователь: `SUI_RUN_HOST` / `SUI_RUN_USER` из `run.env` либо `SUI_DEPLOY_*` в `deploy.env`).
 
 ## Требования
 
@@ -18,7 +24,7 @@
    cp deploy.config.json.example deploy.config.json
    ```
 
-2. Укажите хост (например VPS с адресом `31.x.x.x`) в `deploy.env`:
+2. Укажите хост. Если в `../run.env` уже заданы `SUI_RUN_HOST` / `SUI_RUN_USER`, **`deploy_sui.py` подхватит их** при пустом `SUI_DEPLOY_HOST`. Или явно в `deploy.env`:
 
    ```env
    SUI_DEPLOY_HOST=31.x.x.x
@@ -26,7 +32,7 @@
    SUI_DEPLOY_LOCAL_BINARY=../sui
    ```
 
-   Либо отредактируйте `deploy.config.json` (те же поля; при наличии **обоих** файла переменные окружения имеют приоритет там, где заданы).
+   Либо отредактируйте `deploy.config.json` (те же поля; при наличии **обоих** файлов переменные окружения имеют приоритет там, где заданы).
 
 3. Опционально: `deploy.yaml` — дублирует JSON; для автоподхвата установите PyYAML (`pip install pyyaml`).
 

@@ -1,5 +1,7 @@
 # TLS: переменные окружения и стенд Let’s Encrypt
 
+Полный деплой стенда: [`../run.py`](../run.py) `deploy` / `certbot` / `verify` (см. [`../AGENTS.md`](../AGENTS.md)).
+
 Панель и подписка выбирают пары `cert`/`key` в таком порядке:
 
 1. **БД** — оба пути заданы и **оба файла существуют** на диске.
@@ -85,3 +87,25 @@ curl -sI --resolve "work.ai-qwerty.ru:2095:31.56.211.60" "https://work.ai-qwerty
 ```
 
 Опционально: [`scripts/certbot-init.sh`](../scripts/certbot-init.sh) — проверка наличия файлов перед повторным `certonly`.
+
+## Self-signed без домена
+
+Для VPS без домена можно включить генерацию самоподписанного сертификата прямо в контейнере
+(`entrypoint.sh`) через env:
+
+```bash
+cd vendor/s-ui
+SUI_RUN_HOST=163.5.180.181 \
+SUI_RUN_VERIFY_DOMAIN=163.5.180.181 \
+SUI_TLS_SELF_SIGNED=1 \
+SUI_TLS_SELF_SIGNED_DAYS=36500 \
+SUI_TLS_SELF_SIGNED_CN=163.5.180.181 \
+SUI_WEB_TLS_CERT=/app/cert/selfsigned/fullchain.pem \
+SUI_WEB_TLS_KEY=/app/cert/selfsigned/privkey.pem \
+python run.py deploy
+```
+
+Поведение:
+- если файлов по `SUI_WEB_TLS_CERT/SUI_WEB_TLS_KEY` нет, контейнер сгенерирует пару автоматически;
+- срок задаётся `SUI_TLS_SELF_SIGNED_DAYS` (например `36500`);
+- путь до сертификата/ключа полностью управляется env.
