@@ -1,0 +1,53 @@
+services:
+  masque-server-core:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.masque-e2e
+    image: sing-box-masque-e2e:local
+    container_name: masque-server-core
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/masque-server.json:/etc/sing-box/config.json:ro
+      - ./configs/masque-cert.pem:/etc/sing-box/cert.pem:ro
+      - ./configs/masque-key.pem:/etc/sing-box/key.pem:ro
+    command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    networks:
+      masque-public:
+      masque-backend:
+        ipv4_address: 10.200.0.3
+
+  masque-client-core:
+    image: sing-box-masque-e2e:local
+    container_name: masque-client-core
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ${MASQUE_CLIENT_CONFIG:-./configs/masque-client.json}:/etc/sing-box/config.json:ro
+    command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    depends_on:
+      - masque-server-core
+    networks:
+      masque-public:
+
+  iperf-server:
+    image: networkstatic/iperf3:latest
+    container_name: masque-iperf-server
+    command: ["-s", "-p", "5201"]
+    networks:
+      masque-backend:
+        ipv4_address: 10.200.0.2
+
+networks:
+  masque-public:
+    driver: bridge
+  masque-backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.200.0.0/24
