@@ -13,14 +13,6 @@
       <v-divider></v-divider>
       <v-card-text>
         <v-row>
-          <v-col cols="auto">
-            <v-checkbox v-model="exclude" :label="$t('main.backup.exclStats')" value="stats" hide-details></v-checkbox>
-          </v-col>
-          <v-col cols="auto">
-            <v-checkbox v-model="exclude" :label="$t('main.backup.exclChanges')" value="changes" hide-details></v-checkbox>
-          </v-col>
-        </v-row>
-        <v-row>
           <v-col cols="auto" align-self="center">
             <v-btn color="primary" @click="backup()" hide-details>{{ $t('main.backup.backup') }}</v-btn>
           </v-col>
@@ -44,15 +36,9 @@
 import HttpUtils from '@/plugins/httputil'
 export default {
   props: ['control', 'visible'],
-  data() {
-    return {
-      exclude: ["stats", "changes"],
-    }
-  },
   methods: {
     backup() {
-      const excludeOption = this.exclude.length>0 ? '?exclude=' +this.exclude.join(',') : ''
-      window.location.href = 'api/getdb' + excludeOption
+      window.location.href = 'api/getdb'
     },
     config() {
       window.location.href = 'api/singbox-config'
@@ -87,13 +73,6 @@ export default {
 
     fileInput.click()
     }
-  },
-  watch: {
-    visible(v) {
-      if (v) {
-        this.exclude = ["stats", "changes"]
-      }
-    },
   },
 }
 </script>

@@ -319,8 +319,7 @@ func (a *ApiService) GetNextL3PrivateSubnet(c *gin.Context) {
 }
 
 func (a *ApiService) GetDb(c *gin.Context) {
-	exclude := c.Query("exclude")
-	db, err := database.GetDb(exclude)
+	db, err := database.GetDb("")
 	if err != nil {
 		jsonMsg(c, "", err)
 		return

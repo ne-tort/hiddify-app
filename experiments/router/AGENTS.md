@@ -32,8 +32,11 @@
 
 - `udp` PASS через python runner.
 - `tcp_stream` PASS через python runner.
-- `tcp_ip` FAIL (dataplane bug в core, не runner).
+- `tcp_ip` smoke PASS (10KB, hash OK) через python runner.
+- strict bulk `10/20/50MB` в TUN-only режиме пока FAIL (loss/hash), требуется доработка packet-plane.
 
 ## Следующий шаг
 
-Довести `tcp_ip` до PASS без упрощений и без деградации `udp`/`tcp_stream`, затем зафиксировать стабильность серией повторных прогонов `--scenario all`.
+1) Закрыть bulk-gap в `stand/l3router/masque_stand_runner.py` + dataplane без упрощений и без shaping-by-default.  
+2) Держать observability в JSON-артефакте каждого `tcp_ip` прогона.  
+3) После каждого изменения обязательно прогонять `--scenario tcp_ip` и `--scenario all`.

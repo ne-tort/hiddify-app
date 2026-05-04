@@ -657,8 +657,8 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 		return false, err
 	}
 
-	// Build used set from endpoint interface addresses only; peer IPs are normalized below and
-	// re-added in order, so subnet migration can remap old peer /32 addresses safely.
+	// Build used set from endpoint interface addresses only; Pass A/B then reserve peer IPs in
+	// stable order so new peers cannot take the lowest free host before existing peers are reserved.
 	used := wgCollectUsedPeerIPs(nil, options)
 
 	for _, p := range manualPeers {
@@ -669,40 +669,6 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 		if peerKeyChanged {
 			changed = true
 		}
-		norm := wgNormalizeAllowedIPList(toStringSlice(p["allowed_ips"]))
-		if len(norm) == 0 {
-			if !poolOK {
-				return false, common.NewErrorf("%s endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation", epType)
-			}
-			ip := wgPickLowestFreePeerIP(used, poolPrefix)
-			p["allowed_ips"] = []string{ip}
-			used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
-			changed = true
-		} else {
-			if poolOK {
-				if rebased, rebasedChanged := wgRebasePeerAllowedIPsToPool(norm, poolPrefix, used); rebasedChanged {
-					norm = rebased
-					changed = true
-				}
-			}
-			if !slicesEqualString(norm, toStringSlice(p["allowed_ips"])) {
-				changed = true
-			}
-			p["allowed_ips"] = norm
-			for _, ip := range norm {
-				used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
-			}
-		}
-		current := intFromAny(p["persistent_keepalive_interval"])
-		if endpointKeepalive > 0 {
-			if current != endpointKeepalive {
-				p["persistent_keepalive_interval"] = endpointKeepalive
-				changed = true
-			}
-		} else if current > 0 {
-			delete(p, "persistent_keepalive_interval")
-			changed = true
-		}
 	}
 
 	managedPeers := make([]map[string]interface{}, 0, len(ids))
@@ -711,25 +677,6 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 		var allowedIPs []string
 		if existing != nil {
 			allowedIPs = wgNormalizeAllowedIPList(toStringSlice(existing["allowed_ips"]))
-			if poolOK {
-				if rebased, rebasedChanged := wgRebasePeerAllowedIPsToPool(allowedIPs, poolPrefix, used); rebasedChanged {
-					allowedIPs = rebased
-					changed = true
-				}
-			}
-		}
-		if len(allowedIPs) == 0 {
-			if !poolOK {
-				return false, common.NewErrorf("%s endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation", epType)
-			}
-			ip := wgPickLowestFreePeerIP(used, poolPrefix)
-			allowedIPs = []string{ip}
-			used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
-			changed = true
-		} else {
-			for _, ip := range allowedIPs {
-				used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
-			}
 		}
 		row := map[string]interface{}{
 			"client_id":   id.ClientID,
@@ -748,6 +695,40 @@ func (s *EndpointService) syncSingleWGFamilyEndpoint(tx *gorm.DB, endpoint *mode
 			row["persistent_keepalive_interval"] = endpointKeepalive
 		}
 		managedPeers = append(managedPeers, row)
+	}
+
+	if wgReserveAssignedAllowedIPs(used, manualPeers, poolOK, poolPrefix) {
+		changed = true
+	}
+	if wgReserveAssignedAllowedIPs(used, managedPeers, poolOK, poolPrefix) {
+		changed = true
+	}
+	assignChanged, err := wgAssignFreePeerIPs(used, manualPeers, poolOK, poolPrefix, epType)
+	if err != nil {
+		return false, err
+	}
+	if assignChanged {
+		changed = true
+	}
+	assignChanged2, err := wgAssignFreePeerIPs(used, managedPeers, poolOK, poolPrefix, epType)
+	if err != nil {
+		return false, err
+	}
+	if assignChanged2 {
+		changed = true
+	}
+
+	for _, p := range manualPeers {
+		current := intFromAny(p["persistent_keepalive_interval"])
+		if endpointKeepalive > 0 {
+			if current != endpointKeepalive {
+				p["persistent_keepalive_interval"] = endpointKeepalive
+				changed = true
+			}
+		} else if current > 0 {
+			delete(p, "persistent_keepalive_interval")
+			changed = true
+		}
 	}
 	sort.Slice(managedPeers, func(i, j int) bool {
 		li := strings.ToLower(fmt.Sprintf("%v", managedPeers[i]["client_name"]))
@@ -1233,6 +1214,95 @@ func wgPickLowestFreePeerIP(used map[string]struct{}, pool netip.Prefix) string 
 		}
 	}
 	return "0.0.0.0/0"
+}
+
+// wgCloneUsedIPSet returns a shallow copy of the reserved-IP key set (used between peers).
+func wgCloneUsedIPSet(used map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{}, len(used))
+	for k := range used {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
+// wgReserveAssignedAllowedIPs runs Pass A: rebase/normalize existing allowed_ips and reserve them in
+// `used` in stable peer order. If any normalized IP was already reserved by an earlier peer, this
+// peer loses its assignment (cleared) so Pass B can allocate a fresh free IP — avoids new peers
+// "stealing" the lowest host before earlier peers are processed.
+func wgReserveAssignedAllowedIPs(used map[string]struct{}, peers []map[string]interface{}, poolOK bool, poolPrefix netip.Prefix) bool {
+	changed := false
+	for _, p := range peers {
+		orig := wgNormalizeAllowedIPList(toStringSlice(p["allowed_ips"]))
+		if len(orig) == 0 {
+			continue
+		}
+		usedSnapshot := wgCloneUsedIPSet(used)
+		norm := append([]string(nil), orig...)
+		if poolOK {
+			rebased, rebasedChanged := wgRebasePeerAllowedIPsToPool(norm, poolPrefix, used)
+			norm = rebased
+			if rebasedChanged {
+				changed = true
+			}
+		}
+		conflict := false
+		for _, ip := range norm {
+			k := wgNormalizeAllowedIPKey(ip)
+			if k == "" {
+				continue
+			}
+			if _, existed := usedSnapshot[k]; existed {
+				conflict = true
+				break
+			}
+		}
+		if conflict {
+			for _, ip := range norm {
+				k := wgNormalizeAllowedIPKey(ip)
+				if k == "" {
+					continue
+				}
+				if _, had := usedSnapshot[k]; !had {
+					delete(used, k)
+				}
+			}
+			p["allowed_ips"] = []string{}
+			changed = true
+			continue
+		}
+		for _, ip := range norm {
+			if k := wgNormalizeAllowedIPKey(ip); k != "" {
+				used[k] = struct{}{}
+			}
+		}
+		if !slicesEqualString(norm, orig) {
+			changed = true
+		}
+		p["allowed_ips"] = norm
+	}
+	return changed
+}
+
+// wgAssignFreePeerIPs runs Pass B: assign lowest free /32 to peers with empty allowed_ips.
+func wgAssignFreePeerIPs(used map[string]struct{}, peers []map[string]interface{}, poolOK bool, poolPrefix netip.Prefix, epType string) (bool, error) {
+	changed := false
+	for _, p := range peers {
+		norm := wgNormalizeAllowedIPList(toStringSlice(p["allowed_ips"]))
+		if len(norm) > 0 {
+			continue
+		}
+		if !poolOK {
+			return false, common.NewErrorf("%s endpoint must include at least one valid IPv4 CIDR in address for peer auto-allocation", epType)
+		}
+		ip := wgPickLowestFreePeerIP(used, poolPrefix)
+		if ip == "0.0.0.0/0" {
+			return false, common.NewErrorf("%s endpoint pool has no free IPv4 addresses for peers", epType)
+		}
+		p["allowed_ips"] = []string{ip}
+		used[wgNormalizeAllowedIPKey(ip)] = struct{}{}
+		changed = true
+	}
+	return changed, nil
 }
 
 func wgValidateNoHostSubnetConflict(addresses []string) error {

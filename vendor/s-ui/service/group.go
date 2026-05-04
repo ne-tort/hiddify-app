@@ -354,7 +354,7 @@ func (s *GroupService) FillClientGroupIDs(tx *gorm.DB, clients *[]model.Client) 
 // SyncClientGroupMemberships replaces all group memberships for a client.
 func (s *GroupService) SyncClientGroupMemberships(tx *gorm.DB, clientID uint, groupIDs []uint) error {
 	if clientID == 0 {
-		return nil
+		return common.NewErrorf("sync groups: invalid client id (0)")
 	}
 	if err := tx.Where("client_id = ?", clientID).Delete(model.ClientGroupMember{}).Error; err != nil {
 		return err

@@ -22,6 +22,14 @@ func setupGroupACLTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+func TestSyncClientGroupMembership_ErrorsOnZeroClientID(t *testing.T) {
+	db := setupGroupACLTestDB(t)
+	gs := GroupService{}
+	if err := gs.SyncClientGroupMemberships(db, 0, nil); err == nil {
+		t.Fatal("expected error when client id is 0")
+	}
+}
+
 func setupGroupDeleteCleanupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})

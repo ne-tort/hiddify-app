@@ -10,25 +10,24 @@
 
 ## 2) Текущая задача
 
-Главный приоритет: довести до успеха `tcp_transport=connect_ip` (полноценный TCP-over-CONNECT-IP dataplane), без деградации:
+Главный приоритет: закрыть post-migration разрывы TUN-only `connect_ip` без деградации:
 
 - `connect_udp`;
 - `connect_stream`;
 - `warp_masque` (consumer + zero-trust).
 
-Контекст:
+Актуальный статус:
 
-- Базовый e2e entrypoint переведен на Python (`experiments/router/stand/l3router/masque_stand_runner.py`).
-- Для non-stress:
-  - `udp` — PASS;
-  - `tcp_stream` — PASS;
-  - `tcp_ip` — FAIL (корневой dataplane-блокер в core/endpoint, не в runner).
+- `udp` — PASS;
+- `tcp_stream` — PASS;
+- `tcp_ip` smoke (10KB) — PASS, hash OK.
+- strict bulk (`10/20/50MB` с бюджетом `N MB => N sec`) — PASS, hash/loss/budget OK.
 
 ## 3) Обязательные инварианты
 
 - Не ломать legacy `warp`.
 - Не делать скрытых миграций legacy путей.
-- Не отключать проверки/таймауты для "зеленого" отчета.
+- Не отключать проверки/таймауты для "зеленого" отчета, не увеличивать таймауты.
 - Сохранять fail-fast там, где контракт нарушен.
 - Держать прозрачные логи ошибок по классам (policy/capability/transport/dial/lifecycle).
 
@@ -37,6 +36,8 @@
 Обязательно прочитать:
 
 - `AGENTS.md` (этот файл).
+- `IDEAL-MASQUE-ARCHITECTURE.md` — идеальная слойная архитектура и контракты MASQUE (норматив для правок).
+- `MASQUE-ARCHITECTURE-GAP-CHECKLIST.md` — реестр расхождений с IDEAL и чекбокс-план исправления (обязательный трекер перед реализацией).
 - `hiddify-core/docs/masque-warp-architecture.md`
 - `hiddify-core/docs/masque-connect-ip-staged-closure.md`
 - `hiddify-core/docs/masque-perf-gates.md`
@@ -45,18 +46,14 @@
 
 - `hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go`
 - `hiddify-core/hiddify-sing-box/protocol/masque/endpoint_server.go`
-- `hiddify-core/hiddify-sing-box/transport/masque/transport.go`
-- `hiddify-core/hiddify-sing-box/transport/masque/tcp_over_ip.go`
+- `hiddify-core/hiddify-sing-box/transport/masque/transport.go` (в т.ч. `CoreClientFactory` / `DirectClientFactory`)
 - `hiddify-core/hiddify-sing-box/transport/masque/netstack_adapter.go`
-- `hiddify-core/hiddify-sing-box/transport/masque/m2_factory.go`
-- `hiddify-core/hiddify-sing-box/transport/masque/tcp_policy_planner.go`
 
 Ключевые тесты:
 
 - `hiddify-core/hiddify-sing-box/protocol/masque/endpoint_test.go`
 - `hiddify-core/hiddify-sing-box/transport/masque/netstack_adapter_test.go`
-- `hiddify-core/hiddify-sing-box/transport/masque/m2_factory_test.go`
-- `hiddify-core/hiddify-sing-box/transport/masque/transport_test.go`
+- `hiddify-core/hiddify-sing-box/transport/masque/transport_test.go` (в т.ч. тесты фабрики сессии)
 - `hiddify-core/hiddify-sing-box/common/masque/runtime_test.go`
 
 Стенд:
@@ -85,25 +82,17 @@
 
 ## 6) Задание для следующего ИИ (handoff)
 
-Цель: закрыть `tcp_ip` до PASS в реальном dataplane сценарии.
+Текущая цель: довести bulk-путь TUN-only CONNECT-IP до production-готовности и закрыть acceptance.
 
-Требования к подходу:
+Кратко по последней итерации:
 
-- Работать по RFC-паттернам CONNECT-IP и практикам sing-box/quic-go/connect-ip-go.
-- Использовать корректные go-паттерны конкурентности: bounded contexts, cancellation, ownership goroutines, deterministic lifecycle.
-- Не подменять реальный dataplane direct-диалами.
-- Поддерживать чистую классификацию ошибок и контрактов capability/policy.
+- В `masque_stand_runner.py` bulk sender для `tcp_ip` переведен на paced python UDP loop (вместо `head|pv|socat`) при сохранении strict budget.
+- Добавлен JSON-блок observability в результат `tcp_ip` (`connect_ip_ptb_rx_total`, `connect_ip_packet_write_fail_total`, `connect_ip_packet_read_exit_total`, `connect_ip_session_reset_total`).
+- На серверной границе CONNECT-IP (`connectIPNetPacketConn`) UDP путь нормализован до payload (без raw IP header leakage в route/sink).
+- Unit/race и non-stress e2e (`tcp_ip 10/20/50MB`, `all`) — PASS.
 
-Обязательная тактика работы:
+Следующий фокус:
 
-- Использовать субагентов:
-  - для сбора контекста по коду;
-  - для поиска внешних паттернов/референсов (GitHub, RFC);
-  - для независимой проверки гипотез и тестовых разрывов.
-- Делать короткие итерации: гипотеза → правка → `--scenario tcp_ip` → анализ логов → повтор.
-- После первого PASS по `tcp_ip` зафиксировать устойчивость: минимум 3 повторных прогона.
-
-Критерий готовности:
-
-- `udp`, `tcp_stream`, `tcp_ip` одновременно PASS через единый Python runner без ручных шагов.
-- Никаких упрощений, которые делают решение нерелевантным для реальных MASQUE серверов.
+- Удержать strict bulk `10/20/50MB` в green при последующих правках packet-plane.
+- Поддерживать non-legacy MASQUE контур (без `tcp_over_ip`/M2 planner хвостов), синхронизировать контракты и доки.
+- Перед кодовыми правками пройти чекбокс-план из `MASQUE-ARCHITECTURE-GAP-CHECKLIST.md` и отмечать пункты по мере закрытия.

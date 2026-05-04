@@ -6,15 +6,12 @@ import (
 	"io"
 	"mime/multipart"
 	"os"
-	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/alireza0/s-ui/cmd/migration"
 	"github.com/alireza0/s-ui/config"
-	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/util/common"
 
@@ -23,146 +20,18 @@ import (
 )
 
 func GetDb(exclude string) ([]byte, error) {
-	exclude_changes, exclude_stats := false, false
-	for _, table := range strings.Split(exclude, ",") {
-		if table == "changes" {
-			exclude_changes = true
-		} else if table == "stats" {
-			exclude_stats = true
-		}
+	_ = exclude
+
+	// Flush WAL into the main DB file to export a consistent raw snapshot.
+	if err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE);").Error; err != nil {
+		return nil, err
 	}
 
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	dbPath := config.GetDBPath()
+	fileContents, err := os.ReadFile(dbPath)
 	if err != nil {
 		return nil, err
 	}
-	dbPath := dir + config.GetName() + "_" + time.Now().Format("20060102-200203") + ".db"
-
-	backupDb, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(dbPath)
-
-	err = backupDb.AutoMigrate(
-		&model.Setting{},
-		&model.Tls{},
-		&model.Inbound{},
-		&model.Outbound{},
-		&model.Endpoint{},
-		&model.User{},
-		&model.Stats{},
-		&model.Client{},
-		&model.Changes{},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	var settings []model.Setting
-	var tls []model.Tls
-	var inbound []model.Inbound
-	var outbound []model.Outbound
-	var endpoint []model.Endpoint
-	var users []model.User
-	var clients []model.Client
-	var stats []model.Stats
-	var changes []model.Changes
-
-	// Perform scans and handle errors
-	if err := db.Model(&model.Setting{}).Scan(&settings).Error; err != nil {
-		return nil, err
-	} else if len(settings) > 0 {
-		if err := backupDb.Save(settings).Error; err != nil {
-			return nil, err
-		}
-	}
-	if err := db.Model(&model.Tls{}).Scan(&tls).Error; err != nil {
-		return nil, err
-	} else if len(tls) > 0 {
-		if err := backupDb.Save(tls).Error; err != nil {
-			return nil, err
-		}
-	}
-	if err := db.Model(&model.Inbound{}).Scan(&inbound).Error; err != nil {
-		return nil, err
-	} else if len(inbound) > 0 {
-		if err := backupDb.Save(inbound).Error; err != nil {
-			return nil, err
-		}
-	}
-	if err := db.Model(&model.Outbound{}).Scan(&outbound).Error; err != nil {
-		return nil, err
-	} else if len(outbound) > 0 {
-		if err := backupDb.Save(outbound).Error; err != nil {
-			return nil, err
-		}
-	}
-	if err := db.Model(&model.Endpoint{}).Scan(&endpoint).Error; err != nil {
-		return nil, err
-	} else if len(endpoint) > 0 {
-		if err := backupDb.Save(endpoint).Error; err != nil {
-			return nil, err
-		}
-	}
-	if err := db.Model(&model.User{}).Scan(&users).Error; err != nil {
-		return nil, err
-	} else if len(users) > 0 {
-		if err := backupDb.Save(users).Error; err != nil {
-			return nil, err
-		}
-	}
-	if err := db.Model(&model.Client{}).Scan(&clients).Error; err != nil {
-		return nil, err
-	} else if len(clients) > 0 {
-		if err := backupDb.Save(clients).Error; err != nil {
-			return nil, err
-		}
-	}
-
-	if !exclude_stats {
-		if err := db.Model(&model.Stats{}).Scan(&stats).Error; err != nil {
-			return nil, err
-		}
-		if len(stats) > 0 {
-			if err := backupDb.Save(stats).Error; err != nil {
-				return nil, err
-			}
-		}
-	}
-	if !exclude_changes {
-		if err := db.Model(&model.Changes{}).Scan(&changes).Error; err != nil {
-			return nil, err
-		}
-		if len(changes) > 0 {
-			if err := backupDb.Save(changes).Error; err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	// Update WAL
-	err = backupDb.Exec("PRAGMA wal_checkpoint;").Error
-	if err != nil {
-		return nil, err
-	}
-
-	bdb, _ := backupDb.DB()
-	bdb.Close()
-
-	// Open the file for reading
-	file, err := os.Open(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	// Read the file contents
-	fileContents, err := io.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
-
 	return fileContents, nil
 }
 

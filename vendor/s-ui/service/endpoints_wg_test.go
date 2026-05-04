@@ -93,3 +93,112 @@ func TestWGRebasePeerAllowedIPsToPool_ResolvesCollisions(t *testing.T) {
 	}
 }
 
+func wgTestPoolOptions() map[string]interface{} {
+	return map[string]interface{}{
+		"address": []interface{}{"10.5.0.1/24"},
+	}
+}
+
+func TestWGTwoPass_NewClientAlphabeticallyFirst_DoesNotStealIP(t *testing.T) {
+	opt := wgTestPoolOptions()
+	used := wgCollectUsedPeerIPs(nil, opt)
+	pool, ok := wgPeerPoolPrefixFromEndpointAddress(opt)
+	if !ok {
+		t.Fatal("expected pool")
+	}
+	// Order: alice (empty), bob .2, charlie .3 — same as collectWireGuardClientIdentities ASC by name.
+	managed := []map[string]interface{}{
+		{"client_name": "alice", "allowed_ips": []string{}},
+		{"client_name": "bob", "allowed_ips": []string{"10.5.0.2/32"}},
+		{"client_name": "charlie", "allowed_ips": []string{"10.5.0.3/32"}},
+	}
+	_ = wgReserveAssignedAllowedIPs(used, managed, true, pool)
+	if _, err := wgAssignFreePeerIPs(used, managed, true, pool, wireGuardType); err != nil {
+		t.Fatal(err)
+	}
+	if got := managed[0]["allowed_ips"].([]string)[0]; got != "10.5.0.4/32" {
+		t.Fatalf("alice want 10.5.0.4/32 got %q", got)
+	}
+	if got := managed[1]["allowed_ips"].([]string)[0]; got != "10.5.0.2/32" {
+		t.Fatalf("bob want .2 got %q", got)
+	}
+	if got := managed[2]["allowed_ips"].([]string)[0]; got != "10.5.0.3/32" {
+		t.Fatalf("charlie want .3 got %q", got)
+	}
+}
+
+func TestWGTwoPass_NewClientInMiddle_GetsNextFree(t *testing.T) {
+	opt := wgTestPoolOptions()
+	used := wgCollectUsedPeerIPs(nil, opt)
+	pool, ok := wgPeerPoolPrefixFromEndpointAddress(opt)
+	if !ok {
+		t.Fatal("expected pool")
+	}
+	managed := []map[string]interface{}{
+		{"client_name": "bob", "allowed_ips": []string{"10.5.0.2/32"}},
+		{"client_name": "charlie", "allowed_ips": []string{"10.5.0.3/32"}},
+		{"client_name": "dave", "allowed_ips": []string{}},
+		{"client_name": "eve", "allowed_ips": []string{"10.5.0.5/32"}},
+	}
+	if wgReserveAssignedAllowedIPs(used, managed, true, pool) {
+		t.Fatal("unexpected reserve change")
+	}
+	if _, err := wgAssignFreePeerIPs(used, managed, true, pool, wireGuardType); err != nil {
+		t.Fatal(err)
+	}
+	if got := managed[2]["allowed_ips"].([]string)[0]; got != "10.5.0.4/32" {
+		t.Fatalf("dave want 10.5.0.4/32 got %q", got)
+	}
+}
+
+func TestWGTwoPass_TwoPeersSameIP_FirstInOrderWins(t *testing.T) {
+	opt := wgTestPoolOptions()
+	used := wgCollectUsedPeerIPs(nil, opt)
+	pool, ok := wgPeerPoolPrefixFromEndpointAddress(opt)
+	if !ok {
+		t.Fatal("expected pool")
+	}
+	managed := []map[string]interface{}{
+		{"client_name": "alice", "allowed_ips": []string{"10.5.0.2/32"}},
+		{"client_name": "bob", "allowed_ips": []string{"10.5.0.2/32"}},
+	}
+	if !wgReserveAssignedAllowedIPs(used, managed, true, pool) {
+		t.Fatal("expected reserve to clear duplicate")
+	}
+	if _, err := wgAssignFreePeerIPs(used, managed, true, pool, wireGuardType); err != nil {
+		t.Fatal(err)
+	}
+	if got := managed[0]["allowed_ips"].([]string)[0]; got != "10.5.0.2/32" {
+		t.Fatalf("alice keeps .2 got %q", got)
+	}
+	if got := managed[1]["allowed_ips"].([]string)[0]; got != "10.5.0.3/32" {
+		t.Fatalf("bob reassigned to .3 got %q", got)
+	}
+}
+
+func TestWGTwoPass_ManualPeerEmpty_DoesNotStealAssignedIP(t *testing.T) {
+	opt := wgTestPoolOptions()
+	used := wgCollectUsedPeerIPs(nil, opt)
+	pool, ok := wgPeerPoolPrefixFromEndpointAddress(opt)
+	if !ok {
+		t.Fatal("expected pool")
+	}
+	// Stable order: first peer has .2, second has no IP — second must not take .2.
+	manual := []map[string]interface{}{
+		{"client_id": 0, "allowed_ips": []string{"10.5.0.2/32"}},
+		{"client_id": 0, "allowed_ips": []string{}},
+	}
+	if wgReserveAssignedAllowedIPs(used, manual, true, pool) {
+		t.Fatal("unexpected reserve change")
+	}
+	if _, err := wgAssignFreePeerIPs(used, manual, true, pool, wireGuardType); err != nil {
+		t.Fatal(err)
+	}
+	if got := manual[0]["allowed_ips"].([]string)[0]; got != "10.5.0.2/32" {
+		t.Fatalf("first manual keeps .2 got %q", got)
+	}
+	if got := manual[1]["allowed_ips"].([]string)[0]; got != "10.5.0.3/32" {
+		t.Fatalf("second manual want .3 got %q", got)
+	}
+}
+

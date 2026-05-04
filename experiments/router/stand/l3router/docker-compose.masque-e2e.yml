@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.masque-e2e
+      args:
+        SINGBOX_ARTIFACT_STAMP: ${SINGBOX_ARTIFACT_STAMP:-0}
     image: sing-box-masque-e2e:local
     container_name: masque-server-core
     cap_add:
@@ -36,9 +38,9 @@ services:
       masque-public:
 
   iperf-server:
-    image: networkstatic/iperf3:latest
+    image: sing-box-masque-e2e:local
     container_name: masque-iperf-server
-    command: ["-s", "-p", "5201"]
+    command: ["sleep", "infinity"]
     networks:
       masque-backend:
         ipv4_address: 10.200.0.2

@@ -301,11 +301,12 @@ export default {
       this.client.links = [
                         ...this.extLinks.filter(l => l.uri != ''),
                         ...this.subLinks.filter(l => l.uri != '')]
-      // Plain object + explicit group_ids so api/save JSON always includes group_ids (Vue proxy / key order quirks).
-      const payload = {
-        ...toRaw(this.client),
-        group_ids: (this.client.group_ids ?? []).map((x: number) => Number(x)),
-      }
+      // group_ids near the front of JSON: large client payloads use pretty-print over form encoding;
+      // truncation (reverse proxies / limits) more often eats the tail than the beginning.
+      const gids = (this.client.group_ids ?? []).map((x: number) => Number(x))
+      const plain = { ...toRaw(this.client) } as Record<string, unknown>
+      delete plain.group_ids
+      const payload = { group_ids: gids, ...plain }
       const success = await Data().save("clients", this.$props.id == 0 ? "new" : "edit", payload)
       if (success) this.closeModal()
       this.loading = false

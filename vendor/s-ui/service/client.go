@@ -125,11 +125,24 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, false, err
 		}
-		present, gids, perr := parseClientSaveGroupIDsField(data)
+		if act == "new" && client.Id == 0 {
+			return nil, false, common.NewErrorf("client save: failed to persist id")
+		}
+		present, gidsFromField, perr := parseClientSaveGroupIDsField(data)
 		if perr != nil {
 			return nil, false, perr
 		}
+		// Apply group memberships when the JSON declares group_ids AND for every new client
+		// (so memberships from unmarshaled model.Client.group_ids persist even if the raw
+		// payload parser misses the key — e.g. transport quirks — while edit without key
+		// keeps existing memberships).
+		var gids []uint
 		if present {
+			gids = gidsFromField
+		} else if act == "new" {
+			gids = cw.Client.GroupIds
+		}
+		if present || act == "new" {
 			gs := GroupService{}
 			if err = gs.SyncClientGroupMemberships(tx, client.Id, gids); err != nil {
 				return nil, false, err
@@ -180,14 +193,19 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		}
 		gs := GroupService{}
 		for i := range payloads {
-			present, gids, perr := parseClientSaveGroupIDsField(rawItems[i])
+			present, gidsFromField, perr := parseClientSaveGroupIDsField(rawItems[i])
 			if perr != nil {
 				return nil, false, perr
 			}
-			if present {
-				if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, gids); err != nil {
-					return nil, false, err
-				}
+			gids := gidsFromField
+			if !present {
+				gids = payloads[i].Client.GroupIds
+			}
+			if clients[i].Id == 0 {
+				return nil, false, common.NewErrorf("client save (bulk): failed to persist id")
+			}
+			if err = gs.SyncClientGroupMemberships(tx, clients[i].Id, gids); err != nil {
+				return nil, false, err
 			}
 		}
 		cids := make([]uint, len(clients))

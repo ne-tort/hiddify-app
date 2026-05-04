@@ -315,6 +315,7 @@ export default {
         }
       }
       const peers = Array.isArray(this.endpoint.peers) ? this.endpoint.peers : []
+      const seenAllowed = new Map<string, number>()
       for (let pi = 0; pi < peers.length; pi += 1) {
         const allowed = Array.isArray(peers[pi]?.allowed_ips) ? peers[pi].allowed_ips : []
         for (let ai = 0; ai < allowed.length; ai += 1) {
@@ -322,6 +323,12 @@ export default {
           if (!this.isCIDROrIPToken(n)) {
             return `${label} peer[${pi + 1}] allowed_ips invalid: ${String(allowed[ai])}`
           }
+          const key = n.toLowerCase()
+          const prev = seenAllowed.get(key)
+          if (prev !== undefined) {
+            return `${label} peer[${pi + 1}] allowed_ips duplicates peer[${prev + 1}]: ${n}`
+          }
+          seenAllowed.set(key, pi)
         }
       }
       return null

@@ -89,12 +89,17 @@ windows/sign.cer
 # Local reference clones for l3router research
 /experiments/router/reference-projects/
 
+# Shallow clones: connect-ip-go / mihomo / MASQUE VPN (study only; not tracked)
+/experiments/refs-connect-ip/
+
 # l3router local diagnostics artifacts
 /experiments/router/history-snapshots/
 /l3_before.json
 /l3_after.json
 /runtime_configs_vps.json
 /runtime_proxy_metrics.json
+/experiments/router/stand/l3router/runtime/
+/experiments/router/stand/l3router/artifacts/
 
 # s-ui stand deploy secrets
 vendor/s-ui/run.env
