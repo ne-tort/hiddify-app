@@ -62,10 +62,10 @@
 - **Направление фикса:** явно зафиксировать ограничение как контракт или добавить IPv6 bridge path.
 
 ### 9) MTU contract drift (`endpoint` vs `transport` clamp)
-- **Проблема:** endpoint принимает `mtu` до 65535, но transport clamp’ит effective ceiling до 1500.
-- **Где:** `protocol/masque/endpoint.go`, `transport/masque/transport.go`.
+- **Проблема:** endpoint принимает `mtu` до 65535, но transport clamp’ит effective ceiling до фиксированного верха (по умолчанию 1500).
+- **Где:** `protocol/masque/endpoint.go`, `transport/masque/transport.go`, `IDEAL-MASQUE-ARCHITECTURE.md` (контракт `tun_mtu` / `masque_datagram_ceiling`).
 - **Риск:** скрытое отличие ожиданий пользователя от фактического поведения.
-- **Направление фикса:** синхронизировать документацию/валидацию или изменить clamp/семантику параметра.
+- **Статус закрытия (частично):** документирован развод `tun_mtu` vs `masque_datagram_ceiling`; верх клампа вынесен в **`HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX`** (лабораторный jumbo); PTB при `DatagramTooLarge` берёт MTU из **`MaxDatagramPayloadSize`** (`third_party/connect-ip-go/conn.go`); **`warp_masque`** пробрасывает `ConnectIPDatagramCeiling` как generic `masque`. Полный jumbo end-to-end остаётся за interop/CI-политикой.
 
 ### 10) CONNECT-IP flow scoping не реализован (`target`/`ipproto` в URI template)
 - **Проблема:** отсутствует поддержка scoped CONNECT-IP URI variables (flow forwarding), интероп ограничен базовым режимом.
@@ -109,7 +109,7 @@
 - [ ] Реализовать IPv6 extension header walk для `ipproto` policy match (RFC 9484 §4.8).
 - [ ] Реализовать ICMP feedback на policy-drop (минимум для src/dst/proto reject путей).
 - [ ] Добавить gate на readiness QUIC DATAGRAM (после H3 SETTINGS) и тест ранней отправки.
-- [ ] Закрыть TODO в `composeDatagram` по egress checks (или зафиксировать ownership на другом слое).
+- [x] Закрыть TODO в `composeDatagram` по egress checks (или зафиксировать ownership на другом слое).
 
 ### B. Architecture consistency
 - [x] Убрать/заменить `TM.M2ClientFactory{}` на реальную factory strategy (`CoreClientFactory`/selector).
@@ -120,7 +120,7 @@
 - [x] Привести CI к единому entrypoint (`masque_stand_runner.py`) либо добавить проверку существования shell-wrapper до запуска.
 - [ ] Добавить PR-blocking CONNECT-IP negative control (сервер down -> ожидаемый fail).
 - [x] Добавить PR-blocking strict bulk gate (`10MB`, `20MB`, `50MB`) или эквивалентный blocking contract.
-- [ ] Вынести CONNECT-IP observability contract в явную проверку артефакта (`metrics/thresholds/error_class/result` + delta counters).
+- [x] Вынести CONNECT-IP observability contract в явную проверку артефакта (`metrics/thresholds/error_class/result` + delta counters).
 - [x] Добавить preflight-проверку существования всех вызываемых CI скриптов/entrypoints (fail-fast при отсутствии файла).
 - [x] Добавить проверку `runtime/masque_python_runner_summary.json` в PR artifact contract.
 - [x] Обновить CI trigger policy: изменения в `AGENTS.md`/`MASQUE-ARCHITECTURE-GAP-CHECKLIST.md`/`hiddify-core/docs/masque-*.md` должны запускать `masque-gates`.

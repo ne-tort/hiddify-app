@@ -16,7 +16,13 @@
   - **`tcp_transport = connect_ip` запрещён** в TUN-only; для TCP через IP-туннель используется netstack-путь при **`transport_mode = connect_ip`**.
 - **`MasqueTCPMode` / fallback:** режим **`masque_or_direct`** возможен только вместе с **`fallback_policy = direct_explicit`** (`endpoint.go`).
 - **`hop_policy = chain`:** обязательны **`hops`**, у каждого hop — **`server`** и **`server_port`**; **`tag`** без дубликатов; граф дополнительно проходит через **`CM.BuildChain`** (`common/masque`). Каждый hop не смешивает QUIC-потоки разных расширенных CONNECT.
-- **`mtu` (CONNECT-IP ceiling в конфиге):** допустимый диапазон на endpoint — **[1280, 65535]** при ненулевом значении; в transport-слое **`CoreClientFactory.NewSession`** жёстко **клампит эффективный потолок датаграммы в [1280, 1500]** (`transport/masque/transport.go`) — большое значение в JSON **не означает** больший QUIC datagram frame без согласования с этим клампом.
+- **`mtu` (CONNECT-IP ceiling в конфиге):** допустимый диапазон на endpoint — **[1280, 65535]** при ненулевом значении; в transport-слое **`CoreClientFactory.NewSession`** клампит эффективный потолок датаграммы в **[1280, верхний предел]** (`transport/masque/transport.go`). Верхний предел по умолчанию **1500** (interop с типичным QUIC path); для лабораторных jumbo-профилей можно поднять через **`HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX`** (целое, **1280..65535**), иначе игнорируется. Без этого переменная окружения **не** меняет прод-дефолт.
+- **Контракт MTU vs payload (не смешивать):**
+  - **`tun_mtu`**: локальный MTU TUN-интерфейса в ОС (вплоть до jumbo, напр. 9000) — ответственность платформы/инсталлятора; sing-box не подменяет его «магическим» числом из `mtu` outbound.
+  - **`masque_datagram_ceiling`**: верхняя граница размера **полного IP-датаграммы** (IPv4/IPv6), которую мы готовы упаковать в один HTTP/3 QUIC DATAGRAM для CONNECT-IP (после клампа — фактический `datagramCeiling` в `coreSession`). От неё зависят начальный UDP payload ceiling в `connectIPUDPPacketConn` и MTU gVisor NIC в netstack.
+  - **`quic_initial_packet_size`**: стартовый размер QUIC-пакета MASQUE-сессии (`transport/masque/transport.go`, `newMasqueQUICConfig`) — отдельный параметр пути; Path MTU discovery для QUIC управляется стеком quic-go и `quic_experimental`.
+  - **CONNECT-UDP (родной datagram path):** приложение шлёт **UDP payload**; при необходимости sing-box **нарезает** большие `WriteTo` на несколько QUIC DATAGRAM до `masqueUDPWriteMax` (связано с `datagramCeiling`, см. `masqueUDPDatagramSplitConn` в `transport/masque/transport.go`), чтобы не полагаться на неявное поведение клиента.
+  - **Payload на sink (CONNECT-IP):** после декапсуляции IP на серверной границе в UDP-туннель к бэкенду отдаётся **только UDP payload** (`connectIPNetPacketConn` в `protocol/masque/endpoint_server.go`); хэши/байты в тестах считаются по этому слою, а не по raw IP.
 - **`fallback_policy` / `tcp_mode`:** жёсткая связка **`masque_or_direct` ↔ `direct_explicit`** задаётся на валидации endpoint; внутри методов **`DialContext`/`ListenPacket`/`OpenIPSession`** в **`coreSession`** эти поля сами по себе режим CONNECT-UDP vs CONNECT-IP **не переключают** — поведение fallback реализуется выше (маршрут/outbound), см. матрицу в `masque-warp-architecture.md`.
 - **`fallback_policy = direct_explicit`:** не оправдывает параллельное открытие лишних CONNECT-UDP / CONNECT-IP сессий ради **`ListenPacket`** без явной спецификации.
 - **Несовместимые поля клиента:** при **`connect_ip`** не задаётся **`template_udp`**; при **`connect_udp`** — не **`template_ip`** (`endpoint.go`).
@@ -38,6 +44,7 @@
 ## 3. Слой Runtime (`common/masque`)
 
 - Единая точка входа **`Runtime`**: **`Start`** поднимает сессию к серверу, **`DialContext`** / **`ListenPacket`** работают только при **`Ready`**.
+- **Наблюдаемость состояния:** помимо **`IsReady()`** контракт расширен **`LifecycleState() State`** и **`LastError() error`**: **`IsReady()` ⇔ `LifecycleState()==Ready`**; при **`Degraded`/`Connecting`/`Reconnecting`** последняя ошибка старта/сессии доступна через **`LastError`** и **приклеивается** к сообщению «runtime is not ready» через **`errors.Join`** (без скрытия первопричины). Для **`Closed`** dial/listen возвращают явное **`runtime is closed`**.
 - **Переподключение:** до **3 попыток** `NewSession` с коротким backoff; состояния **`Init` → `Connecting` → `Ready` / `Degraded` / `Reconnecting` → `Closed`**; при старте новой сессии старая сессия и **`ipPlane`** сбрасываются согласованно (`runtime.go`).
 - При **`transport_mode == connect_ip`**: при **`Start`** один раз вызывается **`session.OpenIPSession`**, результат кэшируется в **`ipPlane`**; внешний **`OpenIPSession`** при готовности отдаёт тот же объект. На уровне **`coreSession`** повторные открытия IP-сессии переиспользуют общий **`connectip.Conn`** (`openIPSessionLocked` в `transport/masque/transport.go`).
 - **Владение CONNECT-IP:** закрытие обёртки **`connectIPPacketSession`** **не** разрывает общий **`connectip.Conn`** — teardown только у **`coreSession`** (`connectIPPacketSession.Close` возвращает `nil` умышленно), иначе гонки с packet-plane netstack.
@@ -77,6 +84,7 @@
 - Два допустимых **пути использования одной CONNECT-IP сессии** (разный контракт):
   - **Сырой IP:** пакеты от gVisor ⇒ **`WritePacket`/`ReadPacket`** без пересборки L4 (`transport/masque/netstack_adapter.go`).
   - **UDP-мост:** семантика `PacketConn` ⇒ IPv4/UDP оболочка (**`connectIPUDPPacketConn`**), фрагментация приложенческого UDP по effective payload и PMTU state.
+- **Текущее ограничение этапа:** `connectIPUDPPacketConn` в product-коде остается IPv4-only для UDP bridge (IPv6 UDP bridge пока не включен в контракт и CI как PASS-path).
 
 Обе ветви используют одну **`IPPacketSession`**, но не подменяют друг друга контрактом.
 
@@ -106,7 +114,7 @@
 ## 8. Верификация
 
 - **Основной операторский e2e:** **`experiments/router/stand/l3router/masque_stand_runner.py`** (сценарии `udp`, `tcp_stream`, `tcp_ip`, `all` — `AGENTS.md` §5).
-- **Bulk sender канон для `tcp_ip`:** в `bulk_single_flow` использовать управляемый pacing sender (python UDP loop с target bytes-per-second), а не burst pipeline `head|pv|socat`; это снижает userspace burst-loss и сохраняет строгий budget без искусственного ослабления таймаутов.
+- **Perf-канон текущего этапа:** основная оценка потолка делается через `tcp_ip_iperf` (`--scenario real`) при MTU 1500 и sweep по rate без искусственного shaping; `bulk_single_flow` оставлять только как контрактный integrity-check (hash/settle), а не как источник truth по производительности.
 - **Perf-gates / PR CI (документировано):** stand runner Python entrypoint (`masque_stand_runner.py`) + артефакты вида **`runtime/smoke_*_latest.json`**, **`runtime/*_perf_500mb_*.json`** под деревом стенда (имена перечислены в **`masque-perf-gates.md`**); workflow **`masque-gates`** / nightly **`masque-nightly-perf`** в **`hiddify-core/.github/workflows/ci.yml`**. Shell wrappers допустимы как локальная обвязка только если реально присутствуют в репозитории.
 - **CONNECT-IP closure (минимальный чеклист приёмки, из `masque-connect-ip-staged-closure.md`):** lifecycle teardown без гонок при ретраях/close; интеграционные кейсы dial/read/write/close, ретрай по временным ошибкам, fail-closed при **`strict_masque`**; в стабильных успешных прогонах **не** считать нормой типизированный **`ErrTCPStackInit`** при default factory.
 - Противоречие формулировок: файл **`masque-connect-ip-staged-closure.md`** исторически говорит «`tcp_transport=connect_ip` enabled» — **канон для IDEAL и кода** остаётся отказ **`tcp_transport=connect_ip`** на клиенте и TCP через **netstack + `transport_mode=connect_ip`** (`endpoint.go`); при правках staged-closure лучше выровнять текст к этой модели.

@@ -16,6 +16,12 @@ services:
       - ./configs/masque-cert.pem:/etc/sing-box/cert.pem:ro
       - ./configs/masque-key.pem:/etc/sing-box/key.pem:ro
     command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    healthcheck:
+      test: ["CMD-SHELL", "ss -lun | awk '$4 ~ /:8443$/ {found=1} END {exit !found}'"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 2s
     networks:
       masque-public:
       masque-backend:
@@ -30,10 +36,11 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
-      - ${MASQUE_CLIENT_CONFIG:-./configs/masque-client.json}:/etc/sing-box/config.json:ro
+      - ${MASQUE_CLIENT_CONFIG:-./configs/masque-client-connect-ip.json}:/etc/sing-box/config.json:ro
     command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
     depends_on:
-      - masque-server-core
+      masque-server-core:
+        condition: service_healthy
     networks:
       masque-public:
 

@@ -79,6 +79,8 @@
 - `--stress` (500MB) не использовать, пока не закрыт non-stress green.
 - Любой фикс в dataplane подтверждать повторным `--scenario all`.
 - После code fix — unit/race по затронутым пакетам обязательны.
+- При `--scenario all` с `--megabytes` > 1 (bulk) раннер выполняет **только `tcp_ip`**; bulk для `udp` / `tcp_stream` — отдельные вызовы с `--scenario udp|tcp_stream` и нужным `--megabytes`.
+- После smoke-прогона (`--scenario all` при 10KB по умолчанию) в `experiments/router/stand/l3router/runtime/` записываются **smoke_10kb_latest.json**, **smoke_tcp_connect_stream_latest.json**, **smoke_tcp_connect_ip_latest.json** — контракт полей проверяется шагом `Validate MASQUE smoke artifact contract` в `hiddify-core/.github/workflows/ci.yml`.
 
 ## 6) Задание для следующего ИИ (handoff)
 

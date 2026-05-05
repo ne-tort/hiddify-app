@@ -30,13 +30,14 @@
 
 ## Текущее состояние
 
-- `udp` PASS через python runner.
-- `tcp_stream` PASS через python runner.
-- `tcp_ip` smoke PASS (10KB, hash OK) через python runner.
-- strict bulk `10/20/50MB` в TUN-only режиме пока FAIL (loss/hash), требуется доработка packet-plane.
+Канон статуса strict bulk и smoke совпадает с корневым [`AGENTS.md`](../../AGENTS.md) репозитория: `udp` / `tcp_stream` / `tcp_ip` smoke и strict bulk `10/20/50MiB` для `tcp_ip` — ожидаемый зелёный контур.
 
 ## Следующий шаг
 
-1) Закрыть bulk-gap в `stand/l3router/masque_stand_runner.py` + dataplane без упрощений и без shaping-by-default.  
+1) Любые правки dataplane подтверждать `masque_stand_runner.py --scenario all` и при необходимости отдельными bulk-вызовами `tcp_ip`.  
 2) Держать observability в JSON-артефакте каждого `tcp_ip` прогона.  
-3) После каждого изменения обязательно прогонять `--scenario tcp_ip` и `--scenario all`.
+3) Smoke JSON для CI (`runtime/smoke_*_latest.json`) пишет сам раннер после прогона; не удалять шаг валидации в CI.
+
+## Примечание по `--scenario all` и bulk
+
+При `--megabytes` > 1 раннер с `--scenario all` оставляет в матрице только **`tcp_ip`** (см. сообщение в stdout раннера). Для bulk по `udp` или `tcp_stream` используйте отдельный `--scenario`.

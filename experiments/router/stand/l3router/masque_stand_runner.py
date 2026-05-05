@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -84,6 +85,27 @@ def main():
 main()
 """
 
+# TUN-routed CONNECT-UDP sender: one UDP socket; chunk must fit CONNECT-UDP/QUIC datagram path (see sing-box masqueUDPWriteMax).
+_UDP_TUN_DATAGRAM_SEND_PY = """import sys, socket, time
+N, host, port = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+CHUNK = int(sys.argv[4]) if len(sys.argv) > 4 else 960
+if CHUNK < 256 or CHUNK > 1152:
+    CHUNK = 960
+pause = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
+if pause < 0:
+    pause = 0.0
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+z = b"\\x00" * CHUNK
+sent = 0
+while sent < N:
+    n = min(CHUNK, N - sent)
+    s.sendto(z[:n], (host, port))
+    sent += n
+    if pause > 0:
+        time.sleep(pause)
+s.close()
+"""
+
 _TCP_IP_SEND_UDP_PACED = r"""import os, socket, time
 BYTE_COUNT = int(os.environ["MASQUE_UDP_SEND_BYTES"])
 DEST_HOST = os.environ["MASQUE_UDP_DEST_HOST"]
@@ -109,9 +131,98 @@ while sent < BYTE_COUNT:
 sock.close()
 """
 
+_TCP_IP_ICMP_PING = r"""import os, socket, struct, time
+DEST_HOST = os.environ["MASQUE_ICMP_DEST_HOST"]
+TIMEOUT_SEC = float(os.environ.get("MASQUE_ICMP_TIMEOUT_SEC", "3"))
+IDENT = int(os.environ.get("MASQUE_ICMP_IDENT", "4660")) & 0xffff
+SEQ = int(os.environ.get("MASQUE_ICMP_SEQ", "1")) & 0xffff
+PAYLOAD = b"masque-icmp-e2e"
+
+def checksum(data):
+    if len(data) % 2:
+        data += b"\x00"
+    s = 0
+    for i in range(0, len(data), 2):
+        s += (data[i] << 8) + data[i+1]
+        s = (s & 0xffff) + (s >> 16)
+    return (~s) & 0xffff
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+sock.settimeout(TIMEOUT_SEC)
+header = struct.pack("!BBHHH", 8, 0, 0, IDENT, SEQ)
+pkt = header + PAYLOAD
+cs = checksum(pkt)
+pkt = struct.pack("!BBHHH", 8, 0, cs, IDENT, SEQ) + PAYLOAD
+start = time.monotonic()
+sock.sendto(pkt, (DEST_HOST, 0))
+ok = False
+latency_ms = -1.0
+deadline = start + TIMEOUT_SEC
+while time.monotonic() < deadline:
+    try:
+        data, _ = sock.recvfrom(2048)
+    except socket.timeout:
+        break
+    if len(data) < 28:
+        continue
+    icmp = data[20:]
+    icmp_type, icmp_code, _csum, rid, rseq = struct.unpack("!BBHHH", icmp[:8])
+    if icmp_type == 0 and icmp_code == 0 and rid == IDENT and rseq == SEQ:
+        ok = True
+        latency_ms = (time.monotonic() - start) * 1000.0
+        break
+sock.close()
+print("ok=%s latency_ms=%.3f" % ("1" if ok else "0", latency_ms))
+raise SystemExit(0 if ok else 2)
+"""
+
 BYTES_10KB = 10 * 1024
 BYTES_500MB = 500 * 1024 * 1024
 SMOKE_DEADLINE_SEC = 5.0
+
+# Max application UDP payload per CONNECT-UDP QUIC datagram in sing-box MASQUE core
+# (see hiddify-sing-box/transport/masque `masqueUDPWriteHardCap`, ~1152 B). This is not
+# Ethernet MTU 1500: each user datagram is wrapped (IP/UDP + MASQUE/HTTP3 framing).
+MASQUE_STAND_UDP_CHUNK_MAX = 1152
+
+# CONNECT-UDP / connect_stream bulk: wall-clock caps derived from a **minimum acceptable**
+# goodput (relative to this baseline, decimal Mb/s). If the path cannot finish within
+# ``t50 * _BULK_STALL_MULT`` (with a small floor), the run fails fast instead of hanging
+# for hundreds of seconds on a stuck sender or half-filled sink.
+_BULK_HARNESS_BASELINE_MBPS = 50.0
+_BULK_STALL_MULT = 4.0
+_BULK_STALL_FLOOR_SEC = 90
+_BULK_SERVER_PAD_SEC = 90
+_BULK_WAIT_PAD_SEC = 45
+
+
+def _udp_tcp_stream_bulk_stall_wall_sec(byte_count: int) -> int:
+    """Max seconds for client send + receiver catch-up at bulk sizes (fail-fast if too slow)."""
+    if byte_count <= BYTES_10KB:
+        return 30
+    t50 = (byte_count * 8.0) / (_BULK_HARNESS_BASELINE_MBPS * 1_000_000.0)
+    return max(_BULK_STALL_FLOOR_SEC, int(math.ceil(t50 * _BULK_STALL_MULT)))
+
+
+def _udp_tcp_stream_bulk_harness_timeouts(byte_count: int) -> tuple[int, int, int]:
+    """
+    (server_socat_outer_timeout_sec, client_send_timeout_sec, wait_for_bytes_sec).
+
+    Smoke: short fixed caps. Bulk: ``_udp_tcp_stream_bulk_stall_wall_sec`` so a healthy
+    ~50 Mb/s path has headroom, a stalled path aborts within minutes, not hours.
+    """
+    if byte_count <= BYTES_10KB:
+        return (15, 20, 30)
+    client_sec = _udp_tcp_stream_bulk_stall_wall_sec(byte_count)
+    server_sec = client_sec + _BULK_SERVER_PAD_SEC
+    wait_sec = client_sec + _BULK_WAIT_PAD_SEC
+    return (server_sec, client_sec, wait_sec)
+
+
+def _theoretical_transfer_sec_at_mbps(byte_count: int, mbps: float) -> float:
+    if byte_count <= 0 or mbps <= 0:
+        return 0.0
+    return (byte_count * 8.0) / (mbps * 1_000_000.0)
 
 # bulk_single_flow: after paced `socat` finishes, QUIC/datagram + UDP sink can still
 # deliver the last sub-percent of MiB on busy Docker hosts; `wait_for_bytes` used
@@ -123,11 +234,6 @@ BULK_SINGLE_FLOW_RECEIVE_TAIL_PER_STRICT_SEC = 0.2
 BULK_SINGLE_FLOW_RECEIVE_TAIL_CAP_SEC = 60.0
 # Second-phase poll budget after primary wait (still capped by phase_deadline).
 BULK_SINGLE_FLOW_NEAR_COMPLETE_DRAIN_SEC = 10.0
-
-# Default `pv -L` for bulk when MASQUE_TCP_IP_RATE_LIMIT is unset: unlimited `head|socat`
-# bursts lose ~10%+ on the stand; ~1350 KiB/s balances loss vs MiB-sized wall gates
-# together with receive tail (settle polls + in-flight QUIC/UDP on Docker).
-TCP_IP_BULK_DEFAULT_RATE_LIMIT = "1350k"
 
 
 def bytes_from_megabytes_arg(mb: int) -> int:
@@ -156,6 +262,40 @@ def parse_rate_limit_to_bps(rate_limit: str) -> int:
         return 0
 
 
+def parse_iperf_rates(value: str) -> list[str]:
+    rates = []
+    for part in (value or "").split(","):
+        item = part.strip()
+        if item:
+            rates.append(item)
+    if not rates:
+        raise ValueError("no iperf rates provided")
+    return rates
+
+
+def parse_iperf_udp_result(raw: str) -> dict:
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("iperf json output not found")
+    payload = raw[start : end + 1]
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise ValueError("iperf output is not a json object")
+    end_block = data.get("end", {})
+    sum_block = end_block.get("sum", {})
+    receiver_block = end_block.get("sum_received", sum_block)
+    sender_block = end_block.get("sum_sent", sum_block)
+    return {
+        "sender_bps": float(sender_block.get("bits_per_second", 0.0) or 0.0),
+        "receiver_bps": float(receiver_block.get("bits_per_second", 0.0) or 0.0),
+        "lost_percent": float(receiver_block.get("lost_percent", 0.0) or 0.0),
+        "jitter_ms": float(receiver_block.get("jitter_ms", 0.0) or 0.0),
+        "packets": int(receiver_block.get("packets", 0) or 0),
+        "lost_packets": int(receiver_block.get("lost_packets", 0) or 0),
+    }
+
+
 def run(cmd, cwd=None, env=None, check=True):
     print(f"$ {' '.join(cmd)}")
     return subprocess.run(cmd, cwd=cwd, env=env, check=check, text=True)
@@ -182,6 +322,65 @@ def docker_exec_capture(docker, container, script):
 def docker_logs_capture(docker, container):
     result = run_capture([docker, "logs", container], cwd=ROOT)
     return (result.stdout or "") + (result.stderr or "")
+
+
+def _udp_tun_datagram_send_sh(
+    byte_count: int,
+    target_host: str,
+    port: int,
+    cli_to: int,
+    chunk: int = MASQUE_STAND_UDP_CHUNK_MAX,
+    pause_sec: float = 0.0,
+) -> str:
+    """Shell snippet: write small Python sender via base64 (robust on Windows Docker), run on client."""
+    b64 = base64.standard_b64encode(_UDP_TUN_DATAGRAM_SEND_PY.encode()).decode("ascii")
+    pause_s = f"{float(pause_sec):.6f}"
+    return (
+        f"ip route replace 10.200.0.0/24 dev tun0 2>/dev/null || true; "
+        f"printf '%s' '{b64}' | base64 -d > /tmp/udp_tun_send.py && "
+        f"timeout {int(cli_to)} python3 /tmp/udp_tun_send.py {int(byte_count)} {target_host} {port} {int(chunk)} {pause_s}"
+    )
+
+
+def _stand_udp_chunk(byte_count: int, udp_chunk: int) -> int:
+    if 256 <= int(udp_chunk) <= MASQUE_STAND_UDP_CHUNK_MAX:
+        return int(udp_chunk)
+    env_raw = (os.environ.get("MASQUE_STAND_UDP_CHUNK") or "").strip()
+    if env_raw:
+        try:
+            v = int(env_raw)
+            if 256 <= v <= MASQUE_STAND_UDP_CHUNK_MAX:
+                return v
+        except ValueError:
+            pass
+    if byte_count <= BYTES_10KB:
+        return 960
+    return MASQUE_STAND_UDP_CHUNK_MAX
+
+
+def _client_default_dev(docker) -> str:
+    out = docker_exec_capture(
+        docker, CLIENT_CONTAINER, "ip route show default 2>/dev/null | awk '{print $5; exit}'"
+    )
+    dev = (out or "eth0").strip()
+    return dev if dev else "eth0"
+
+
+def _netem_apply_loss(docker, loss_pct: float) -> None:
+    if loss_pct <= 0:
+        return
+    dev = _client_default_dev(docker)
+    docker_exec(
+        docker,
+        CLIENT_CONTAINER,
+        f"tc qdisc replace dev {dev} root netem loss {float(loss_pct)}%",
+        check=False,
+    )
+
+
+def _netem_clear(docker) -> None:
+    dev = _client_default_dev(docker)
+    docker_exec(docker, CLIENT_CONTAINER, f"tc qdisc del dev {dev} root 2>/dev/null || true", check=False)
 
 
 def compile_singbox():
@@ -250,7 +449,12 @@ def wait_tcp_listener(docker, container, port, timeout_sec=5):
     if probe_rc != 0:
         time.sleep(0.5)
         return
-    cmd = f"(ss -ltn 2>/dev/null | grep -q ':{port} ') || (netstat -ltn 2>/dev/null | grep -q ':{port} ')"
+    p = int(port)
+    cmd = (
+        f"(ss -ltn 2>/dev/null | grep -qF '0.0.0.0:{p}' || "
+        f"ss -ltn 2>/dev/null | grep -qF '*:{p}' || "
+        f"ss -ltn 2>/dev/null | grep -q \"[::]:{p}\")"
+    )
     while time.time() < deadline:
         rc = subprocess.run([docker, "exec", container, "sh", "-lc", cmd], cwd=ROOT, text=True).returncode
         if rc == 0:
@@ -261,7 +465,12 @@ def wait_tcp_listener(docker, container, port, timeout_sec=5):
 
 def wait_udp_listener(docker, container, port, timeout_sec=5):
     deadline = time.time() + timeout_sec
-    cmd = f"ss -lun | grep -q ':{port} '"
+    p = int(port)
+    cmd = (
+        f"(ss -lun 2>/dev/null | grep -qF '0.0.0.0:{p}' || "
+        f"ss -lun 2>/dev/null | grep -qF '*:{p}' || "
+        f"ss -lun 2>/dev/null | grep -q \"[::]:{p}\")"
+    )
     while time.time() < deadline:
         rc = subprocess.run([docker, "exec", container, "sh", "-lc", cmd], cwd=ROOT, text=True).returncode
         if rc == 0:
@@ -842,39 +1051,135 @@ def _connect_ip_accounting_confirmed(obs):
     return packet_tx > 0 and bytes_tx > 0
 
 
-def run_udp(docker, byte_count):
+def _parse_csv_ints(s, default):
+    raw = (s or "").strip()
+    if not raw:
+        return list(default)
+    out = []
+    for p in raw.split(","):
+        p = p.strip()
+        if p:
+            out.append(int(p))
+    return out if out else list(default)
+
+
+def _parse_csv_floats(s, default):
+    raw = (s or "").strip()
+    if not raw:
+        return list(default)
+    out = []
+    for p in raw.split(","):
+        p = p.strip()
+        if p:
+            out.append(float(p))
+    return out if out else list(default)
+
+
+def run_udp_matrix(docker, sizes_mib, rates_bps, losses, udp_chunk=0):
+    rows = []
+    overall_ok = True
+    for mib in sizes_mib:
+        bc = int(mib) * 1024 * 1024
+        for loss in losses:
+            for rate in rates_bps:
+                row = run_udp(docker, bc, udp_chunk=udp_chunk, udp_rate_bps=rate, udp_loss_pct=loss)
+                row["matrix_mib"] = int(mib)
+                row["matrix_rate_bps"] = int(rate)
+                row["matrix_loss_pct"] = float(loss)
+                rows.append(row)
+                overall_ok = overall_ok and bool(row.get("ok"))
+    return {
+        "scenario": "udp_matrix",
+        "rows": rows,
+        "ok": overall_ok,
+        "matrix_sizes_mib": list(sizes_mib),
+        "matrix_rates_bps": list(rates_bps),
+        "matrix_losses_pct": list(losses),
+    }
+
+
+def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
     target_host, port = "10.200.0.3", 5601
     sink = "/tmp/udp-python.bin"
-    docker_exec(docker, SERVER_CONTAINER, f"rm -f {sink}", check=False)
-    docker_exec(
-        docker,
-        SERVER_CONTAINER,
-        f"nohup timeout 15 socat -u -T1 UDP-RECVFROM:{port},reuseaddr,fork OPEN:{sink},creat,append >/tmp/udp-python.log 2>&1 &",
-    )
-    wait_udp_listener(docker, SERVER_CONTAINER, port)
+    srv_to, cli_to, wait_cap = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
+    chunk = _stand_udp_chunk(byte_count, udp_chunk)
+    if int(udp_rate_bps) > 0:
+        pause = float(chunk) / float(int(udp_rate_bps))
+    else:
+        raw = (os.environ.get("MASQUE_STAND_UDP_BULK_PAUSE") or "0").strip()
+        try:
+            pause = max(0.0, float(raw))
+        except ValueError:
+            pause = 0.0
+    _netem_clear(docker)
+    try:
+        _netem_apply_loss(docker, float(udp_loss_pct))
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            "pkill -f 'UDP4-LISTEN:5601' 2>/dev/null || pkill -f 'udp4-listen:5601' 2>/dev/null || true; sleep 0.15",
+            check=False,
+        )
+        docker_exec(docker, SERVER_CONTAINER, f"rm -f {sink}", check=False)
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            # UDP4-LISTEN: one process appends all datagrams (no fork+creat truncate races).
+            f"nohup timeout {srv_to} socat -u -T1 UDP4-LISTEN:{port},reuseaddr OPEN:{sink},creat,append >/tmp/udp-python.log 2>&1 &",
+        )
+        wait_udp_listener(docker, SERVER_CONTAINER, port)
 
-    start = time.time()
-    chunk = 1024
-    count = byte_count // chunk
-    send_cmd = (
-        f"timeout 20 sh -lc 'ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true; "
-        f"for i in $(seq 1 {count}); do dd if=/dev/zero bs={chunk} count=1 2>/dev/null | socat -u - UDP:{target_host}:{port}; done'"
-    )
-    docker_exec(docker, CLIENT_CONTAINER, send_cmd)
-    elapsed = time.time() - start
-    got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, 10 if byte_count == BYTES_10KB else 30)
-    ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC if byte_count == BYTES_10KB else got >= byte_count
-    return {"scenario": "udp", "bytes_expected": byte_count, "bytes_received": got, "elapsed_sec": round(elapsed, 3), "ok": ok}
+        start = time.time()
+        docker_exec(
+            docker,
+            CLIENT_CONTAINER,
+            _udp_tun_datagram_send_sh(byte_count, target_host, port, cli_to, chunk=chunk, pause_sec=pause),
+            check=False,
+        )
+        recv_wait = 10 if byte_count == BYTES_10KB else wait_cap
+        got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
+        elapsed = time.time() - start
+        if float(udp_loss_pct) > 0:
+            floor_ratio = max(0.85, 1.0 - (float(udp_loss_pct) + 4.0) / 100.0)
+            ok = int(got) >= int(float(byte_count) * floor_ratio)
+        elif byte_count == BYTES_10KB:
+            ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC
+        else:
+            ok = got >= byte_count
+        loss_b = max(0, int(byte_count) - int(got))
+        meas_loss = (100.0 * loss_b / float(byte_count)) if byte_count > 0 else 0.0
+        tm_elapsed = max(float(elapsed), 1e-9)
+        tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
+        t_min_50 = _theoretical_transfer_sec_at_mbps(byte_count, _BULK_HARNESS_BASELINE_MBPS)
+        return {
+            "scenario": "udp",
+            "metric_layer": "application_payload",
+            "bytes_expected": byte_count,
+            "bytes_received": got,
+            "elapsed_sec": round(elapsed, 3),
+            "throughput_mbps": tmetrics["throughput_mbps"],
+            "theoretical_min_sec_at_50mbps": round(t_min_50, 3),
+            "ok": ok,
+            "stand_udp_chunk_bytes": chunk,
+            "stand_udp_pause_sec": round(pause, 6),
+            "udp_send_rate_bps": int(udp_rate_bps) if int(udp_rate_bps) > 0 else None,
+            "injected_loss_pct": float(udp_loss_pct),
+            "measured_loss_pct_approx": round(meas_loss, 4),
+        }
+    finally:
+        _netem_clear(docker)
 
 
 def run_tcp_stream(docker, byte_count):
     target_host, port = "10.200.0.3", 5602
     sink = "/tmp/tcp-stream-python.bin"
+    srv_to, _, wait_cap = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
     docker_exec(docker, SERVER_CONTAINER, f"rm -f {sink}", check=False)
     docker_exec(
         docker,
         SERVER_CONTAINER,
-        f"nohup timeout 20 socat -u TCP-LISTEN:{port},reuseaddr,fork OPEN:{sink},creat,append >/tmp/tcp-stream-python.log 2>&1 &",
+        # Single acceptor: no fork (fork+creat per-connection can truncate the sink under bulk).
+        f"nohup timeout {srv_to} socat -u TCP-LISTEN:{port},reuseaddr OPEN:{sink},creat,append >/tmp/tcp-stream-python.log 2>&1 &",
     )
     wait_tcp_listener(docker, SERVER_CONTAINER, port)
     wait_socks_ready(docker)
@@ -918,10 +1223,23 @@ def run_tcp_stream(docker, byte_count):
             ],
             cwd=ROOT,
         )
+    recv_wait = 20 if byte_count == BYTES_10KB else wait_cap
+    got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
     elapsed = time.time() - start
-    got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, 20 if byte_count == BYTES_10KB else 30)
     ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC if byte_count == BYTES_10KB else got >= byte_count
-    return {"scenario": "tcp_stream", "bytes_expected": byte_count, "bytes_received": got, "elapsed_sec": round(elapsed, 3), "ok": ok}
+    tm_elapsed = max(float(elapsed), 1e-9)
+    tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
+    t_min_50 = _theoretical_transfer_sec_at_mbps(byte_count, _BULK_HARNESS_BASELINE_MBPS)
+    return {
+        "scenario": "tcp_stream",
+        "metric_layer": "application_payload",
+        "bytes_expected": byte_count,
+        "bytes_received": got,
+        "elapsed_sec": round(elapsed, 3),
+        "throughput_mbps": tmetrics["throughput_mbps"],
+        "theoretical_min_sec_at_50mbps": round(t_min_50, 3),
+        "ok": ok,
+    }
 
 
 def run_tcp_ip(
@@ -975,12 +1293,10 @@ def run_tcp_ip(
         send_cmd = (
             f"timeout {send_timeout} sh -lc 'ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true; "
             f"for i in $(seq 1 {count}); do dd if=/dev/zero bs={chunk} count=1 2>/dev/null | "
-            f"socat -u - UDP:{target_host}:{port} || exit 1; done'"
+            f"socat -u - UDP4:{target_host}:{port} || exit 1; done'"
         )
     else:
         send_rate_limit = os.environ.get("MASQUE_TCP_IP_RATE_LIMIT", "").strip()
-        if not send_rate_limit and byte_count > BYTES_10KB:
-            send_rate_limit = TCP_IP_BULK_DEFAULT_RATE_LIMIT
         # pv interprets "m" as decimal MB/s. Strict budget uses MiB sizing.
         # Normalize the common "1m" knob to a higher decimal rate so
         # strict 1 MiB/s budgets remain reachable despite UDP framing
@@ -1188,22 +1504,523 @@ def run_tcp_ip(
     }
 
 
-def run_scenario(docker, scenario, byte_count, tcp_ip_mode, tcp_ip_deadline_sec=None):
+def run_tcp_ip_icmp(docker, timeout_sec=5):
+    target_host = "10.200.0.2"
+    docker_exec(docker, CLIENT_CONTAINER, "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true")
+    started = time.time()
+    result = run_capture(
+        [
+            docker,
+            "exec",
+            "-e",
+            f"MASQUE_ICMP_DEST_HOST={target_host}",
+            "-e",
+            f"MASQUE_ICMP_TIMEOUT_SEC={timeout_sec}",
+            CLIENT_CONTAINER,
+            "python3",
+            "-c",
+            _TCP_IP_ICMP_PING,
+        ],
+        cwd=ROOT,
+    )
+    elapsed = time.time() - started
+    output = (result.stdout or "") + (result.stderr or "")
+    ok = "ok=1" in output
+    latency_ms = -1.0
+    for token in output.replace("\n", " ").split():
+        if token.startswith("latency_ms="):
+            try:
+                latency_ms = float(token.split("=", 1)[1])
+            except ValueError:
+                latency_ms = -1.0
+    return {
+        "scenario": "tcp_ip_icmp",
+        "bytes_expected": 1,
+        "bytes_received": 1 if ok else 0,
+        "elapsed_sec": round(elapsed, 3),
+        "latency_ms": round(latency_ms, 3) if latency_ms >= 0 else latency_ms,
+        "ok": ok,
+        "error": None if ok else output.strip(),
+    }
+
+
+def run_tcp_ip_iperf_matrix(
+    docker,
+    mtu,
+    rates,
+    duration_sec,
+    loss_threshold_pct,
+    min_delivery_ratio,
+):
+    target_host, port = "10.200.0.2", 5201
+    payload_len = max(1200, int(mtu) - 28)
+    docker_exec(docker, CLIENT_CONTAINER, "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true")
+    trials = []
+    for rate in rates:
+        docker_exec(
+            docker,
+            IPERF_CONTAINER,
+            f"pkill iperf3 2>/dev/null || true; nohup iperf3 -s -1 -p {port} >/tmp/iperf3-server.log 2>&1 &",
+        )
+        # iperf3 server advertises a TCP control listener on the same port;
+        # UDP flow setup depends on this control channel.
+        wait_tcp_listener(docker, IPERF_CONTAINER, port, timeout_sec=8)
+        cmd = (
+            f"timeout {int(duration_sec) + 10} "
+            f"iperf3 -c {target_host} -u -l {payload_len} -b {rate} -t {int(duration_sec)} -p {port} -J"
+        )
+        started = time.time()
+        error = None
+        sender_bps = 0.0
+        receiver_bps = 0.0
+        lost_percent = 100.0
+        jitter_ms = 0.0
+        packets = 0
+        lost_packets = 0
+        try:
+            result = subprocess.run(
+                [docker, "exec", CLIENT_CONTAINER, "sh", "-lc", cmd],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            merged_output = (result.stdout or "") + "\n" + (result.stderr or "")
+            parsed = parse_iperf_udp_result(merged_output)
+            sender_bps = parsed["sender_bps"]
+            receiver_bps = parsed["receiver_bps"]
+            lost_percent = parsed["lost_percent"]
+            jitter_ms = parsed["jitter_ms"]
+            packets = parsed["packets"]
+            lost_packets = parsed["lost_packets"]
+            if result.returncode != 0:
+                err_tail = (result.stderr or "").strip()
+                if len(err_tail) > 240:
+                    err_tail = err_tail[-240:]
+                error = f"iperf exit={result.returncode}" + (f": {err_tail}" if err_tail else "")
+        except Exception as exc:
+            error = str(exc)
+        elapsed = time.time() - started
+        target_bps = parse_rate_limit_to_bps(rate)
+        delivered_ratio = (receiver_bps / target_bps) if target_bps > 0 else 0.0
+        stable = (
+            error is None
+            and lost_percent <= loss_threshold_pct
+            and delivered_ratio >= min_delivery_ratio
+        )
+        trials.append(
+            {
+                "rate": rate,
+                "target_mbps": round(target_bps / 1_000_000.0, 3),
+                "sender_mbps": round(sender_bps / 1_000_000.0, 3),
+                "receiver_mbps": round(receiver_bps / 1_000_000.0, 3),
+                "delivery_ratio": round(delivered_ratio, 3),
+                "loss_pct": round(lost_percent, 3),
+                "jitter_ms": round(jitter_ms, 3),
+                "packets": packets,
+                "lost_packets": lost_packets,
+                "elapsed_sec": round(elapsed, 3),
+                "stable": stable,
+                "error": error,
+            }
+        )
+    stable_trials = [t for t in trials if t["stable"]]
+    highest = max(stable_trials, key=lambda t: t["receiver_mbps"]) if stable_trials else None
+    return {
+        "scenario": "tcp_ip_iperf",
+        "mode": "tun_rule_masque_real_udp",
+        "mtu": int(mtu),
+        "udp_payload_len": payload_len,
+        "duration_sec": int(duration_sec),
+        "loss_threshold_pct": loss_threshold_pct,
+        "min_delivery_ratio": min_delivery_ratio,
+        "trials": trials,
+        "stable_trial_count": len(stable_trials),
+        "highest_stable": highest,
+        "ok": len(stable_trials) > 0,
+    }
+
+
+def _tun_masque_iperf_budget_sec(byte_count: int) -> int:
+    """Wall-clock budget for iperf/socat trials (no multi-minute waits by default)."""
+    mb = max(1, int(math.ceil(byte_count / (1024 * 1024))))
+    return min(180, max(45, mb * 25 + 35))
+
+
+def run_connect_udp_via_tun_benchmark(docker, byte_count):
+    """
+    CONNECT-UDP: tun ingress -> route.final -> masque. Raw UDP (same tools as udp scenario).
+
+    Avoid iperf towards a tun-routed remote TCP port here: tunnel-originated TCP to a backend is a
+    separate upstream concern; this scenario measures TCP via SOCKS→connect_stream separately.
+
+    Listener on masque-server (10.200.0.3:5601), same contract as udp scenario.
+    """
+    target_host, port = "10.200.0.3", 5601
+    sink = "/tmp/udp-tun-bench.bin"
+    if byte_count <= BYTES_10KB:
+        budget = _tun_masque_iperf_budget_sec(byte_count)
+        server_outer = budget + 30
+        recv_poll_cap = min(180.0, float(budget) + 45)
+    else:
+        server_outer, budget, wait_cap = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
+        recv_poll_cap = float(wait_cap)
+    docker_exec(docker, SERVER_CONTAINER, f"rm -f {sink}", check=False)
+    docker_exec(
+        docker,
+        SERVER_CONTAINER,
+        (
+            f"nohup timeout {server_outer} socat -u -T1 UDP4-LISTEN:{port},reuseaddr OPEN:{sink},creat,append "
+            f">/tmp/udp-tun-bench.log 2>&1 &"
+        ),
+    )
+    wait_udp_listener(docker, SERVER_CONTAINER, port)
+    route_probe = docker_exec_capture(docker, CLIENT_CONTAINER, f"ip route get {target_host}")
+    elapsed_sec = -1.0
+    sender_mbps = 0.0
+    sender_bytes_sent = 0
+    sender_line = ""
+    if byte_count <= 0:
+        sender_line = "send_skipped_byte_count_zero"
+    else:
+        t0 = time.monotonic()
+        raw_pause = (os.environ.get("MASQUE_STAND_UDP_BULK_PAUSE") or "0").strip()
+        try:
+            bulk_pause = max(0.0, float(raw_pause))
+        except ValueError:
+            bulk_pause = 0.0
+        tun_chunk = _stand_udp_chunk(byte_count, 0)
+        docker_exec(
+            docker,
+            CLIENT_CONTAINER,
+            _udp_tun_datagram_send_sh(
+                byte_count, target_host, port, int(budget), chunk=tun_chunk, pause_sec=bulk_pause
+            ),
+            check=False,
+        )
+        elapsed_sec = max(0.0, time.monotonic() - t0)
+        sender_bytes_sent = int(byte_count)
+        sender_mbps = (byte_count * 8.0 / elapsed_sec / 1_000_000.0) if elapsed_sec > 0 else 0.0
+        sender_line = (
+            f"elapsed_sec={elapsed_sec:.6f} bytes_sent={sender_bytes_sent} mbps={sender_mbps:.6f} "
+            f"(python-udp chunk_datagram={tun_chunk}B)"
+        )
+
+    got = bytes_on_file(docker, SERVER_CONTAINER, sink)
+    recv_wait = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_poll_cap)
+    got = max(got, recv_wait)
+    recv_elapsed = elapsed_sec if elapsed_sec > 0 else 1.0
+    recv_mbps = (got * 8.0 / recv_elapsed / 1_000_000.0) if recv_elapsed > 0 else 0.0
+
+    return {
+        "flow": "connect_udp_via_tun_raw_udp",
+        "path_note": (
+            "tun -> route.final -> masque (CONNECT-UDP), raw UDP payload path. "
+            "TCP throughput is reported separately via SOCKS-bridged iperf (connect_stream)."
+        ),
+        "bytes_target": int(byte_count),
+        "bytes_received": int(got),
+        "route_probe": route_probe,
+        "sender_line": sender_line.strip(),
+        "elapsed_sec_sender": round(elapsed_sec, 6) if elapsed_sec >= 0 else -1.0,
+        "sender_mbps": round(sender_mbps, 3),
+        "receiver_mbps_approx": round(recv_mbps, 3),
+        "bytes_sent_actual": sender_bytes_sent,
+        "ok": got >= byte_count,
+    }
+
+
+def _parse_iperf_tcp_json(stdout: str) -> dict:
+    start = stdout.find("{")
+    end = stdout.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("iperf json output not found")
+    payload = stdout[start : end + 1]
+    data = json.loads(payload)
+    end_block = data.get("end", {})
+    sent = end_block.get("sum_sent", {})
+    recv = end_block.get("sum_received", {})
+    return {
+        "sender_bps": float(sent.get("bits_per_second", 0.0) or 0.0),
+        "receiver_bps": float(recv.get("bits_per_second", 0.0) or 0.0),
+        "seconds": float(recv.get("seconds", sent.get("seconds", 0.0)) or 0.0),
+        "bytes_sent": int(sent.get("bytes", 0) or 0),
+        "bytes_received": int(recv.get("bytes", 0) or 0),
+    }
+
+
+def _socks_iperf_tcp_kill_bridge(docker, client_container: str):
+    docker_exec(
+        docker,
+        client_container,
+        "pkill -f 'LISTEN:17111' 2>/dev/null || pkill -f 'tcp-listen:17111' 2>/dev/null || true",
+        check=False,
+    )
+
+
+def _socks_iperf_tcp_bridge_restart(docker, client_container: str):
+    docker_exec(docker, client_container, "rm -f /tmp/iperf-socat-last.json", check=False)
+    _socks_iperf_tcp_kill_bridge(docker, client_container)
+    time.sleep(0.2)
+    bridge = (
+        "nohup socat -lf/tmp/socat-tcp-bridge-iperf.log TCP-LISTEN:17111,fork,reuseaddr "
+        "SOCKS5-CONNECT:127.0.0.1:1080:10.200.0.2:5201 >/dev/null 2>&1 & "
+        "sleep 0.35; echo started"
+    )
+    docker_exec(docker, client_container, bridge, check=False)
+    wait_tcp_listener(docker, client_container, 17111, timeout_sec=25)
+
+
+def _run_iperf_trial(
+    docker, server_container, client_container, byte_count: int, reverse: bool, timeout_sec=120
+):
+    rev = " -R" if reverse else ""
+    docker_exec(
+        docker,
+        server_container,
+        "pkill iperf3 2>/dev/null || true; nohup iperf3 -s -1 -p 5201 >/tmp/iperf3-server.log 2>&1 &",
+    )
+    wait_tcp_listener(docker, server_container, 5201, timeout_sec=8)
+    _socks_iperf_tcp_bridge_restart(docker, client_container)
+    started = time.time()
+    iperf_shell = (
+        f"iperf3 -c 127.0.0.1 -p 17111 -n {int(byte_count)}{rev} -J > /tmp/iperf-socat-last.json 2>&1"
+    )
+    try:
+        result = subprocess.run(
+            [
+                docker,
+                "exec",
+                client_container,
+                "sh",
+                "-lc",
+                iperf_shell,
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - started
+        _socks_iperf_tcp_kill_bridge(docker, client_container)
+        return None, f"timeout_after_{timeout_sec}s", elapsed
+    elapsed = time.time() - started
+    _socks_iperf_tcp_kill_bridge(docker, client_container)
+
+    json_blob = docker_exec_capture(
+        docker, client_container, "cat /tmp/iperf-socat-last.json 2>/dev/null || true"
+    )
+    merged = (json_blob or "") + "\n" + (result.stdout or "") + "\n" + (result.stderr or "")
+    parsed = None
+    error = None
+    try:
+        parsed = _parse_iperf_tcp_json(merged)
+    except Exception as exc:
+        error = f"json_parse_failed: {exc}"
+    if result.returncode != 0:
+        tail = merged.strip().replace("\n", " ")
+        if len(tail) > 500:
+            tail = tail[-500:]
+        rc_msg = f"iperf exit={result.returncode}"
+        socat_tail = docker_exec_capture(
+            docker, client_container, "tail -c 240 /tmp/socat-tcp-bridge-iperf.log 2>/dev/null || true"
+        )
+        hint = socat_tail or tail
+        error = f"{rc_msg} diag={hint!r}"
+        if parsed is None:
+            error = f"{error} (iperf_json_missing)"
+    if parsed is not None and int(parsed.get("bytes_received", 0) or 0) >= int(byte_count * 0.97):
+        error = None
+    return parsed, error, elapsed
+
+
+def run_tun_rule_masque_perf(docker, byte_count):
+    budget = _tun_masque_iperf_budget_sec(byte_count)
+    docker_exec(docker, CLIENT_CONTAINER, "ip route replace 10.200.0.0/24 dev tun0")
+    route_probe = docker_exec_capture(docker, CLIENT_CONTAINER, "ip route get 10.200.0.2")
+    wait_socks_ready(docker)
+    time.sleep(0.35)
+    udp_payload = run_connect_udp_via_tun_benchmark(docker, byte_count)
+
+    tcp_fwd, tcp_fwd_err, tcp_fwd_elapsed = _run_iperf_trial(
+        docker,
+        IPERF_CONTAINER,
+        CLIENT_CONTAINER,
+        byte_count,
+        reverse=False,
+        timeout_sec=budget,
+    )
+    tcp_rev, tcp_rev_err, tcp_rev_elapsed = _run_iperf_trial(
+        docker,
+        IPERF_CONTAINER,
+        CLIENT_CONTAINER,
+        byte_count,
+        reverse=True,
+        timeout_sec=budget,
+    )
+
+    def tcp_row(name, parsed, err, elapsed):
+        if parsed:
+            sender_mbps = round(parsed["sender_bps"] / 1_000_000.0, 3)
+            receiver_mbps = round(parsed["receiver_bps"] / 1_000_000.0, 3)
+            sent_b = parsed["bytes_sent"]
+            recv_b = parsed["bytes_received"]
+        else:
+            sender_mbps = receiver_mbps = 0.0
+            sent_b = recv_b = 0
+        ok = err is None and recv_b > 0
+        return {
+            "flow": name,
+            "path_note": (
+                "socks-inbound -> outbound masque CONNECT-STREAM; local socat SOCKS5 bridges iperf TCP."
+            ),
+            "bytes_target": int(byte_count),
+            "bytes_sent": int(sent_b),
+            "bytes_received": int(recv_b),
+            "sender_mbps": sender_mbps,
+            "receiver_mbps": receiver_mbps,
+            "elapsed_sec": round(elapsed, 3),
+            "ok": ok,
+            "error": err,
+        }
+
+    rows = [
+        {
+            "flow": udp_payload["flow"],
+            "path_note": udp_payload["path_note"],
+            "bytes_target": udp_payload["bytes_target"],
+            "bytes_sent": udp_payload.get(
+                "bytes_sent_actual",
+                udp_payload["bytes_received"],
+            ),
+            "bytes_received": udp_payload["bytes_received"],
+            "sender_mbps": udp_payload["sender_mbps"],
+            "receiver_mbps_approx": udp_payload["receiver_mbps_approx"],
+            "elapsed_sec_sender": udp_payload["elapsed_sec_sender"],
+            "ok": udp_payload["ok"],
+            "route_probe": udp_payload["route_probe"],
+        },
+        tcp_row("tcp_stream_via_socks_iperf_forward", tcp_fwd, tcp_fwd_err, tcp_fwd_elapsed),
+        tcp_row("tcp_stream_via_socks_iperf_reverse", tcp_rev, tcp_rev_err, tcp_rev_elapsed),
+    ]
+    merged_ok = all(bool(row.get("ok")) for row in rows)
+    return {
+        "scenario": "tun_rule_masque_perf",
+        "bytes_expected": int(byte_count),
+        "bytes_received": int(byte_count) if merged_ok else 0,
+        "upstream_gap": (
+            "Tunnel-origin TCP to a tun-routed backend host is tracked separately from SOCKS→connect_stream; "
+            "UDP leg mirrors run_connect_udp_via_tun_benchmark at the same byte_count as TCP iperf rows."
+        ),
+        "byte_count_primary": int(byte_count),
+        "route_probe": route_probe,
+        "rows": rows,
+        "ok": merged_ok,
+    }
+
+
+def _write_masque_smoke_contract_files(results: list, byte_count: int) -> None:
+    """Write CI smoke JSON artifacts (see hiddify-core/.github/workflows/ci.yml)."""
+    if byte_count != BYTES_10KB:
+        return
+    mapping = {
+        "udp": ("smoke_10kb_latest.json", "connect_udp"),
+        "tcp_stream": ("smoke_tcp_connect_stream_latest.json", "connect_stream"),
+        "tcp_ip": ("smoke_tcp_connect_ip_latest.json", "connect_ip"),
+    }
+    min_b, max_ms = 10240, 5000
+    for row in results:
+        scen = row.get("scenario")
+        if scen not in mapping:
+            continue
+        fname, mode = mapping[scen]
+        elapsed_ms = int(round(float(row.get("elapsed_sec", 0) or 0) * 1000.0))
+        payload = {
+            "mode": mode,
+            "result": "true" if row.get("ok") else "false",
+            "metrics": {
+                "bytes_received": int(row.get("bytes_received", 0) or 0),
+                "elapsed_ms": elapsed_ms,
+            },
+            "thresholds": {"min_bytes": min_b, "max_elapsed_ms": max_ms},
+        }
+        (RUNTIME_DIR / fname).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def run_scenario(
+    docker,
+    scenario,
+    byte_count,
+    tcp_ip_mode,
+    tcp_ip_deadline_sec=None,
+    iperf_cfg=None,
+    udp_chunk=0,
+    udp_rate_bps=0,
+    udp_loss_pct=0.0,
+    udp_matrix_sizes_mib=None,
+    udp_matrix_rates_bps=None,
+    udp_matrix_losses_pct=None,
+):
     if scenario == "udp":
         compose_up(docker, DEFAULT_CLIENT_CONFIG)
-        return run_udp(docker, byte_count)
+        return run_udp(
+            docker,
+            byte_count,
+            udp_chunk=udp_chunk,
+            udp_rate_bps=udp_rate_bps,
+            udp_loss_pct=udp_loss_pct,
+        )
+    if scenario == "udp_matrix":
+        compose_up(docker, DEFAULT_CLIENT_CONFIG)
+        sizes = udp_matrix_sizes_mib or [10, 20]
+        rates = udp_matrix_rates_bps or [0]
+        losses = udp_matrix_losses_pct or [0.0]
+        return run_udp_matrix(docker, sizes, rates, losses, udp_chunk=udp_chunk)
     if scenario == "tcp_stream":
         compose_up(docker, DEFAULT_CLIENT_CONFIG)
         return run_tcp_stream(docker, byte_count)
     if scenario == "tcp_ip":
         compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
         return run_tcp_ip(docker, byte_count, mode=tcp_ip_mode, tcp_ip_deadline_sec=tcp_ip_deadline_sec)
+    if scenario == "tcp_ip_icmp":
+        compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+        return run_tcp_ip_icmp(docker, timeout_sec=5)
+    if scenario == "tcp_ip_iperf":
+        compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+        cfg = iperf_cfg or {}
+        return run_tcp_ip_iperf_matrix(
+            docker=docker,
+            mtu=cfg.get("mtu", 1500),
+            rates=cfg.get("rates", ["100M", "250M", "500M", "750M", "1G"]),
+            duration_sec=cfg.get("duration_sec", 20),
+            loss_threshold_pct=cfg.get("loss_threshold_pct", 1.0),
+            min_delivery_ratio=cfg.get("min_delivery_ratio", 0.85),
+        )
+    if scenario == "tun_rule_masque_perf":
+        compose_up(docker, DEFAULT_CLIENT_CONFIG)
+        return run_tun_rule_masque_perf(docker, byte_count)
     raise ValueError(f"unsupported scenario: {scenario}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Single entrypoint for MASQUE stand scenarios")
-    parser.add_argument("--scenario", choices=["udp", "tcp_stream", "tcp_ip", "all"], required=True)
+    parser.add_argument(
+        "--scenario",
+        choices=[
+            "udp",
+            "udp_matrix",
+            "tcp_stream",
+            "tcp_ip",
+            "tcp_ip_icmp",
+            "tcp_ip_iperf",
+            "tun_rule_masque_perf",
+            "all",
+            "real",
+        ],
+        required=True,
+    )
     parser.add_argument("--stress", action="store_true", help="run 500MB transfer instead of 10KB")
     parser.add_argument(
         "--megabytes",
@@ -1226,12 +2043,83 @@ def main():
         metavar="S",
         help="override tcp_ip wall-clock budget (default: ceil(MiB) for bulk; use on slow hosts to verify hash/integrity)",
     )
+    parser.add_argument("--mtu", type=int, default=1500, help="MTU target for CONNECT-IP real profile (default: 1500)")
+    parser.add_argument(
+        "--iperf-rates",
+        type=str,
+        default="100M,250M,500M,750M,1G",
+        help="comma-separated UDP rates for tcp_ip_iperf scenario (iperf syntax)",
+    )
+    parser.add_argument("--iperf-duration-sec", type=int, default=20, help="duration per iperf trial")
+    parser.add_argument("--iperf-loss-threshold-pct", type=float, default=1.0, help="max loss percent for stable trial")
+    parser.add_argument("--iperf-min-delivery-ratio", type=float, default=0.85, help="min receiver/target ratio for stable trial")
+    parser.add_argument(
+        "--udp-chunk-bytes",
+        type=int,
+        default=0,
+        metavar="B",
+        help=(
+            f"UDP stand sender application payload per datagram (256..{MASQUE_STAND_UDP_CHUNK_MAX}); "
+            "0=auto (smoke 960 B, bulk max CONNECT-UDP payload). Not L2 MTU — see MASQUE_STAND_UDP_CHUNK_MAX in runner."
+        ),
+    )
+    parser.add_argument(
+        "--udp-send-bps",
+        type=int,
+        default=0,
+        metavar="BPS",
+        help="pace UDP sender: inter-send pause = chunk/rate (0=no pacing; bulk default pause=0, override via MASQUE_STAND_UDP_BULK_PAUSE)",
+    )
+    parser.add_argument(
+        "--udp-loss-pct",
+        type=float,
+        default=0.0,
+        metavar="PCT",
+        help="tc netem loss on client default iface for udp/tcp_matrix (0=disabled)",
+    )
+    parser.add_argument(
+        "--udp-matrix-sizes-mib",
+        type=str,
+        default="10,20",
+        help="comma-separated MiB sizes for udp_matrix (default: 10,20)",
+    )
+    parser.add_argument(
+        "--udp-matrix-rates-bps",
+        type=str,
+        default="0",
+        help="comma-separated target send rates for udp_matrix (0=default pacing per row)",
+    )
+    parser.add_argument(
+        "--udp-matrix-loss-pct",
+        type=str,
+        default="0",
+        help="comma-separated loss %% rows for udp_matrix (e.g. 0,1); uses relaxed ok floor when >0",
+    )
     args = parser.parse_args()
 
     if args.stress and args.megabytes is not None:
         print("Note: --stress forces 500MB; ignoring --megabytes", flush=True)
     if args.megabytes is not None and args.megabytes < 1:
         parser.error("--megabytes must be >= 1")
+
+    if args.mtu < 1280 or args.mtu > 9000:
+        parser.error("--mtu must be in [1280, 9000]")
+    if args.iperf_duration_sec < 3:
+        parser.error("--iperf-duration-sec must be >= 3")
+    if args.iperf_min_delivery_ratio <= 0 or args.iperf_min_delivery_ratio > 1:
+        parser.error("--iperf-min-delivery-ratio must be in (0,1]")
+    if args.iperf_loss_threshold_pct < 0:
+        parser.error("--iperf-loss-threshold-pct must be >= 0")
+    if args.udp_chunk_bytes != 0 and (
+        args.udp_chunk_bytes < 256 or args.udp_chunk_bytes > MASQUE_STAND_UDP_CHUNK_MAX
+    ):
+        parser.error(f"--udp-chunk-bytes must be 0 or in [256, {MASQUE_STAND_UDP_CHUNK_MAX}]")
+    if args.udp_loss_pct < 0 or args.udp_loss_pct > 50:
+        parser.error("--udp-loss-pct must be in [0, 50]")
+    try:
+        iperf_rates = parse_iperf_rates(args.iperf_rates)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     docker = docker_bin()
     if args.stress:
@@ -1242,7 +2130,7 @@ def main():
         byte_count = BYTES_10KB
 
     if args.scenario == "all":
-        scenarios = ["udp", "tcp_stream", "tcp_ip"]
+        scenarios = ["udp", "tcp_stream", "tcp_ip", "tcp_ip_icmp"]
         if byte_count > BYTES_10KB:
             scenarios = ["tcp_ip"]
             print(
@@ -1250,29 +2138,53 @@ def main():
                 "(udp/tcp_stream harness is smoke-sized).",
                 flush=True,
             )
+    elif args.scenario == "real":
+        scenarios = ["tcp_ip_iperf"]
+    elif args.scenario == "udp_matrix":
+        scenarios = ["udp_matrix"]
     else:
         scenarios = [args.scenario]
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     compile_singbox()
 
+    iperf_cfg = {
+        "mtu": int(args.mtu),
+        "rates": iperf_rates,
+        "duration_sec": int(args.iperf_duration_sec),
+        "loss_threshold_pct": float(args.iperf_loss_threshold_pct),
+        "min_delivery_ratio": float(args.iperf_min_delivery_ratio),
+    }
+
     results = []
     overall_ok = True
     for scenario in scenarios:
         print(f"\n=== Running scenario: {scenario} ({byte_count} bytes) ===")
         try:
+            matrix_sizes = _parse_csv_ints(args.udp_matrix_sizes_mib, [10, 20])
+            matrix_rates = _parse_csv_ints(args.udp_matrix_rates_bps, [0])
+            matrix_losses = _parse_csv_floats(args.udp_matrix_loss_pct, [0.0])
             result = run_scenario(
                 docker,
                 scenario,
                 byte_count,
                 args.tcp_ip_mode,
                 tcp_ip_deadline_sec=args.tcp_ip_deadline_sec,
+                iperf_cfg=iperf_cfg,
+                udp_chunk=args.udp_chunk_bytes,
+                udp_rate_bps=args.udp_send_bps,
+                udp_loss_pct=args.udp_loss_pct,
+                udp_matrix_sizes_mib=matrix_sizes,
+                udp_matrix_rates_bps=matrix_rates,
+                udp_matrix_losses_pct=matrix_losses,
             )
         except Exception as exc:
             result = {"scenario": scenario, "bytes_expected": byte_count, "bytes_received": 0, "elapsed_sec": 0.0, "ok": False, "error": str(exc)}
         results.append(result)
         overall_ok = overall_ok and bool(result.get("ok"))
         print(json.dumps(result, ensure_ascii=True))
+
+    _write_masque_smoke_contract_files(results, byte_count)
 
     summary = {
         "stress": args.stress,

@@ -53,15 +53,41 @@ Machine-readable smoke gate artifact (latest run path):
 
 Automated smoke gate script:
 
-- `experiments/router/stand/l3router/scripts/masque_smoke_10kb_gate.sh`
+- `python experiments/router/stand/l3router/masque_stand_runner.py --scenario all`
 
 ## Observed Limits
 
 - `tcp_transport=connect_ip` is intentionally fail-fast blocked for production profiles until dedicated TCP-over-IP-plane implementation is completed.
-- `tcp_transport=connect_ip` is allowed only for staged testing with `MASQUE_EXPERIMENTAL_TCP_CONNECT_IP=1` and still not production-ready.
 - `tcp_transport=connect_stream` is the supported TCP MASQUE path in the current production track.
 - `tcp_mode=masque_or_direct` now exists and is policy-gated, but for the current stand topology (client without backend-network reachability) it cannot substitute true MASQUE TCP stream semantics.
-- `iperf3` full matrix remains blocked by control-channel dependence on TCP path over MASQUE.
+- Real perf ceiling is measured via `python experiments/router/stand/l3router/masque_stand_runner.py --scenario real --mtu 1500`.
+
+## Success Indicator Baseline (MTU 1500)
+
+Baseline artifact (latest run):
+
+- `experiments/router/stand/l3router/runtime/real_success_matrix_latest.json`
+
+Run profile:
+
+- `MASQUE_TCP_IP_DATAGRAM=1472`
+- `MASQUE_TCP_IP_UDP_PAYLOAD_CAP=1472`
+- scenarios: `tcp_ip` bulk `10/50/100/200/500MB` + control `rate=0` on `10MB`
+
+Current matrix:
+
+| Label | Rate | Size | Throughput (Mbps) | Loss (%) | Hash | Settled | Status |
+|---|---:|---:|---:|---:|---|---|---|
+| r0_10 | 0 | 10MB | 2.341 | 32.5864 | false | false | FAIL |
+| r12_10 | 12m | 10MB | 28.746 | 0.0 | true | true | PASS |
+| r12_50 | 12m | 50MB | 57.514 | 0.0 | true | true | PASS |
+| r12_100 | 12m | 100MB | 65.756 | 0.0 | true | true | PASS |
+| r12_200 | 12m | 200MB | 71.214 | 0.0 | true | true | PASS |
+| r12_500 | 12m | 500MB | 74.792 | 0.0 | true | true | PASS |
+| r16_50 | 16m | 50MB | 67.576 | 0.0 | true | true | PASS |
+| r16_200 | 16m | 200MB | 87.455 | 0.0 | true | true | PASS |
+| r20_50 | 20m | 50MB | 75.983 | 0.0 | true | true | PASS |
+| r20_200 | 20m | 200MB | 101.222 | 0.0 | true | true | PASS |
 
 ## Config Notes
 
