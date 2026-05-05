@@ -19,10 +19,24 @@ COMPOSE_FILE = ROOT / "docker-compose.masque-e2e.yml"
 RUNTIME_DIR = ROOT / "runtime"
 DEFAULT_CLIENT_CONFIG = "./configs/masque-client.json"
 CONNECT_IP_CLIENT_CONFIG = "./configs/masque-client-connect-ip.json"
+CONNECT_IP_SCOPED_CLIENT_CONFIG = "./configs/masque-client-connect-ip-scoped.json"
+CONNECT_IP_SCOPED_BAD_TARGET_CLIENT_CONFIG = "./configs/masque-client-connect-ip-scoped-bad-target.json"
+SERVER_CONFIG_DEFAULT = "./configs/masque-server.json"
+SERVER_CONFIG_SCOPED = "./configs/masque-server-scoped.json"
 
 SERVER_CONTAINER = "masque-server-core"
 CLIENT_CONTAINER = "masque-client-core"
 IPERF_CONTAINER = "masque-iperf-server"
+
+
+def skip_stand_compose_up() -> bool:
+    v = (os.environ.get("MASQUE_STAND_SKIP_COMPOSE_UP") or "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+def skip_stand_smoke_contract_files() -> bool:
+    v = (os.environ.get("MASQUE_STAND_SKIP_SMOKE_CONTRACT_FILES") or "").strip().lower()
+    return v in ("1", "true", "yes")
 
 # SOCKS5 CONNECT (no auth) over sing-box SOCKS inbound → MASQUE connect_stream dataplane.
 # Avoids/socat quirks with numeric IPv4 in SOCKS URLs on Alpine/busybox glues.
@@ -409,9 +423,10 @@ def compile_singbox():
         pass
 
 
-def compose_up(docker, client_config):
+def compose_up(docker, client_config, server_config=SERVER_CONFIG_DEFAULT):
     env = os.environ.copy()
     env["MASQUE_CLIENT_CONFIG"] = client_config
+    env["MASQUE_SERVER_CONFIG"] = server_config
     if ARTIFACT.is_file():
         env["SINGBOX_ARTIFACT_STAMP"] = hashlib.sha256(ARTIFACT.read_bytes()).hexdigest()
     run([docker, "compose", "-f", str(COMPOSE_FILE), "down", "-v"], cwd=ROOT, env=env, check=False)
@@ -665,7 +680,18 @@ def classify_error(err):
         return "dial_refused"
     if "closed network connection" in low:
         return "lifecycle_closed"
+    if "socks connect failed" in low or "socks handshake" in low or "socks connect bad" in low:
+        return "dial_failed"
+    if "receiver incomplete" in low or "budget exceeded" in low:
+        return "timeout"
     return "unknown"
+
+
+def _classified_error_bucket(text: str | None) -> str:
+    c = classify_error(text)
+    if c in {"none", "unknown"}:
+        return "transport_init"
+    return c
 
 
 def strict_timeout_sec(byte_count, floor_sec=1):
@@ -673,10 +699,27 @@ def strict_timeout_sec(byte_count, floor_sec=1):
     return max(floor_sec, int(math.ceil(mb)))
 
 
+def _safe_int(value, default=0):
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                return default
+    return default
+
+
 def _zero_observability_snapshot():
     return {
         "connect_ip_obs_contract_version": "v1",
         "connect_ip_session_id": "",
+        "connect_ip_scope_target": "",
+        "connect_ip_scope_ipproto": 0,
         "connect_ip_emit_seq": 0,
         "connect_ip_ptb_rx_total": 0,
         "connect_ip_packet_write_fail_total": 0,
@@ -699,6 +742,7 @@ def _zero_observability_snapshot():
         "connect_ip_engine_drop_total": 0,
         "connect_ip_engine_drop_reason_total": {},
         "connect_ip_engine_icmp_feedback_total": 0,
+        "connect_ip_policy_drop_icmp_reason_total": {},
         "connect_ip_session_reset_total": {},
     }
 
@@ -713,17 +757,25 @@ def _normalize_observability_snapshot(snapshot):
     session_id = snapshot.get("connect_ip_session_id")
     if isinstance(session_id, str):
         base["connect_ip_session_id"] = session_id.strip()
+    scope_target = snapshot.get("connect_ip_scope_target")
+    if isinstance(scope_target, str):
+        base["connect_ip_scope_target"] = scope_target.strip()
+    scope_ipproto = snapshot.get("connect_ip_scope_ipproto", 0)
+    base["connect_ip_scope_ipproto"] = _safe_int(scope_ipproto, 0)
     emit_seq = snapshot.get("connect_ip_emit_seq", 0)
     base["connect_ip_emit_seq"] = int(emit_seq) if isinstance(emit_seq, (int, float)) else 0
     for key in base:
         if key in {
             "connect_ip_obs_contract_version",
             "connect_ip_session_id",
+            "connect_ip_scope_target",
+            "connect_ip_scope_ipproto",
             "connect_ip_emit_seq",
             "connect_ip_session_reset_total",
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
             "connect_ip_engine_drop_reason_total",
+            "connect_ip_policy_drop_icmp_reason_total",
         }:
             continue
         value = snapshot.get(key, 0)
@@ -756,6 +808,13 @@ def _normalize_observability_snapshot(snapshot):
             if isinstance(value, (int, float)):
                 normalized[str(key)] = int(value)
         base["connect_ip_engine_drop_reason_total"] = normalized
+    icmp_reason_map = snapshot.get("connect_ip_policy_drop_icmp_reason_total", {})
+    if isinstance(icmp_reason_map, dict):
+        normalized = {}
+        for key, value in icmp_reason_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["connect_ip_policy_drop_icmp_reason_total"] = normalized
     return base
 
 
@@ -812,11 +871,14 @@ def _merge_observability_snapshot(primary, secondary):
         if key in {
             "connect_ip_obs_contract_version",
             "connect_ip_session_id",
+            "connect_ip_scope_target",
+            "connect_ip_scope_ipproto",
             "connect_ip_emit_seq",
             "connect_ip_session_reset_total",
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
             "connect_ip_engine_drop_reason_total",
+            "connect_ip_policy_drop_icmp_reason_total",
         }:
             continue
         merged[key] = max(int(merged.get(key, 0)), int(alt.get(key, 0)))
@@ -826,6 +888,12 @@ def _merge_observability_snapshot(primary, secondary):
     )
     if not merged.get("connect_ip_session_id"):
         merged["connect_ip_session_id"] = str(alt.get("connect_ip_session_id", "") or "")
+    if not merged.get("connect_ip_scope_target"):
+        merged["connect_ip_scope_target"] = str(alt.get("connect_ip_scope_target", "") or "")
+    merged["connect_ip_scope_ipproto"] = max(
+        _safe_int(merged.get("connect_ip_scope_ipproto", 0), 0),
+        _safe_int(alt.get("connect_ip_scope_ipproto", 0), 0),
+    )
     merged["connect_ip_emit_seq"] = max(
         int(merged.get("connect_ip_emit_seq", 0)),
         int(alt.get("connect_ip_emit_seq", 0)),
@@ -835,6 +903,7 @@ def _merge_observability_snapshot(primary, secondary):
         "connect_ip_packet_write_fail_reason_total",
         "connect_ip_packet_read_drop_reason_total",
         "connect_ip_engine_drop_reason_total",
+        "connect_ip_policy_drop_icmp_reason_total",
     ):
         result = dict(merged.get(map_key, {}))
         for reason, value in dict(alt.get(map_key, {})).items():
@@ -864,16 +933,21 @@ def _diff_observability(before, after):
     delta = _zero_observability_snapshot()
     delta["connect_ip_obs_contract_version"] = after.get("connect_ip_obs_contract_version", "v1")
     delta["connect_ip_session_id"] = str(after.get("connect_ip_session_id", "") or "")
+    delta["connect_ip_scope_target"] = str(after.get("connect_ip_scope_target", "") or "")
+    delta["connect_ip_scope_ipproto"] = _safe_int(after.get("connect_ip_scope_ipproto", 0), 0)
     delta["connect_ip_emit_seq"] = max(0, int(after.get("connect_ip_emit_seq", 0)) - int(before.get("connect_ip_emit_seq", 0)))
     for key in delta:
         if key in {
             "connect_ip_obs_contract_version",
             "connect_ip_session_id",
+            "connect_ip_scope_target",
+            "connect_ip_scope_ipproto",
             "connect_ip_emit_seq",
             "connect_ip_session_reset_total",
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
             "connect_ip_engine_drop_reason_total",
+            "connect_ip_policy_drop_icmp_reason_total",
         }:
             continue
         delta[key] = max(0, int(after.get(key, 0)) - int(before.get(key, 0)))
@@ -909,6 +983,14 @@ def _diff_observability(before, after):
         if diff > 0:
             engine_drop_reasons[reason] = diff
     delta["connect_ip_engine_drop_reason_total"] = engine_drop_reasons
+    before_icmp_reasons = before.get("connect_ip_policy_drop_icmp_reason_total", {})
+    after_icmp_reasons = after.get("connect_ip_policy_drop_icmp_reason_total", {})
+    icmp_reasons = {}
+    for reason, value in after_icmp_reasons.items():
+        diff = int(value) - int(before_icmp_reasons.get(reason, 0))
+        if diff > 0:
+            icmp_reasons[reason] = diff
+    delta["connect_ip_policy_drop_icmp_reason_total"] = icmp_reasons
     return delta
 
 
@@ -948,20 +1030,25 @@ def connect_ip_observability(docker, before_client_logs, before_server_logs):
         )
     delta = _diff_observability(before, after)
     numeric_delta_nonzero = any(
-        int(delta.get(key, 0)) > 0
+        _safe_int(delta.get(key, 0), 0) > 0
         for key in delta
         if key not in {
             "connect_ip_obs_contract_version",
             "connect_ip_session_id",
+            "connect_ip_scope_target",
+            "connect_ip_scope_ipproto",
             "connect_ip_emit_seq",
             "connect_ip_session_reset_total",
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
+            "connect_ip_policy_drop_icmp_reason_total",
         }
     )
     map_delta_nonzero = any(delta.get("connect_ip_session_reset_total", {}).values()) or any(
         delta.get("connect_ip_packet_write_fail_reason_total", {}).values()
-    ) or any(delta.get("connect_ip_packet_read_drop_reason_total", {}).values())
+    ) or any(delta.get("connect_ip_packet_read_drop_reason_total", {}).values()) or any(
+        delta.get("connect_ip_policy_drop_icmp_reason_total", {}).values()
+    )
     observability_gap = runtime_marker_seen and not (numeric_delta_nonzero or map_delta_nonzero)
     return {
         "source": source,
@@ -1044,10 +1131,10 @@ def _connect_ip_accounting_confirmed(obs):
     delta = obs.get("delta", {})
     if not isinstance(delta, dict):
         return False
-    if int(delta.get("connect_ip_bypass_listenpacket_total", 0)) > 0:
+    if _safe_int(delta.get("connect_ip_bypass_listenpacket_total", 0), 0) > 0:
         return False
-    packet_tx = int(delta.get("connect_ip_packet_tx_total", 0))
-    bytes_tx = int(delta.get("connect_ip_bytes_tx_total", 0))
+    packet_tx = _safe_int(delta.get("connect_ip_packet_tx_total", 0), 0)
+    bytes_tx = _safe_int(delta.get("connect_ip_bytes_tx_total", 0), 0)
     return packet_tx > 0 and bytes_tx > 0
 
 
@@ -1151,7 +1238,7 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
         tm_elapsed = max(float(elapsed), 1e-9)
         tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
         t_min_50 = _theoretical_transfer_sec_at_mbps(byte_count, _BULK_HARNESS_BASELINE_MBPS)
-        return {
+        payload = {
             "scenario": "udp",
             "metric_layer": "application_payload",
             "bytes_expected": byte_count,
@@ -1166,6 +1253,16 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
             "injected_loss_pct": float(udp_loss_pct),
             "measured_loss_pct_approx": round(meas_loss, 4),
         }
+        if ok:
+            payload["error"] = None
+            payload["error_class"] = "none"
+            payload["error_source"] = "none"
+        else:
+            hint = "timeout" if got < byte_count else "deadlineExceeded"
+            payload["error"] = hint
+            payload["error_class"] = _classified_error_bucket(hint)
+            payload["error_source"] = "runtime"
+        return payload
     finally:
         _netem_clear(docker)
 
@@ -1186,6 +1283,7 @@ def run_tcp_stream(docker, byte_count):
     time.sleep(0.35)
 
     start = time.time()
+    exec_err = None
     try:
         run(
             [
@@ -1204,32 +1302,53 @@ def run_tcp_stream(docker, byte_count):
             ],
             cwd=ROOT,
         )
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as exc:
         time.sleep(0.35)
-        run(
-            [
-                docker,
-                "exec",
-                "-e",
-                f"MASQUE_TCPSEND_BYTES={byte_count}",
-                "-e",
-                f"MASQUE_DST_HOST={target_host}",
-                "-e",
-                f"MASQUE_DST_PORT={port}",
-                CLIENT_CONTAINER,
-                "python3",
-                "-c",
-                _TCP_STREAM_SEND_SOCKS5,
-            ],
-            cwd=ROOT,
-        )
+        try:
+            run(
+                [
+                    docker,
+                    "exec",
+                    "-e",
+                    f"MASQUE_TCPSEND_BYTES={byte_count}",
+                    "-e",
+                    f"MASQUE_DST_HOST={target_host}",
+                    "-e",
+                    f"MASQUE_DST_PORT={port}",
+                    CLIENT_CONTAINER,
+                    "python3",
+                    "-c",
+                    _TCP_STREAM_SEND_SOCKS5,
+                ],
+                cwd=ROOT,
+            )
+        except subprocess.CalledProcessError as exc2:
+            parts = [str(exc2)]
+            if exc2.stderr:
+                parts.append(f"stderr={exc2.stderr!r}")
+            if exc2.stdout:
+                parts.append(f"stdout={exc2.stdout!r}")
+            exec_err = " ".join(parts)
     recv_wait = 20 if byte_count == BYTES_10KB else wait_cap
     got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
     elapsed = time.time() - start
     ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC if byte_count == BYTES_10KB else got >= byte_count
+    if exec_err:
+        ok = False
+    err_msg = exec_err
+    if not ok and not err_msg and got < byte_count:
+        err_msg = "receiver incomplete"
     tm_elapsed = max(float(elapsed), 1e-9)
     tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
     t_min_50 = _theoretical_transfer_sec_at_mbps(byte_count, _BULK_HARNESS_BASELINE_MBPS)
+    err_class = "none"
+    err_source = "none"
+    if ok:
+        out_err = None
+    else:
+        out_err = err_msg
+        err_class = _classified_error_bucket(err_msg)
+        err_source = "runtime"
     return {
         "scenario": "tcp_stream",
         "metric_layer": "application_payload",
@@ -1239,6 +1358,9 @@ def run_tcp_stream(docker, byte_count):
         "throughput_mbps": tmetrics["throughput_mbps"],
         "theoretical_min_sec_at_50mbps": round(t_min_50, 3),
         "ok": ok,
+        "error": out_err,
+        "error_class": err_class,
+        "error_source": err_source,
     }
 
 
@@ -1443,13 +1565,13 @@ def run_tcp_ip(
     obs_delta = observability.get("delta", {}) if isinstance(observability, dict) else {}
     reset_delta = obs_delta.get("connect_ip_session_reset_total", {}) if isinstance(obs_delta, dict) else {}
     runtime_health_ok = (
-        int(obs_delta.get("connect_ip_packet_write_fail_total", 0)) == 0
-        and int(obs_delta.get("connect_ip_packet_read_exit_total", 0)) == 0
-        and sum(int(v) for v in reset_delta.values()) == 0
+        _safe_int(obs_delta.get("connect_ip_packet_write_fail_total", 0), 0) == 0
+        and _safe_int(obs_delta.get("connect_ip_packet_read_exit_total", 0), 0) == 0
+        and sum(_safe_int(v, 0) for v in reset_delta.values()) == 0
     )
     observability_ok = (
         accounting_confirmed
-        and int(obs_delta.get("connect_ip_bypass_listenpacket_total", 0)) == 0
+        and _safe_int(obs_delta.get("connect_ip_bypass_listenpacket_total", 0), 0) == 0
         and runtime_health_ok
     )
     integrity_ok = hash_ok and settled
@@ -1471,9 +1593,16 @@ def run_tcp_ip(
     if byte_count == BYTES_10KB:
         throughput_ok = throughput_ok and send_elapsed <= SMOKE_DEADLINE_SEC
     ok = throughput_ok and integrity_ok and observability_ok
+    if not ok and classify_error(send_err) == "none":
+        if stop_reason in {"budget_exceeded", "receiver_incomplete", "receiver_not_settled", "hash_mismatch"}:
+            error_class = "timeout"
+        else:
+            error_class = "transport_init"
     return {
         "scenario": "tcp_ip",
         "mode": mode,
+        "connect_ip_udp_bridge_contract": "ipv4_only",
+        "connect_ip_udp_bridge_ipv6_supported": False,
         "bytes_expected": byte_count,
         "bytes_received": got,
         "elapsed_sec": round(elapsed, 3),
@@ -1500,6 +1629,7 @@ def run_tcp_ip(
         "observability": observability,
         "error": send_err,
         "error_class": error_class,
+        "error_source": "none" if ok else "runtime",
         "ok": ok,
     }
 
@@ -1541,6 +1671,518 @@ def run_tcp_ip_icmp(docker, timeout_sec=5):
         "latency_ms": round(latency_ms, 3) if latency_ms >= 0 else latency_ms,
         "ok": ok,
         "error": None if ok else output.strip(),
+    }
+
+
+def _run_malformed_scoped_harness() -> dict:
+    """Collect malformed scoped target classes from fast go runtime harness."""
+    artifact_path = RUNTIME_DIR / "malformed_scoped_runtime.json"
+    if artifact_path.exists():
+        artifact_path.unlink()
+    env = os.environ.copy()
+    env["MASQUE_MALFORMED_SCOPED_ARTIFACT_PATH"] = str(artifact_path)
+    cmd = [
+        "go",
+        "test",
+        "-count=1",
+        "./common/masque",
+        "-tags",
+        "with_masque",
+        "-run",
+        "TestRuntimeMalformedScopedFlowClassifiedAsCapability",
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=CORE_DIR,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_harness_failed rc={result.returncode}",
+            "go_test_output_tail": output[-4000:],
+        }
+    if not artifact_path.exists():
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": "go_harness_missing_artifact",
+            "go_test_output_tail": output[-4000:],
+        }
+    try:
+        data = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_harness_bad_artifact_json: {exc}",
+            "go_test_output_tail": output[-4000:],
+        }
+    return {
+        "ok": bool(data.get("ok")),
+        "actual_error_class": str(data.get("actual_error_class", "") or ""),
+        "result_error_class": str(data.get("result_error_class", "") or ""),
+        "error_class_consistent": bool(data.get("error_class_consistent")),
+        "error_source": _normalize_error_source(data.get("error_source", "runtime")),
+        "error": None,
+        "go_test_output_tail": output[-4000:],
+    }
+
+
+def _run_transport_malformed_scoped_harness() -> dict:
+    """Collect malformed scoped target classes from fast go transport harness."""
+    artifact_path = RUNTIME_DIR / "malformed_scoped_transport_runtime.json"
+    if artifact_path.exists():
+        artifact_path.unlink()
+    env = os.environ.copy()
+    env["MASQUE_MALFORMED_SCOPED_TRANSPORT_ARTIFACT_PATH"] = str(artifact_path)
+    cmd = [
+        "go",
+        "test",
+        "-count=1",
+        "./transport/masque",
+        "-tags",
+        "with_masque",
+        "-run",
+        "TestTransportMalformedScopedFlowBoundaryParity",
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=CORE_DIR,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_transport_harness_failed rc={result.returncode}",
+            "go_test_output_tail": output[-4000:],
+        }
+    if not artifact_path.exists():
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": "go_transport_harness_missing_artifact",
+            "go_test_output_tail": output[-4000:],
+        }
+    try:
+        data = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_transport_harness_bad_artifact_json: {exc}",
+            "go_test_output_tail": output[-4000:],
+        }
+    return {
+        "ok": bool(data.get("ok")),
+        "actual_error_class": str(data.get("actual_error_class", "") or ""),
+        "result_error_class": str(data.get("result_error_class", "") or ""),
+        "error_class_consistent": bool(data.get("error_class_consistent")),
+        "error_source": _normalize_error_source(data.get("error_source", "runtime")),
+        "error": None,
+        "go_test_output_tail": output[-4000:],
+    }
+
+
+def _classify_route_advertise_error_class(err_text: str) -> str:
+    low = (err_text or "").lower()
+    if (
+        "route_advertisement" in low
+        or "invalid route advertisement" in low
+        or "errinvalidrouteadvertisement" in low
+        or "rfc" in low and "route" in low
+    ):
+        return "capability"
+    return "unknown"
+
+
+def _normalize_error_source(raw_source: object) -> str:
+    source = str(raw_source or "").strip().lower()
+    if source in {"runtime", "compose_up"}:
+        return source
+    return "runtime"
+
+
+def _run_route_advertise_dual_signal_harness() -> dict:
+    """Collect dual-signal classes from fast go harness (pre-docker)."""
+    artifact_path = RUNTIME_DIR / "route_advertise_dual_signal_runtime.json"
+    if artifact_path.exists():
+        artifact_path.unlink()
+    env = os.environ.copy()
+    env["MASQUE_ROUTE_ADVERTISE_ARTIFACT_PATH"] = str(artifact_path)
+    cmd = [
+        "go",
+        "test",
+        "-count=1",
+        "./protocol/masque",
+        "-tags",
+        "with_masque",
+        "-run",
+        "TestConnectIPRouteAdvertisePeerCloseLifecycleParity",
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=CORE_DIR,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_harness_failed rc={result.returncode}",
+            "go_test_output_tail": output[-4000:],
+        }
+    if not artifact_path.exists():
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": "go_harness_missing_artifact",
+            "go_test_output_tail": output[-4000:],
+        }
+    try:
+        data = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_harness_bad_artifact_json: {exc}",
+            "go_test_output_tail": output[-4000:],
+        }
+    return {
+        "ok": bool(data.get("ok")),
+        "actual_error_class": str(data.get("actual_error_class", "") or ""),
+        "result_error_class": str(data.get("result_error_class", "") or ""),
+        "error_class_consistent": bool(data.get("error_class_consistent")),
+        "error_source": _normalize_error_source(data.get("error_source", "runtime")),
+        "error": None,
+        "go_test_output_tail": output[-4000:],
+    }
+
+
+def _run_peer_abort_lifecycle_harness() -> dict:
+    """Collect peer-abort lifecycle classes from fast go runtime harness."""
+    artifact_path = RUNTIME_DIR / "peer_abort_lifecycle_runtime.json"
+    if artifact_path.exists():
+        artifact_path.unlink()
+    env = os.environ.copy()
+    env["MASQUE_PEER_ABORT_ARTIFACT_PATH"] = str(artifact_path)
+    cmd = [
+        "go",
+        "test",
+        "-count=1",
+        "./common/masque",
+        "-tags",
+        "with_masque",
+        "-run",
+        "TestRuntimePeerRemoteCloseNotReadyClassifiedAsLifecycle",
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=CORE_DIR,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_harness_failed rc={result.returncode}",
+            "go_test_output_tail": output[-4000:],
+        }
+    if not artifact_path.exists():
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": "go_harness_missing_artifact",
+            "go_test_output_tail": output[-4000:],
+        }
+    try:
+        data = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "actual_error_class": "unknown",
+            "result_error_class": "unknown",
+            "error_class_consistent": False,
+            "error_source": "runtime",
+            "error": f"go_harness_bad_artifact_json: {exc}",
+            "go_test_output_tail": output[-4000:],
+        }
+    return {
+        "ok": bool(data.get("ok")),
+        "actual_error_class": str(data.get("actual_error_class", "") or ""),
+        "result_error_class": str(data.get("result_error_class", "") or ""),
+        "error_class_consistent": bool(data.get("error_class_consistent")),
+        "error_source": _normalize_error_source(data.get("error_source", "runtime")),
+        "error": None,
+        "go_test_output_tail": output[-4000:],
+    }
+
+
+def _scope_observability_assert(result_row: dict, expected_target: str, expected_ipproto: int) -> tuple[bool, str]:
+    obs = result_row.get("observability", {})
+    after = obs.get("after", {}) if isinstance(obs, dict) else {}
+    got_target = str(after.get("connect_ip_scope_target", "") or "").strip()
+    got_ipproto = _safe_int(after.get("connect_ip_scope_ipproto", 0), 0)
+    if got_target != expected_target:
+        return False, f"scope_target_mismatch expected={expected_target} got={got_target}"
+    if got_ipproto != int(expected_ipproto):
+        return False, f"scope_ipproto_mismatch expected={int(expected_ipproto)} got={got_ipproto}"
+    return True, ""
+
+
+def run_tcp_ip_scoped(docker, byte_count, tcp_ip_mode, tcp_ip_deadline_sec=None):
+    scoped_target = "10.200.0.2/32"
+    scoped_ipproto = 17
+
+    if not skip_stand_compose_up():
+        compose_up(docker, CONNECT_IP_SCOPED_CLIENT_CONFIG, server_config=SERVER_CONFIG_SCOPED)
+    positive = run_tcp_ip(docker, byte_count, mode=tcp_ip_mode, tcp_ip_deadline_sec=tcp_ip_deadline_sec)
+    scope_assert_ok, scope_assert_error = _scope_observability_assert(positive, scoped_target, scoped_ipproto)
+    positive_ok = bool(positive.get("ok")) and scope_assert_ok
+    positive_row = {
+        "kind": "positive",
+        "ok": positive_ok,
+        "scope_observability_ok": scope_assert_ok,
+        "scope_observability_error": scope_assert_error or None,
+        "result": positive,
+    }
+
+    negative = None
+    compose_error = None
+    compose_client_logs = ""
+    compose_server_logs = ""
+    try:
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_SCOPED_BAD_TARGET_CLIENT_CONFIG, server_config=SERVER_CONFIG_SCOPED)
+        negative = run_tcp_ip(docker, BYTES_10KB, mode=tcp_ip_mode, tcp_ip_deadline_sec=tcp_ip_deadline_sec)
+        try:
+            compose_client_logs = docker_logs_capture(docker, CLIENT_CONTAINER)
+        except Exception:
+            compose_client_logs = ""
+        try:
+            compose_server_logs = docker_logs_capture(docker, SERVER_CONTAINER)
+        except Exception:
+            compose_server_logs = ""
+        if compose_client_logs or compose_server_logs:
+            negative["error_context_logs"] = {
+                "client_tail": compose_client_logs[-4000:] if compose_client_logs else "",
+                "server_tail": compose_server_logs[-4000:] if compose_server_logs else "",
+            }
+    except Exception as exc:
+        compose_error = str(exc)
+        try:
+            compose_client_logs = docker_logs_capture(docker, CLIENT_CONTAINER)
+        except Exception:
+            compose_client_logs = ""
+        try:
+            compose_server_logs = docker_logs_capture(docker, SERVER_CONTAINER)
+        except Exception:
+            compose_server_logs = ""
+        negative = {
+            "scenario": "tcp_ip",
+            "mode": tcp_ip_mode,
+            "bytes_expected": BYTES_10KB,
+            "bytes_received": 0,
+            "elapsed_sec": 0.0,
+            "error": compose_error,
+            "error_source": "compose_up",
+            "error_context_logs": {
+                "client_tail": compose_client_logs[-4000:] if compose_client_logs else "",
+                "server_tail": compose_server_logs[-4000:] if compose_server_logs else "",
+            },
+            "error_class": classify_error(compose_error),
+            "ok": False,
+        }
+    malformed_scope_harness = _run_malformed_scoped_harness()
+    malformed_scope_transport_harness = _run_transport_malformed_scoped_harness()
+    malformed_scope_actual_class = str(malformed_scope_harness.get("actual_error_class", "") or "")
+    malformed_scope_result_class = str(malformed_scope_harness.get("result_error_class", "") or "")
+    malformed_scope_transport_actual_class = str(
+        malformed_scope_transport_harness.get("actual_error_class", "") or ""
+    )
+    malformed_scope_transport_result_class = str(
+        malformed_scope_transport_harness.get("result_error_class", "") or ""
+    )
+    malformed_scope_error_source = _normalize_error_source(
+        malformed_scope_harness.get("error_source", "runtime")
+    )
+    if isinstance(negative, dict):
+        negative["error_class"] = malformed_scope_result_class
+        negative["error_source"] = malformed_scope_error_source
+        negative["harness_ok"] = bool(malformed_scope_harness.get("ok"))
+        negative["harness_output_tail"] = malformed_scope_harness.get("go_test_output_tail")
+        if malformed_scope_harness.get("error"):
+            negative["harness_error"] = malformed_scope_harness.get("error")
+    runtime_class_consistent = (
+        malformed_scope_actual_class in {"capability", "policy"}
+        and malformed_scope_result_class in {"capability", "policy"}
+        and bool(malformed_scope_harness.get("error_class_consistent"))
+    )
+    transport_class_consistent = (
+        malformed_scope_transport_actual_class in {"capability", "policy"}
+        and malformed_scope_transport_result_class in {"capability", "policy"}
+        and bool(malformed_scope_transport_harness.get("error_class_consistent"))
+    )
+    boundary_parity_consistent = (
+        malformed_scope_actual_class == malformed_scope_transport_actual_class
+        and malformed_scope_result_class == malformed_scope_transport_result_class
+    )
+    class_consistent = runtime_class_consistent and transport_class_consistent and boundary_parity_consistent
+    negative_ok = (
+        (not bool(negative.get("ok")))
+        and malformed_scope_actual_class in {"capability", "policy"}
+        and class_consistent
+    )
+    negative_row = {
+        "kind": "negative_malformed_target",
+        "ok": negative_ok,
+        "expected_error_class": ["capability", "policy"],
+        "actual_error_class": malformed_scope_actual_class,
+        "result_error_class": malformed_scope_result_class,
+        "error_class_consistent": class_consistent,
+        "transport_actual_error_class": malformed_scope_transport_actual_class,
+        "transport_result_error_class": malformed_scope_transport_result_class,
+        "transport_error_class_consistent": transport_class_consistent,
+        "boundary_parity_consistent": boundary_parity_consistent,
+        "result": negative,
+    }
+    negative_row["runtime_harness_ok"] = bool(malformed_scope_harness.get("ok"))
+    negative_row["transport_harness_ok"] = bool(malformed_scope_transport_harness.get("ok"))
+    if malformed_scope_harness.get("go_test_output_tail"):
+        negative_row["runtime_harness_output_tail"] = malformed_scope_harness.get("go_test_output_tail")
+    if malformed_scope_transport_harness.get("go_test_output_tail"):
+        negative_row["transport_harness_output_tail"] = malformed_scope_transport_harness.get("go_test_output_tail")
+    if malformed_scope_harness.get("error"):
+        negative_row["runtime_harness_error"] = malformed_scope_harness.get("error")
+    if malformed_scope_transport_harness.get("error"):
+        negative_row["transport_harness_error"] = malformed_scope_transport_harness.get("error")
+
+    # Pre-docker lifecycle traceability contract for peer-induced abort path.
+    # Source of truth is fast go runtime harness artifact (no synthetic probes).
+    peer_abort_harness = _run_peer_abort_lifecycle_harness()
+    peer_abort_actual_class = str(peer_abort_harness.get("actual_error_class", "") or "")
+    peer_abort_result_class = str(peer_abort_harness.get("result_error_class", "") or "")
+    peer_abort_error_source = _normalize_error_source(peer_abort_harness.get("error_source", "runtime"))
+    peer_abort_result = {
+        "scenario": "tcp_ip_peer_abort_contract",
+        "mode": tcp_ip_mode,
+        "bytes_expected": 0,
+        "bytes_received": 0,
+        "elapsed_sec": 0.0,
+        "error": peer_abort_harness.get("error"),
+        "error_source": peer_abort_error_source,
+        "error_class": peer_abort_result_class,
+        "harness_ok": bool(peer_abort_harness.get("ok")),
+        "harness_output_tail": peer_abort_harness.get("go_test_output_tail"),
+        "ok": bool(peer_abort_harness.get("ok")),
+    }
+    peer_abort_class_consistent = (
+        peer_abort_actual_class == "lifecycle"
+        and peer_abort_result_class == "lifecycle"
+    )
+    peer_abort_row = {
+        "kind": "negative_peer_abort",
+        "ok": peer_abort_class_consistent,
+        "expected_error_class": ["lifecycle"],
+        "actual_error_class": peer_abort_actual_class,
+        "result_error_class": str(peer_abort_result.get("error_class", "") or ""),
+        "error_class_consistent": peer_abort_class_consistent,
+        "result": peer_abort_result,
+    }
+
+    # Boundary dual-signal contract for peer-side invalid ROUTE_ADVERTISEMENT:
+    # endpoint validation reject is capability; subsequent peer-close is lifecycle.
+    route_adv_harness = _run_route_advertise_dual_signal_harness()
+    route_adv_actual_class = str(route_adv_harness.get("actual_error_class", "") or "")
+    route_adv_result_class = str(route_adv_harness.get("result_error_class", "") or "")
+    route_adv_error_source = _normalize_error_source(route_adv_harness.get("error_source", "runtime"))
+    route_adv_result = {
+        "scenario": "tcp_ip_peer_invalid_route_advertisement_contract",
+        "mode": tcp_ip_mode,
+        "bytes_expected": 0,
+        "bytes_received": 0,
+        "elapsed_sec": 0.0,
+        "error": route_adv_harness.get("error"),
+        "error_source": route_adv_error_source,
+        "error_class": route_adv_result_class,
+        "harness_ok": bool(route_adv_harness.get("ok")),
+        "harness_output_tail": route_adv_harness.get("go_test_output_tail"),
+        "ok": bool(route_adv_harness.get("ok")),
+    }
+    route_adv_class_consistent = (
+        route_adv_actual_class == "capability" and route_adv_result_class == "lifecycle"
+    )
+    route_adv_row = {
+        "kind": "negative_peer_invalid_route_advertisement",
+        "ok": route_adv_class_consistent,
+        "expected_actual_error_class": ["capability"],
+        "expected_result_error_class": ["lifecycle"],
+        "actual_error_class": route_adv_actual_class,
+        "result_error_class": route_adv_result_class,
+        "error_class_consistent": route_adv_class_consistent,
+        "result": route_adv_result,
+    }
+
+    return {
+        "scenario": "tcp_ip_scoped",
+        "rows": [positive_row, negative_row, peer_abort_row, route_adv_row],
+        "ok": (
+            positive_ok
+            and negative_ok
+            and peer_abort_class_consistent
+            and route_adv_class_consistent
+        ),
     }
 
 
@@ -1923,6 +2565,8 @@ def run_tun_rule_masque_perf(docker, byte_count):
 
 def _write_masque_smoke_contract_files(results: list, byte_count: int) -> None:
     """Write CI smoke JSON artifacts (see hiddify-core/.github/workflows/ci.yml)."""
+    if skip_stand_smoke_contract_files():
+        return
     if byte_count != BYTES_10KB:
         return
     mapping = {
@@ -1949,6 +2593,74 @@ def _write_masque_smoke_contract_files(results: list, byte_count: int) -> None:
         (RUNTIME_DIR / fname).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _write_scoped_contract_artifact(results: list) -> None:
+    """Write scoped CONNECT-IP contract artifact for CI assertions."""
+    scoped = None
+    for row in results:
+        if row.get("scenario") == "tcp_ip_scoped":
+            scoped = row
+            break
+    if not isinstance(scoped, dict):
+        return
+    rows = scoped.get("rows", [])
+    positive = next((item for item in rows if item.get("kind") == "positive"), {})
+    negative = next((item for item in rows if item.get("kind") == "negative_malformed_target"), {})
+    peer_abort = next((item for item in rows if item.get("kind") == "negative_peer_abort"), {})
+    peer_invalid_route_advertisement = next(
+        (item for item in rows if item.get("kind") == "negative_peer_invalid_route_advertisement"),
+        {},
+    )
+    positive_result = positive.get("result", {}) if isinstance(positive, dict) else {}
+    positive_obs = positive_result.get("observability", {}).get("after", {}) if isinstance(positive_result, dict) else {}
+    negative_result = negative.get("result", {}) if isinstance(negative, dict) else {}
+    peer_abort_result = peer_abort.get("result", {}) if isinstance(peer_abort, dict) else {}
+    peer_invalid_route_advertisement_result = (
+        peer_invalid_route_advertisement.get("result", {})
+        if isinstance(peer_invalid_route_advertisement, dict)
+        else {}
+    )
+    contract = {
+        "mode": "connect_ip_scoped",
+        "result": "true" if scoped.get("ok") else "false",
+        "positive": {
+            "ok": bool(positive.get("ok")),
+            "scope_observability_ok": bool(positive.get("scope_observability_ok")),
+            "scope_target": str(positive_obs.get("connect_ip_scope_target", "") or ""),
+            "scope_ipproto": _safe_int(positive_obs.get("connect_ip_scope_ipproto", 0), 0),
+        },
+        "negative_malformed_target": {
+            "ok": bool(negative.get("ok")),
+            "actual_error_class": str(negative.get("actual_error_class", "") or ""),
+            "result_error_class": str(negative_result.get("error_class", "") or ""),
+            "error_class_consistent": bool(negative.get("error_class_consistent")),
+            "error_source": _normalize_error_source(negative_result.get("error_source", "runtime")),
+        },
+        "negative_peer_abort": {
+            "ok": bool(peer_abort.get("ok")),
+            "actual_error_class": str(peer_abort.get("actual_error_class", "") or ""),
+            "result_error_class": str(peer_abort_result.get("error_class", "") or ""),
+            "error_class_consistent": bool(peer_abort.get("error_class_consistent")),
+            "error_source": _normalize_error_source(peer_abort_result.get("error_source", "runtime")),
+        },
+        "negative_peer_invalid_route_advertisement": {
+            "ok": bool(peer_invalid_route_advertisement.get("ok")),
+            "actual_error_class": str(
+                peer_invalid_route_advertisement.get("actual_error_class", "") or ""
+            ),
+            "result_error_class": str(
+                peer_invalid_route_advertisement_result.get("error_class", "") or ""
+            ),
+            "error_class_consistent": bool(
+                peer_invalid_route_advertisement.get("error_class_consistent")
+            ),
+            "error_source": _normalize_error_source(
+                peer_invalid_route_advertisement_result.get("error_source", "runtime")
+            ),
+        },
+    }
+    (RUNTIME_DIR / "scoped_connect_ip_latest.json").write_text(json.dumps(contract, indent=2), encoding="utf-8")
+
+
 def run_scenario(
     docker,
     scenario,
@@ -1964,7 +2676,8 @@ def run_scenario(
     udp_matrix_losses_pct=None,
 ):
     if scenario == "udp":
-        compose_up(docker, DEFAULT_CLIENT_CONFIG)
+        if not skip_stand_compose_up():
+            compose_up(docker, DEFAULT_CLIENT_CONFIG)
         return run_udp(
             docker,
             byte_count,
@@ -1973,22 +2686,34 @@ def run_scenario(
             udp_loss_pct=udp_loss_pct,
         )
     if scenario == "udp_matrix":
-        compose_up(docker, DEFAULT_CLIENT_CONFIG)
+        if not skip_stand_compose_up():
+            compose_up(docker, DEFAULT_CLIENT_CONFIG)
         sizes = udp_matrix_sizes_mib or [10, 20]
         rates = udp_matrix_rates_bps or [0]
         losses = udp_matrix_losses_pct or [0.0]
         return run_udp_matrix(docker, sizes, rates, losses, udp_chunk=udp_chunk)
     if scenario == "tcp_stream":
-        compose_up(docker, DEFAULT_CLIENT_CONFIG)
+        if not skip_stand_compose_up():
+            compose_up(docker, DEFAULT_CLIENT_CONFIG)
         return run_tcp_stream(docker, byte_count)
     if scenario == "tcp_ip":
-        compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
         return run_tcp_ip(docker, byte_count, mode=tcp_ip_mode, tcp_ip_deadline_sec=tcp_ip_deadline_sec)
+    if scenario == "tcp_ip_scoped":
+        return run_tcp_ip_scoped(
+            docker,
+            byte_count,
+            tcp_ip_mode=tcp_ip_mode,
+            tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+        )
     if scenario == "tcp_ip_icmp":
-        compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
         return run_tcp_ip_icmp(docker, timeout_sec=5)
     if scenario == "tcp_ip_iperf":
-        compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
         cfg = iperf_cfg or {}
         return run_tcp_ip_iperf_matrix(
             docker=docker,
@@ -1999,7 +2724,8 @@ def run_scenario(
             min_delivery_ratio=cfg.get("min_delivery_ratio", 0.85),
         )
     if scenario == "tun_rule_masque_perf":
-        compose_up(docker, DEFAULT_CLIENT_CONFIG)
+        if not skip_stand_compose_up():
+            compose_up(docker, DEFAULT_CLIENT_CONFIG)
         return run_tun_rule_masque_perf(docker, byte_count)
     raise ValueError(f"unsupported scenario: {scenario}")
 
@@ -2013,6 +2739,7 @@ def main():
             "udp_matrix",
             "tcp_stream",
             "tcp_ip",
+            "tcp_ip_scoped",
             "tcp_ip_icmp",
             "tcp_ip_iperf",
             "tun_rule_masque_perf",
@@ -2179,12 +2906,24 @@ def main():
                 udp_matrix_losses_pct=matrix_losses,
             )
         except Exception as exc:
-            result = {"scenario": scenario, "bytes_expected": byte_count, "bytes_received": 0, "elapsed_sec": 0.0, "ok": False, "error": str(exc)}
+            txt = str(exc)
+            ec = _classified_error_bucket(txt)
+            result = {
+                "scenario": scenario,
+                "bytes_expected": byte_count,
+                "bytes_received": 0,
+                "elapsed_sec": 0.0,
+                "ok": False,
+                "error": txt,
+                "error_class": ec,
+                "error_source": "runtime",
+            }
         results.append(result)
         overall_ok = overall_ok and bool(result.get("ok"))
         print(json.dumps(result, ensure_ascii=True))
 
     _write_masque_smoke_contract_files(results, byte_count)
+    _write_scoped_contract_artifact(results)
 
     summary = {
         "stress": args.stress,

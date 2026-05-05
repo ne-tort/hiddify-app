@@ -57,7 +57,7 @@ Automated smoke gate script:
 
 ## Observed Limits
 
-- `tcp_transport=connect_ip` is intentionally fail-fast blocked for production profiles until dedicated TCP-over-IP-plane implementation is completed.
+- `tcp_transport=connect_ip` is intentionally fail-fast blocked for TUN-only client profiles by endpoint validation; TCP-over-CONNECT-IP for production is provided via `transport_mode=connect_ip` + netstack packet-plane.
 - `tcp_transport=connect_stream` is the supported TCP MASQUE path in the current production track.
 - `tcp_mode=masque_or_direct` now exists and is policy-gated, but for the current stand topology (client without backend-network reachability) it cannot substitute true MASQUE TCP stream semantics.
 - Real perf ceiling is measured via `python experiments/router/stand/l3router/masque_stand_runner.py --scenario real --mtu 1500`.
@@ -94,4 +94,34 @@ Current matrix:
 - `tcp_mode` is available in MASQUE endpoint config:
   - `strict_masque`
   - `masque_or_direct` (requires `fallback_policy=direct_explicit`)
-- Unsupported tunables (`udp_timeout`, `mtu`, `workers`) now fail fast at endpoint validation time.
+- Unsupported tunables (`udp_timeout`, `workers`) fail fast at endpoint validation time.
+- `mtu` is supported as CONNECT-IP datagram ceiling (`[1280, 65535]`) and is passed to runtime as `ConnectIPDatagramCeiling`.
+
+## Scoped CONNECT-IP Contract (`P1#10`)
+
+Canonical scoped scenario command:
+
+```powershell
+python experiments/router/stand/l3router/masque_stand_runner.py --scenario tcp_ip_scoped
+```
+
+Scoped contract (positive path):
+
+- `transport_mode=connect_ip` and scoped template variables are used through `template_ip` (`{target}`, `{ipproto}`).
+- Expected observability assert in runtime snapshot:
+  - `connect_ip_scope_target=10.200.0.2/32`
+  - `connect_ip_scope_ipproto=17`
+- Dual-stack policy contract in stand: default full-flow scope remains IPv4 wildcard (`0.0.0.0/0`) unless explicit `connect_ip_scope_target` is provided; IPv6 scoped forwarding is opt-in only.
+
+Malformed negative contract:
+
+- Bad scoped target must fail deterministically with capability/policy class (`actual_error_class in ["capability","policy"]`).
+- Startup failure before traffic phase (compose/client init) is still valid negative outcome and is exported as `error_source=compose_up`.
+
+Machine-readable scoped artifact (latest run path):
+
+- `experiments/router/stand/l3router/runtime/scoped_connect_ip_latest.json`
+- Contains:
+  - global result (`mode=connect_ip_scoped`, `result=true|false`)
+  - positive scope observability fields (`scope_target`, `scope_ipproto`)
+  - negative malformed target fields (`actual_error_class`, `error_source`)

@@ -12,7 +12,7 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
-      - ./configs/masque-server.json:/etc/sing-box/config.json:ro
+      - ${MASQUE_SERVER_CONFIG:-./configs/masque-server.json}:/etc/sing-box/config.json:ro
       - ./configs/masque-cert.pem:/etc/sing-box/cert.pem:ro
       - ./configs/masque-key.pem:/etc/sing-box/key.pem:ro
     command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
