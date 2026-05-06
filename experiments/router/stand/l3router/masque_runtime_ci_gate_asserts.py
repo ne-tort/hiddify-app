@@ -40,6 +40,10 @@ ANTI_BYPASS_MODE_TO_CLIENT_CONFIG = {
 }
 ANTI_BYPASS_PARITY_ROW_MODES = ("tcp_stream", "udp", "tcp_ip")
 ANTI_BYPASS_SCENARIO_SET = frozenset(ANTI_BYPASS_MODE_TO_SCENARIO.values())
+CONNECT_STREAM_NON_AUTH_MATRIX_TESTS = (
+    "TestDialTCPStreamNonAuthStatusMapsToDialClass",
+    "TestDialTCPStreamInProcessHTTP3ProxyNonAuthStatusMapsToDialClass",
+)
 SCOPED_PARITY_ROWS = (
     ("scoped_cross_artifact_parity", "negative_peer_abort_strict_ok", True),
     ("scoped_cross_artifact_parity", "negative_peer_invalid_route_advertisement_strict_ok", True),
@@ -306,6 +310,32 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _assert_connect_stream_non_auth_status_matrix(workdir: Path) -> list[str]:
+    failures: list[str] = []
+    go_pkg = "./transport/masque"
+    test_run = "|".join(CONNECT_STREAM_NON_AUTH_MATRIX_TESTS)
+    command = [
+        "go",
+        "test",
+        go_pkg,
+        "-tags",
+        "with_masque",
+        "-count=1",
+        "-run",
+        test_run,
+    ]
+    result = _run_cmd(command, cwd=workdir, env=os.environ.copy(), check=False)
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        details = stderr or stdout or "<no output>"
+        failures.append(
+            "connect-stream non-auth status matrix go test failed: "
+            f"rc={result.returncode} details={details}"
+        )
+    return failures
+
+
 def _green_tcp_ip_from_tcp_ip_scoped(rows: list) -> dict | None:
     for item in rows:
         if not isinstance(item, dict) or item.get("scenario") != "tcp_ip_scoped":
@@ -508,6 +538,14 @@ def main() -> int:
         help="Assert nightly perf summary thresholds from JSON artifacts",
     )
     parser.add_argument(
+        "--assert-connect-stream-non-auth-status-matrix",
+        action="store_true",
+        help=(
+            "Run typed pre-docker guard for CONNECT-STREAM non-auth status matrix "
+            "(stub + in-process tests)."
+        ),
+    )
+    parser.add_argument(
         "--run-anti-bypass-negative-control",
         action="append",
         choices=tuple(ANTI_BYPASS_MODE_TO_SCENARIO.keys()),
@@ -568,6 +606,17 @@ def main() -> int:
                 print(" -", failure)
             return 1
         print("MASQUE nightly perf thresholds passed.")
+        return 0
+
+    if args.assert_connect_stream_non_auth_status_matrix:
+        workdir = args.workdir.resolve()
+        failures.extend(_assert_connect_stream_non_auth_status_matrix(workdir))
+        if failures:
+            print("MASQUE CONNECT-STREAM non-auth status matrix gate failures:")
+            for failure in failures:
+                print(" -", failure)
+            return 1
+        print("MASQUE CONNECT-STREAM non-auth status matrix gate passed.")
         return 0
 
     if args.run_anti_bypass_negative_control:

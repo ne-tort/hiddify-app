@@ -744,6 +744,10 @@ def _zero_observability_snapshot():
         "connect_ip_engine_icmp_feedback_total": 0,
         "connect_ip_policy_drop_icmp_reason_total": {},
         "connect_ip_session_reset_total": {},
+        # HTTP/3 per-stream datagram queue drops (process-wide); see http3.StreamDatagramQueueDropTotal in sing-box transport.
+        "http3_stream_datagram_queue_drop_total": 0,
+        # QUIC receive datagram_queue overflow drops; see quic.DatagramReceiveQueueDropTotal (patched quic-go).
+        "quic_datagram_rcv_queue_drop_total": 0,
     }
 
 

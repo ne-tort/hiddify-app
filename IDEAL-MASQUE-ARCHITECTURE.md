@@ -57,7 +57,7 @@
 
 **Фабрика сессии в коде:** конкретные типы — **`CoreClientFactory`** (QUIC/MASQUE core) и **`DirectClientFactory`** (прямой TCP/локальный UDP без MASQUE), оба в [`transport/masque/transport.go`](hiddify-core/hiddify-sing-box/transport/masque/transport.go); runtime endpoint’ов должен использовать только эту пару стратегий без legacy alias-слоя.
 
-**`ListenPacket` и режим транспорта:** ветка CONNECT-IP (**`openIPSessionLocked` + `connectIPUDPPacketConn`**) выбирается только при **`transport_mode == connect_ip`** (точное строковое совпадение в `coreSession.ListenPacket`); при **`auto`** / **`connect_udp`** используется CONNECT-UDP через **`qmasque.Client`** и **`template_udp`** — не смешивать с IP plane.
+**`ListenPacket` и режим транспорта:** ветка CONNECT-IP (**`openIPSessionLocked` + `connectIPUDPPacketConn`**) выбирается только при **`transport_mode == connect_ip`** в смысле guard на границе transport: `strings.EqualFold(strings.TrimSpace(...), "connect_ip")` в `coreSession.ListenPacket`; при **`auto`** / **`connect_udp`** используется CONNECT-UDP через **`qmasque.Client`** и **`template_udp`** — не смешивать с IP plane.
 
 **`DialContext` и TCP:** при **`tcp_transport == connect_stream`** TCP идёт в **`dialTCPStream`** (расширенный CONNECT/stream). Если бы **`tcp_transport == connect_ip`** дошёл до core (не должно после валидации клиента), **`DialContext`** возвращает ошибку «TUN packet-plane only» — защита в глубине (`coreSession.DialContext` в `transport/masque/transport.go`).
 
