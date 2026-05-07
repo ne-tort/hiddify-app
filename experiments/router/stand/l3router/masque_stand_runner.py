@@ -28,6 +28,105 @@ SERVER_CONTAINER = "masque-server-core"
 CLIENT_CONTAINER = "masque-client-core"
 IPERF_CONTAINER = "masque-iperf-server"
 
+# Fixed container_name:s in compose; force-remove survives partial/crashed compose down.
+STAND_CONTAINER_NAMES = (SERVER_CONTAINER, CLIENT_CONTAINER, IPERF_CONTAINER)
+
+# Windows Docker Desktop (host): без пейса bulk `tcp_ip` часто упирается в `bridge_boundary_stall`.
+# Значение — байт/с для скриптов с MASQUE_UDP_RATE_BPS (наследованное имя «bps»). Linux CI не затрагивается.
+_WIN_TCP_IP_DEFAULT_PACE_NOTE_SHOWN = False
+
+
+def _win_host_tcp_ip_default_udp_send_bps() -> int:
+    """CONNECT-IP bulk sender cap when ``--udp-send-bps`` is 0 on Windows only (0 = unlimited)."""
+    raw = (os.environ.get("MASQUE_WIN_HOST_TCP_IP_DEFAULT_UDP_SEND_BPS") or "").strip()
+    if not raw:
+        return 4_000_000
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 4_000_000
+
+
+def _env_for_host_go_test() -> dict:
+    """Copy of process env suitable for local ``go test``.
+
+    ``GOOS``/``GOARCH`` left over from a Linux cross-build (e.g.
+    ``GOOS=linux go build …``) make the test executable target the wrong OS;
+    on Windows this surfaces as ``%1 is not a valid Win32 application``.
+    """
+    env = os.environ.copy()
+    env.pop("GOOS", None)
+    env.pop("GOARCH", None)
+    return env
+
+
+def force_remove_stand_containers(docker: str) -> None:
+    for name in STAND_CONTAINER_NAMES:
+        subprocess.run(
+            [docker, "rm", "-f", name],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+QUIC_DATAGRAM_POST_DECRYPT_MANDATORY_KEYS = (
+    "short_unpack_ok",
+    "short_unpack_err",
+    "payload_has_datagram_frame",
+    "payload_without_datagram_frame",
+    "payload_parse_err",
+    "contains_datagram_frame",
+    "ack_only_or_control_only",
+    "contains_stream_without_datagram_frame",
+)
+QUIC_DATAGRAM_SEND_MANDATORY_KEYS = (
+    "contains_datagram_frame",
+    "ack_only_or_control_only",
+    "contains_stream_without_datagram_frame",
+)
+QUIC_DATAGRAM_SEND_PIPELINE_MANDATORY_KEYS = (
+    "packed_with_datagram",
+    "encrypted_with_datagram",
+    "send_queue_enqueued",
+)
+QUIC_DATAGRAM_SEND_WRITE_MANDATORY_KEYS = (
+    "send_loop_enter",
+    "write_attempt",
+    "write_ok",
+    "write_err",
+)
+QUIC_DATAGRAM_TX_MANDATORY_KEYS = (
+    "tx_path_enter",
+    "sendmsg_attempt",
+    "sendmsg_ok",
+    "sendmsg_err",
+)
+QUIC_DATAGRAM_TX_PACKET_LEN_MANDATORY_KEYS = (
+    "le_256",
+    "le_512",
+    "le_1024",
+    "le_1200",
+    "le_1400",
+    "gt_1400",
+)
+QUIC_PACKET_RECEIVE_DROP_MANDATORY_KEYS = (
+    "conn_queue_full_drop",
+    "server_queue_full_drop",
+)
+QUIC_PACKET_RECEIVE_INGRESS_MANDATORY_KEYS = (
+    "transport_read_packet_total",
+    "ingress_recv_empty_total",
+    "ingress_demux_parse_conn_id_err_total",
+    "ingress_demux_routed_to_conn_total",
+    "ingress_demux_short_unknown_conn_drop_total",
+    "ingress_demux_long_server_queue_total",
+    "ingress_conn_ring_enqueue_total",
+    "ingress_handlepackets_pop_total",
+    "ingress_short_header_enter_total",
+    "ingress_short_header_dest_cid_parse_err_total",
+)
+
 
 def skip_stand_compose_up() -> bool:
     v = (os.environ.get("MASQUE_STAND_SKIP_COMPOSE_UP") or "").strip().lower()
@@ -36,6 +135,11 @@ def skip_stand_compose_up() -> bool:
 
 def skip_stand_smoke_contract_files() -> bool:
     v = (os.environ.get("MASQUE_STAND_SKIP_SMOKE_CONTRACT_FILES") or "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+def skip_go_build_stand_artifact() -> bool:
+    v = (os.environ.get("MASQUE_STAND_SKIP_GO_BUILD") or "").strip().lower()
     return v in ("1", "true", "yes")
 
 # SOCKS5 CONNECT (no auth) over sing-box SOCKS inbound → MASQUE connect_stream dataplane.
@@ -108,14 +212,26 @@ if CHUNK < 256 or CHUNK > 1152:
 pause = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
 if pause < 0:
     pause = 0.0
+RATE_BPS = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+if RATE_BPS < 0:
+    RATE_BPS = 0
+SNDBUF = int(sys.argv[7]) if len(sys.argv) > 7 else 0
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+if SNDBUF > 0:
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SNDBUF)
 z = b"\\x00" * CHUNK
 sent = 0
+start = time.monotonic()
 while sent < N:
     n = min(CHUNK, N - sent)
     s.sendto(z[:n], (host, port))
     sent += n
-    if pause > 0:
+    if RATE_BPS > 0:
+        target_elapsed = sent * 8.0 / RATE_BPS
+        sleep_for = target_elapsed - (time.monotonic() - start)
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+    elif pause > 0:
         time.sleep(pause)
 s.close()
 """
@@ -202,12 +318,112 @@ MASQUE_STAND_UDP_CHUNK_MAX = 1152
 # CONNECT-UDP / connect_stream bulk: wall-clock caps derived from a **minimum acceptable**
 # goodput (relative to this baseline, decimal Mb/s). If the path cannot finish within
 # ``t50 * _BULK_STALL_MULT`` (with a small floor), the run fails fast instead of hanging
-# for hundreds of seconds on a stuck sender or half-filled sink.
+# for hundreds of seconds on a stuck sender or half-filled sink. ``t50`` is the theoretical
+# transfer time at ``_BULK_HARNESS_BASELINE_MBPS``; mult=2 ⇒ ~50/min_throughput ≈ ~25 Mb/s
+# floor for bulk (above ``_BULK_STALL_FLOOR_SEC``).
 _BULK_HARNESS_BASELINE_MBPS = 50.0
-_BULK_STALL_MULT = 4.0
+_BULK_STALL_MULT = 2.0
 _BULK_STALL_FLOOR_SEC = 90
 _BULK_SERVER_PAD_SEC = 90
 _BULK_WAIT_PAD_SEC = 45
+
+# Slow Docker / Windows Desktop: set ``MASQUE_STAND_SLOW_DOCKER=1`` for stretched bulk
+# budgets (CONNECT-UDP harness + CONNECT-IP recv phase). CI unchanged unless this or
+# the granular env vars below are set.
+
+
+def _stand_slow_docker_profile() -> bool:
+    return (os.environ.get("MASQUE_STAND_SLOW_DOCKER") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _bulk_stall_floor_sec() -> int:
+    """Lower floor for UDP/tcp_stream bulk client ``timeout`` (default 90s)."""
+    raw = (os.environ.get("MASQUE_BULK_STALL_FLOOR_SEC") or "").strip()
+    if raw:
+        try:
+            return max(5, min(600, int(raw)))
+        except ValueError:
+            pass
+    if _stand_slow_docker_profile():
+        return 40
+    return _BULK_STALL_FLOOR_SEC
+
+
+def _bulk_min_goodput_wall_sec(byte_count: int) -> int:
+    """Optional wall time implied by a minimum decimal Mb/s (small bulk only).
+
+    Set ``MASQUE_STAND_MIN_GOODPUT_MBPS`` (e.g. ``1.2``) or rely on slow profile default.
+    Disabled above ``MASQUE_STAND_MIN_GOODPUT_MAX_BYTES`` (default 40 MiB) so 500MB stress
+    still uses mult/floor unless configured.
+    """
+    raw_mbps = (os.environ.get("MASQUE_STAND_MIN_GOODPUT_MBPS") or "").strip()
+    if not raw_mbps and _stand_slow_docker_profile():
+        raw_mbps = "1.2"
+    if not raw_mbps:
+        return 0
+    try:
+        mbps = float(raw_mbps)
+    except ValueError:
+        return 0
+    if mbps <= 0:
+        return 0
+    max_b = 40 * 1024 * 1024
+    raw_max = (os.environ.get("MASQUE_STAND_MIN_GOODPUT_MAX_BYTES") or "").strip()
+    if raw_max:
+        try:
+            max_b = max(1024 * 1024, int(raw_max))
+        except ValueError:
+            pass
+    if byte_count > max_b:
+        return 0
+    sec = int(math.ceil((byte_count * 8.0) / (mbps * 1_000_000.0)))
+    cap = 360
+    raw_cap = (os.environ.get("MASQUE_STAND_MIN_GOODPUT_WALL_CAP_SEC") or "").strip()
+    if raw_cap:
+        try:
+            cap = max(60, min(7200, int(raw_cap)))
+        except ValueError:
+            pass
+    return min(sec, cap)
+
+
+def _tcp_ip_bulk_min_strict_budget_sec(byte_count: int) -> int:
+    """Extra minimum strict recv budget for CONNECT-IP bulk (MiB-based path)."""
+    if byte_count <= BYTES_10KB:
+        return 0
+    raw_abs = (os.environ.get("MASQUE_STAND_TCP_IP_MIN_STRICT_SEC") or "").strip()
+    if raw_abs:
+        try:
+            return max(0, min(86400, int(raw_abs)))
+        except ValueError:
+            pass
+    if not _stand_slow_docker_profile():
+        return 0
+    mb = byte_count / (1024 * 1024)
+    per_raw = (os.environ.get("MASQUE_STAND_TCP_IP_STRICT_SEC_PER_MIB") or "").strip()
+    sec_per_mib = 12.0
+    if per_raw:
+        try:
+            sec_per_mib = float(per_raw)
+        except ValueError:
+            pass
+    return int(math.ceil(mb * sec_per_mib))
+
+
+def _bulk_stall_mult() -> float:
+    """Headroom multiplier on ``t50`` (time at ``_BULK_HARNESS_BASELINE_MBPS``). Default ``_BULK_STALL_MULT``.
+
+    Set ``MASQUE_BULK_STALL_MULT`` locally if 500MB stress needs more wall clock on slow Docker
+    hosts (e.g. ``4`` restores the previous ~336s client budget for ~500MiB).
+    """
+    raw = (os.environ.get("MASQUE_BULK_STALL_MULT") or "").strip()
+    if not raw:
+        return float(_BULK_STALL_MULT)
+    try:
+        v = float(raw)
+    except ValueError:
+        return float(_BULK_STALL_MULT)
+    return min(8.0, max(1.0, v))
 
 
 def _udp_tcp_stream_bulk_stall_wall_sec(byte_count: int) -> int:
@@ -215,7 +431,10 @@ def _udp_tcp_stream_bulk_stall_wall_sec(byte_count: int) -> int:
     if byte_count <= BYTES_10KB:
         return 30
     t50 = (byte_count * 8.0) / (_BULK_HARNESS_BASELINE_MBPS * 1_000_000.0)
-    return max(_BULK_STALL_FLOOR_SEC, int(math.ceil(t50 * _BULK_STALL_MULT)))
+    scaled = int(math.ceil(t50 * _bulk_stall_mult()))
+    floor = _bulk_stall_floor_sec()
+    min_g = _bulk_min_goodput_wall_sec(byte_count)
+    return max(floor, scaled, min_g)
 
 
 def _udp_tcp_stream_bulk_harness_timeouts(byte_count: int) -> tuple[int, int, int]:
@@ -321,6 +540,9 @@ def run_capture(cmd, cwd=None, env=None):
 
 
 def docker_bin():
+    # POSIX (incl. WSL): prefer Linux socket CLI; docker.exe breaks compose paths as `C:\\mnt\\c\\...`.
+    if os.name != "nt":
+        return shutil.which("docker") or shutil.which("docker.exe") or "docker"
     return shutil.which("docker.exe") or shutil.which("docker") or "docker"
 
 
@@ -328,9 +550,18 @@ def docker_exec(docker, container, script, check=True):
     return run([docker, "exec", container, "sh", "-lc", script], cwd=ROOT, check=check)
 
 
-def docker_exec_capture(docker, container, script):
-    result = run_capture([docker, "exec", container, "sh", "-lc", script], cwd=ROOT)
-    return result.stdout.strip()
+def docker_exec_capture(docker, container, script, check=True):
+    cmd = [docker, "exec", container, "sh", "-lc", script]
+    print(f"$ {' '.join(cmd)}")
+    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            cmd,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return (result.stdout or "").strip()
 
 
 def docker_logs_capture(docker, container):
@@ -345,6 +576,8 @@ def _udp_tun_datagram_send_sh(
     cli_to: int,
     chunk: int = MASQUE_STAND_UDP_CHUNK_MAX,
     pause_sec: float = 0.0,
+    rate_bps: int = 0,
+    sndbuf: int = 0,
 ) -> str:
     """Shell snippet: write small Python sender via base64 (robust on Windows Docker), run on client."""
     b64 = base64.standard_b64encode(_UDP_TUN_DATAGRAM_SEND_PY.encode()).decode("ascii")
@@ -352,7 +585,8 @@ def _udp_tun_datagram_send_sh(
     return (
         f"ip route replace 10.200.0.0/24 dev tun0 2>/dev/null || true; "
         f"printf '%s' '{b64}' | base64 -d > /tmp/udp_tun_send.py && "
-        f"timeout {int(cli_to)} python3 /tmp/udp_tun_send.py {int(byte_count)} {target_host} {port} {int(chunk)} {pause_s}"
+        f"timeout {int(cli_to)} python3 /tmp/udp_tun_send.py "
+        f"{int(byte_count)} {target_host} {port} {int(chunk)} {pause_s} {int(rate_bps)} {int(sndbuf)}"
     )
 
 
@@ -374,7 +608,10 @@ def _stand_udp_chunk(byte_count: int, udp_chunk: int) -> int:
 
 def _client_default_dev(docker) -> str:
     out = docker_exec_capture(
-        docker, CLIENT_CONTAINER, "ip route show default 2>/dev/null | awk '{print $5; exit}'"
+        docker,
+        CLIENT_CONTAINER,
+        "ip route show default 2>/dev/null | awk '{print $5; exit}'",
+        check=False,
     )
     dev = (out or "eth0").strip()
     return dev if dev else "eth0"
@@ -398,6 +635,12 @@ def _netem_clear(docker) -> None:
 
 
 def compile_singbox():
+    if skip_go_build_stand_artifact():
+        if not ARTIFACT.is_file():
+            raise RuntimeError(
+                f"{ARTIFACT} missing; unset MASQUE_STAND_SKIP_GO_BUILD or place sing-box-amd64 artifact"
+            )
+        return
     env = os.environ.copy()
     env["CGO_ENABLED"] = "0"
     env["GOOS"] = "linux"
@@ -423,18 +666,75 @@ def compile_singbox():
         pass
 
 
+def _compose_up_attempts_default() -> int:
+    raw = (os.environ.get("MASQUE_COMPOSE_UP_ATTEMPTS") or "3").strip()
+    try:
+        n = int(raw)
+        return max(1, min(n, 8))
+    except ValueError:
+        return 3
+
+
 def compose_up(docker, client_config, server_config=SERVER_CONFIG_DEFAULT):
     env = os.environ.copy()
     env["MASQUE_CLIENT_CONFIG"] = client_config
     env["MASQUE_SERVER_CONFIG"] = server_config
     if ARTIFACT.is_file():
         env["SINGBOX_ARTIFACT_STAMP"] = hashlib.sha256(ARTIFACT.read_bytes()).hexdigest()
-    run([docker, "compose", "-f", str(COMPOSE_FILE), "down", "-v"], cwd=ROOT, env=env, check=False)
-    run([docker, "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--build"], cwd=ROOT, env=env)
-    for container in (SERVER_CONTAINER, CLIENT_CONTAINER):
-        deadline = time.time() + 15
+    run(
+        [docker, "compose", "-f", str(COMPOSE_FILE), "down", "-v", "--remove-orphans"],
+        cwd=ROOT,
+        env=env,
+        check=False,
+    )
+    # Same fixed container_name:s as compose; wipes leftovers from aborted runs / stray projects.
+    force_remove_stand_containers(docker)
+    _up_cmd = [
+        docker,
+        "compose",
+        "-f",
+        str(COMPOSE_FILE),
+        "up",
+        "-d",
+        "--build",
+        "--force-recreate",
+        "--remove-orphans",
+    ]
+    attempts = _compose_up_attempts_default()
+    last_exc: subprocess.CalledProcessError | None = None
+    for attempt in range(attempts):
+        try:
+            run(_up_cmd, cwd=ROOT, env=env, check=True)
+            last_exc = None
+            break
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                raise
+            backoff = 2.0 + float(attempt)
+            print(
+                f"compose up failed (attempt {attempt + 1}/{attempts}), retry in {backoff:.1f}s: {exc}",
+                flush=True,
+            )
+            time.sleep(backoff)
+            run(
+                [docker, "compose", "-f", str(COMPOSE_FILE), "down", "-v", "--remove-orphans"],
+                cwd=ROOT,
+                env=env,
+                check=False,
+            )
+            force_remove_stand_containers(docker)
+    if last_exc is not None:
+        raise last_exc
+    # iperf-sidecar is needed for tcp_ip/tcp_ip_threshold/tcp_ip_icmp payloads.
+    for container in STAND_CONTAINER_NAMES:
+        deadline = time.time() + 25
         while time.time() < deadline:
-            rc = subprocess.run([docker, "exec", container, "sh", "-lc", "true"], cwd=ROOT, text=True).returncode
+            rc = subprocess.run(
+                [docker, "exec", container, "sh", "-lc", "true"],
+                cwd=ROOT,
+                text=True,
+            ).returncode
             if rc == 0:
                 break
             time.sleep(0.2)
@@ -495,10 +795,16 @@ def wait_udp_listener(docker, container, port, timeout_sec=5):
 
 
 def bytes_on_file(docker, container, path):
-    out = docker_exec_capture(docker, container, f"if [ -f {path} ]; then wc -c < {path}; else echo 0; fi")
+    # stat avoids wc+redirect quirks; check=False survives transient docker exec blips during long polls.
+    out = docker_exec_capture(
+        docker,
+        container,
+        f"test -f {path} && stat -c %s {path} || printf '0\\n'",
+        check=False,
+    )
     try:
-        return int(out or "0")
-    except ValueError:
+        return int((out or "0").splitlines()[0] or "0")
+    except (ValueError, IndexError):
         return 0
 
 
@@ -694,6 +1000,14 @@ def _classified_error_bucket(text: str | None) -> str:
     return c
 
 
+def _classify_udp_fail_reason(got, expected, throughput_ok, target_rate_bps):
+    if int(target_rate_bps) > 0 and not bool(throughput_ok):
+        return "throughput_target_unmet", "runner_integrity", "deadlineExceeded"
+    if int(got) < int(expected):
+        return "receiver_incomplete", "runner_integrity", "timeout"
+    return "deadline_exceeded", "runner_guard", "deadlineExceeded"
+
+
 def strict_timeout_sec(byte_count, floor_sec=1):
     mb = byte_count / (1024 * 1024)
     return max(floor_sec, int(math.ceil(mb)))
@@ -714,6 +1028,17 @@ def _safe_int(value, default=0):
     return default
 
 
+def _normalize_counter_map(raw_map, mandatory_keys=()):
+    normalized = {}
+    if isinstance(raw_map, dict):
+        for key, value in raw_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+    for key in mandatory_keys:
+        normalized.setdefault(str(key), 0)
+    return normalized
+
+
 def _zero_observability_snapshot():
     return {
         "connect_ip_obs_contract_version": "v1",
@@ -728,6 +1053,26 @@ def _zero_observability_snapshot():
         "connect_ip_packet_read_drop_reason_total": {},
         "connect_ip_packet_tx_total": 0,
         "connect_ip_packet_rx_total": 0,
+        "connect_ip_bridge_udp_tx_attempt_total": 0,
+        "connect_ip_bridge_udp_rx_attempt_total": 0,
+        "connect_ip_bridge_build_total": 0,
+        "connect_ip_bridge_write_enter_total": 0,
+        "connect_ip_bridge_write_ok_total": 0,
+        "connect_ip_bridge_write_err_total": 0,
+        "connect_ip_bridge_read_enter_total": 0,
+        "connect_ip_bridge_read_exit_total": 0,
+        "connect_ip_bridge_read_exit_err_total": 0,
+        "connect_ip_bridge_readpacket_enter_total": 0,
+        "connect_ip_bridge_readpacket_return_total": 0,
+        "connect_ip_bridge_readpacket_err_total": 0,
+        "connect_ip_bridge_readpacket_timeout_total": 0,
+        "connect_ip_bridge_readpacket_return_path_total": {},
+        "connect_ip_bridge_last_write_ok_unix_milli": 0,
+        "connect_ip_bridge_last_read_enter_unix_milli": 0,
+        "connect_ip_bridge_last_read_exit_unix_milli": 0,
+        "connect_ip_bridge_write_ok_to_read_enter_ms": 0,
+        "connect_ip_bridge_read_enter_to_read_exit_ms": 0,
+        "connect_ip_bridge_write_err_reason_total": {},
         "connect_ip_bytes_tx_total": 0,
         "connect_ip_bytes_rx_total": 0,
         "connect_ip_netstack_read_inject_total": 0,
@@ -742,12 +1087,50 @@ def _zero_observability_snapshot():
         "connect_ip_engine_drop_total": 0,
         "connect_ip_engine_drop_reason_total": {},
         "connect_ip_engine_icmp_feedback_total": 0,
+        "connect_ip_engine_pmtu_update_total": 0,
+        "connect_ip_engine_pmtu_update_reason_total": {},
+        "connect_ip_engine_effective_udp_payload": 0,
         "connect_ip_policy_drop_icmp_reason_total": {},
+        "connect_ip_receive_datagram_wait_total": 0,
+        "connect_ip_receive_datagram_wait_err_total": 0,
+        "connect_ip_receive_datagram_wait_closed_total": 0,
+        "connect_ip_receive_datagram_wake_total": 0,
+        "connect_ip_receive_datagram_wait_duration_total_ms": 0,
+        "connect_ip_receive_datagram_wait_duration_max_ms": 0,
+        "connect_ip_receive_datagram_last_wait_start_unix_milli": 0,
+        "connect_ip_receive_datagram_last_wake_unix_milli": 0,
+        "connect_ip_receive_datagram_close_cancel_enter_total": 0,
+        "connect_ip_receive_datagram_close_cancel_fired_total": 0,
+        "connect_ip_receive_datagram_close_cancel_return_ok_total": 0,
+        "connect_ip_receive_datagram_close_cancel_return_err_total": 0,
+        "connect_ip_receive_datagram_return_total": 0,
+        "connect_ip_receive_datagram_return_path_total": {},
+        "connect_ip_receive_datagram_post_return_total": 0,
+        "connect_ip_receive_datagram_post_return_path_total": {},
+        "connect_ip_proxied_packet_drop_total": 0,
+        "connect_ip_proxied_packet_drop_reason_total": {},
         "connect_ip_session_reset_total": {},
         # HTTP/3 per-stream datagram queue drops (process-wide); see http3.StreamDatagramQueueDropTotal in sing-box transport.
         "http3_stream_datagram_queue_drop_total": 0,
+        "http3_stream_datagram_queue_pop_total": 0,
+        "http3_stream_datagram_queue_pop_path_total": {},
+        "http3_datagram_dispatch_path_total": {},
+        "http3_datagram_receive_wait_path_total": {},
+        "quic_datagram_receive_wait_path_total": {},
+        "quic_packet_receive_drop_path_total": {},
+        "quic_packet_receive_ingress_path_total": {},
+        "quic_datagram_post_decrypt_path_total": {},
+        "quic_datagram_send_path_total": {},
+        "quic_datagram_send_pipeline_path_total": {},
+        "quic_datagram_send_write_path_total": {},
+        "quic_datagram_tx_path_total": {},
+        "quic_datagram_tx_packet_len_total": {},
+        "quic_datagram_pre_ingress_path_total": {},
+        "quic_datagram_ingress_path_total": {},
         # QUIC receive datagram_queue overflow drops; see quic.DatagramReceiveQueueDropTotal (patched quic-go).
         "quic_datagram_rcv_queue_drop_total": 0,
+        "quic_datagram_rcv_queue_pop_total": 0,
+        "quic_datagram_rcv_queue_pop_path_total": {},
     }
 
 
@@ -779,7 +1162,28 @@ def _normalize_observability_snapshot(snapshot):
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
             "connect_ip_engine_drop_reason_total",
+            "connect_ip_engine_pmtu_update_reason_total",
+            "connect_ip_bridge_write_err_reason_total",
+            "connect_ip_bridge_readpacket_return_path_total",
             "connect_ip_policy_drop_icmp_reason_total",
+            "connect_ip_receive_datagram_return_path_total",
+            "connect_ip_receive_datagram_post_return_path_total",
+            "connect_ip_proxied_packet_drop_reason_total",
+            "http3_stream_datagram_queue_pop_path_total",
+            "http3_datagram_dispatch_path_total",
+            "http3_datagram_receive_wait_path_total",
+            "quic_datagram_receive_wait_path_total",
+            "quic_packet_receive_drop_path_total",
+            "quic_packet_receive_ingress_path_total",
+            "quic_datagram_post_decrypt_path_total",
+            "quic_datagram_send_path_total",
+            "quic_datagram_send_pipeline_path_total",
+            "quic_datagram_send_write_path_total",
+            "quic_datagram_tx_path_total",
+            "quic_datagram_tx_packet_len_total",
+            "quic_datagram_pre_ingress_path_total",
+            "quic_datagram_ingress_path_total",
+            "quic_datagram_rcv_queue_pop_path_total",
         }:
             continue
         value = snapshot.get(key, 0)
@@ -812,6 +1216,27 @@ def _normalize_observability_snapshot(snapshot):
             if isinstance(value, (int, float)):
                 normalized[str(key)] = int(value)
         base["connect_ip_engine_drop_reason_total"] = normalized
+    pmtu_update_reason_map = snapshot.get("connect_ip_engine_pmtu_update_reason_total", {})
+    if isinstance(pmtu_update_reason_map, dict):
+        normalized = {}
+        for key, value in pmtu_update_reason_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["connect_ip_engine_pmtu_update_reason_total"] = normalized
+    bridge_write_err_reason_map = snapshot.get("connect_ip_bridge_write_err_reason_total", {})
+    if isinstance(bridge_write_err_reason_map, dict):
+        normalized = {}
+        for key, value in bridge_write_err_reason_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["connect_ip_bridge_write_err_reason_total"] = normalized
+    bridge_readpacket_return_path_map = snapshot.get("connect_ip_bridge_readpacket_return_path_total", {})
+    if isinstance(bridge_readpacket_return_path_map, dict):
+        normalized = {}
+        for key, value in bridge_readpacket_return_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["connect_ip_bridge_readpacket_return_path_total"] = normalized
     icmp_reason_map = snapshot.get("connect_ip_policy_drop_icmp_reason_total", {})
     if isinstance(icmp_reason_map, dict):
         normalized = {}
@@ -819,6 +1244,116 @@ def _normalize_observability_snapshot(snapshot):
             if isinstance(value, (int, float)):
                 normalized[str(key)] = int(value)
         base["connect_ip_policy_drop_icmp_reason_total"] = normalized
+    proxied_drop_reason_map = snapshot.get("connect_ip_proxied_packet_drop_reason_total", {})
+    if isinstance(proxied_drop_reason_map, dict):
+        normalized = {}
+        for key, value in proxied_drop_reason_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["connect_ip_proxied_packet_drop_reason_total"] = normalized
+    return_path_reason_map = snapshot.get("connect_ip_receive_datagram_return_path_total", {})
+    if isinstance(return_path_reason_map, dict):
+        normalized = {}
+        for key, value in return_path_reason_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["connect_ip_receive_datagram_return_path_total"] = normalized
+    post_return_path_reason_map = snapshot.get("connect_ip_receive_datagram_post_return_path_total", {})
+    if isinstance(post_return_path_reason_map, dict):
+        normalized = {}
+        for key, value in post_return_path_reason_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["connect_ip_receive_datagram_post_return_path_total"] = normalized
+    http3_queue_pop_path_map = snapshot.get("http3_stream_datagram_queue_pop_path_total", {})
+    if isinstance(http3_queue_pop_path_map, dict):
+        normalized = {}
+        for key, value in http3_queue_pop_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["http3_stream_datagram_queue_pop_path_total"] = normalized
+    http3_dispatch_path_map = snapshot.get("http3_datagram_dispatch_path_total", {})
+    if isinstance(http3_dispatch_path_map, dict):
+        normalized = {}
+        for key, value in http3_dispatch_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["http3_datagram_dispatch_path_total"] = normalized
+    http3_receive_wait_path_map = snapshot.get("http3_datagram_receive_wait_path_total", {})
+    if isinstance(http3_receive_wait_path_map, dict):
+        normalized = {}
+        for key, value in http3_receive_wait_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["http3_datagram_receive_wait_path_total"] = normalized
+    quic_receive_wait_path_map = snapshot.get("quic_datagram_receive_wait_path_total", {})
+    if isinstance(quic_receive_wait_path_map, dict):
+        normalized = {}
+        for key, value in quic_receive_wait_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["quic_datagram_receive_wait_path_total"] = normalized
+    quic_packet_receive_drop_map = snapshot.get("quic_packet_receive_drop_path_total", {})
+    base["quic_packet_receive_drop_path_total"] = _normalize_counter_map(
+        quic_packet_receive_drop_map,
+        mandatory_keys=QUIC_PACKET_RECEIVE_DROP_MANDATORY_KEYS,
+    )
+    quic_packet_receive_ingress_map = snapshot.get("quic_packet_receive_ingress_path_total", {})
+    base["quic_packet_receive_ingress_path_total"] = _normalize_counter_map(
+        quic_packet_receive_ingress_map,
+        mandatory_keys=QUIC_PACKET_RECEIVE_INGRESS_MANDATORY_KEYS,
+    )
+    quic_post_decrypt_path_map = snapshot.get("quic_datagram_post_decrypt_path_total", {})
+    base["quic_datagram_post_decrypt_path_total"] = _normalize_counter_map(
+        quic_post_decrypt_path_map,
+        mandatory_keys=QUIC_DATAGRAM_POST_DECRYPT_MANDATORY_KEYS,
+    )
+    quic_send_path_map = snapshot.get("quic_datagram_send_path_total", {})
+    base["quic_datagram_send_path_total"] = _normalize_counter_map(
+        quic_send_path_map,
+        mandatory_keys=QUIC_DATAGRAM_SEND_MANDATORY_KEYS,
+    )
+    quic_send_pipeline_path_map = snapshot.get("quic_datagram_send_pipeline_path_total", {})
+    base["quic_datagram_send_pipeline_path_total"] = _normalize_counter_map(
+        quic_send_pipeline_path_map,
+        mandatory_keys=QUIC_DATAGRAM_SEND_PIPELINE_MANDATORY_KEYS,
+    )
+    quic_send_write_path_map = snapshot.get("quic_datagram_send_write_path_total", {})
+    base["quic_datagram_send_write_path_total"] = _normalize_counter_map(
+        quic_send_write_path_map,
+        mandatory_keys=QUIC_DATAGRAM_SEND_WRITE_MANDATORY_KEYS,
+    )
+    quic_tx_path_map = snapshot.get("quic_datagram_tx_path_total", {})
+    base["quic_datagram_tx_path_total"] = _normalize_counter_map(
+        quic_tx_path_map,
+        mandatory_keys=QUIC_DATAGRAM_TX_MANDATORY_KEYS,
+    )
+    quic_tx_packet_len_map = snapshot.get("quic_datagram_tx_packet_len_total", {})
+    base["quic_datagram_tx_packet_len_total"] = _normalize_counter_map(
+        quic_tx_packet_len_map,
+        mandatory_keys=QUIC_DATAGRAM_TX_PACKET_LEN_MANDATORY_KEYS,
+    )
+    quic_pre_ingress_path_map = snapshot.get("quic_datagram_pre_ingress_path_total", {})
+    if isinstance(quic_pre_ingress_path_map, dict):
+        normalized = {}
+        for key, value in quic_pre_ingress_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["quic_datagram_pre_ingress_path_total"] = normalized
+    quic_ingress_path_map = snapshot.get("quic_datagram_ingress_path_total", {})
+    if isinstance(quic_ingress_path_map, dict):
+        normalized = {}
+        for key, value in quic_ingress_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["quic_datagram_ingress_path_total"] = normalized
+    quic_queue_pop_path_map = snapshot.get("quic_datagram_rcv_queue_pop_path_total", {})
+    if isinstance(quic_queue_pop_path_map, dict):
+        normalized = {}
+        for key, value in quic_queue_pop_path_map.items():
+            if isinstance(value, (int, float)):
+                normalized[str(key)] = int(value)
+        base["quic_datagram_rcv_queue_pop_path_total"] = normalized
     return base
 
 
@@ -882,7 +1417,28 @@ def _merge_observability_snapshot(primary, secondary):
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
             "connect_ip_engine_drop_reason_total",
+            "connect_ip_engine_pmtu_update_reason_total",
+            "connect_ip_bridge_write_err_reason_total",
+            "connect_ip_bridge_readpacket_return_path_total",
             "connect_ip_policy_drop_icmp_reason_total",
+            "connect_ip_receive_datagram_return_path_total",
+            "connect_ip_receive_datagram_post_return_path_total",
+            "connect_ip_proxied_packet_drop_reason_total",
+            "http3_stream_datagram_queue_pop_path_total",
+            "http3_datagram_dispatch_path_total",
+            "http3_datagram_receive_wait_path_total",
+            "quic_datagram_receive_wait_path_total",
+            "quic_packet_receive_drop_path_total",
+            "quic_packet_receive_ingress_path_total",
+            "quic_datagram_post_decrypt_path_total",
+            "quic_datagram_send_path_total",
+            "quic_datagram_send_pipeline_path_total",
+            "quic_datagram_send_write_path_total",
+            "quic_datagram_tx_path_total",
+            "quic_datagram_tx_packet_len_total",
+            "quic_datagram_pre_ingress_path_total",
+            "quic_datagram_ingress_path_total",
+            "quic_datagram_rcv_queue_pop_path_total",
         }:
             continue
         merged[key] = max(int(merged.get(key, 0)), int(alt.get(key, 0)))
@@ -907,13 +1463,76 @@ def _merge_observability_snapshot(primary, secondary):
         "connect_ip_packet_write_fail_reason_total",
         "connect_ip_packet_read_drop_reason_total",
         "connect_ip_engine_drop_reason_total",
+        "connect_ip_engine_pmtu_update_reason_total",
+        "connect_ip_bridge_write_err_reason_total",
+        "connect_ip_bridge_readpacket_return_path_total",
         "connect_ip_policy_drop_icmp_reason_total",
+        "connect_ip_receive_datagram_return_path_total",
+        "connect_ip_receive_datagram_post_return_path_total",
+        "connect_ip_proxied_packet_drop_reason_total",
+        "http3_stream_datagram_queue_pop_path_total",
+        "http3_datagram_dispatch_path_total",
+        "http3_datagram_receive_wait_path_total",
+        "quic_datagram_receive_wait_path_total",
+        "quic_packet_receive_drop_path_total",
+        "quic_packet_receive_ingress_path_total",
+        "quic_datagram_post_decrypt_path_total",
+        "quic_datagram_send_path_total",
+        "quic_datagram_send_pipeline_path_total",
+        "quic_datagram_send_write_path_total",
+        "quic_datagram_tx_path_total",
+        "quic_datagram_tx_packet_len_total",
+        "quic_datagram_pre_ingress_path_total",
+        "quic_datagram_ingress_path_total",
+        "quic_datagram_rcv_queue_pop_path_total",
     ):
         result = dict(merged.get(map_key, {}))
         for reason, value in dict(alt.get(map_key, {})).items():
             result[str(reason)] = max(int(result.get(reason, 0)), int(value))
         merged[map_key] = result
     return merged
+
+
+# String fields in observability *deltas* (from _diff_observability); merged by non-empty preference, not max().
+_OBSERVABILITY_DELTA_STRING_KEYS = frozenset(
+    {
+        "connect_ip_obs_contract_version",
+        "connect_ip_session_id",
+        "connect_ip_scope_target",
+    }
+)
+
+
+def _merge_observability_delta(delta_primary, delta_secondary):
+    """Merge per-container observability deltas.
+
+    QUIC/http3 post-decrypt and related counters are process-wide inside each sing-box.
+    diff(merge(client_abs, server_abs)) takes max of cumulative totals before/after; if one
+    process always wins max() because of a higher idle baseline, the peer's delta is erased
+    (false post_send_frame_visibility_absent / missing ingress signal). Diff each container
+    then max-merge per scalar/map bucket preserves both sides.
+    """
+    a = delta_primary if isinstance(delta_primary, dict) else {}
+    b = delta_secondary if isinstance(delta_secondary, dict) else {}
+    out = _zero_observability_snapshot()
+    for key in out:
+        va, vb = a.get(key), b.get(key)
+        if key in _OBSERVABILITY_DELTA_STRING_KEYS:
+            tmpl = out[key]
+            sa = va if isinstance(va, str) else ""
+            sb = vb if isinstance(vb, str) else ""
+            chosen = (sb.strip() or sa.strip())
+            out[key] = chosen if chosen else tmpl
+        elif isinstance(out[key], dict):
+            ma = va if isinstance(va, dict) else {}
+            mb = vb if isinstance(vb, dict) else {}
+            merged_map = {}
+            for sub in set(ma) | set(mb):
+                merged_map[str(sub)] = max(_safe_int(ma.get(sub, 0), 0), _safe_int(mb.get(sub, 0), 0))
+            out[key] = merged_map
+        else:
+            out[key] = max(_safe_int(va, 0), _safe_int(vb, 0))
+    return out
 
 
 def _fallback_observability_from_logs(client_logs, server_logs):
@@ -927,6 +1546,8 @@ def _fallback_observability_from_logs(client_logs, server_logs):
         "connect_ip_packet_read_exit_total": server_logs.count("reading from request stream failed"),
         "connect_ip_packet_tx_total": 0,
         "connect_ip_packet_rx_total": 0,
+        "connect_ip_bridge_udp_tx_attempt_total": 0,
+        "connect_ip_bridge_udp_rx_attempt_total": 0,
         "connect_ip_bytes_tx_total": 0,
         "connect_ip_bytes_rx_total": 0,
         "connect_ip_session_reset_total": session_reset,
@@ -951,7 +1572,28 @@ def _diff_observability(before, after):
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
             "connect_ip_engine_drop_reason_total",
+            "connect_ip_engine_pmtu_update_reason_total",
+            "connect_ip_bridge_write_err_reason_total",
+            "connect_ip_bridge_readpacket_return_path_total",
             "connect_ip_policy_drop_icmp_reason_total",
+            "connect_ip_receive_datagram_return_path_total",
+            "connect_ip_receive_datagram_post_return_path_total",
+            "connect_ip_proxied_packet_drop_reason_total",
+            "http3_stream_datagram_queue_pop_path_total",
+            "http3_datagram_dispatch_path_total",
+            "http3_datagram_receive_wait_path_total",
+            "quic_datagram_receive_wait_path_total",
+            "quic_packet_receive_drop_path_total",
+            "quic_packet_receive_ingress_path_total",
+            "quic_datagram_post_decrypt_path_total",
+            "quic_datagram_send_path_total",
+            "quic_datagram_send_pipeline_path_total",
+            "quic_datagram_send_write_path_total",
+            "quic_datagram_tx_path_total",
+            "quic_datagram_tx_packet_len_total",
+            "quic_datagram_pre_ingress_path_total",
+            "quic_datagram_ingress_path_total",
+            "quic_datagram_rcv_queue_pop_path_total",
         }:
             continue
         delta[key] = max(0, int(after.get(key, 0)) - int(before.get(key, 0)))
@@ -987,6 +1629,14 @@ def _diff_observability(before, after):
         if diff > 0:
             engine_drop_reasons[reason] = diff
     delta["connect_ip_engine_drop_reason_total"] = engine_drop_reasons
+    before_pmtu_update_reasons = before.get("connect_ip_engine_pmtu_update_reason_total", {})
+    after_pmtu_update_reasons = after.get("connect_ip_engine_pmtu_update_reason_total", {})
+    pmtu_update_reasons = {}
+    for reason, value in after_pmtu_update_reasons.items():
+        diff = int(value) - int(before_pmtu_update_reasons.get(reason, 0))
+        if diff > 0:
+            pmtu_update_reasons[reason] = diff
+    delta["connect_ip_engine_pmtu_update_reason_total"] = pmtu_update_reasons
     before_icmp_reasons = before.get("connect_ip_policy_drop_icmp_reason_total", {})
     after_icmp_reasons = after.get("connect_ip_policy_drop_icmp_reason_total", {})
     icmp_reasons = {}
@@ -995,6 +1645,246 @@ def _diff_observability(before, after):
         if diff > 0:
             icmp_reasons[reason] = diff
     delta["connect_ip_policy_drop_icmp_reason_total"] = icmp_reasons
+    before_proxied_drop_reasons = before.get("connect_ip_proxied_packet_drop_reason_total", {})
+    after_proxied_drop_reasons = after.get("connect_ip_proxied_packet_drop_reason_total", {})
+    proxied_drop_reasons = {}
+    for reason, value in after_proxied_drop_reasons.items():
+        diff = int(value) - int(before_proxied_drop_reasons.get(reason, 0))
+        if diff > 0:
+            proxied_drop_reasons[reason] = diff
+    delta["connect_ip_proxied_packet_drop_reason_total"] = proxied_drop_reasons
+    before_bridge_write_err_reasons = before.get("connect_ip_bridge_write_err_reason_total", {})
+    after_bridge_write_err_reasons = after.get("connect_ip_bridge_write_err_reason_total", {})
+    bridge_write_err_reasons = {}
+    for reason, value in after_bridge_write_err_reasons.items():
+        diff = int(value) - int(before_bridge_write_err_reasons.get(reason, 0))
+        if diff > 0:
+            bridge_write_err_reasons[reason] = diff
+    delta["connect_ip_bridge_write_err_reason_total"] = bridge_write_err_reasons
+    before_readpacket_paths = before.get("connect_ip_bridge_readpacket_return_path_total", {})
+    after_readpacket_paths = after.get("connect_ip_bridge_readpacket_return_path_total", {})
+    readpacket_paths = {}
+    for reason, value in after_readpacket_paths.items():
+        diff = int(value) - int(before_readpacket_paths.get(reason, 0))
+        if diff > 0:
+            readpacket_paths[reason] = diff
+    delta["connect_ip_bridge_readpacket_return_path_total"] = readpacket_paths
+    before_return_path_reasons = before.get("connect_ip_receive_datagram_return_path_total", {})
+    after_return_path_reasons = after.get("connect_ip_receive_datagram_return_path_total", {})
+    return_path_reasons = {}
+    for reason, value in after_return_path_reasons.items():
+        diff = int(value) - int(before_return_path_reasons.get(reason, 0))
+        if diff > 0:
+            return_path_reasons[reason] = diff
+    delta["connect_ip_receive_datagram_return_path_total"] = return_path_reasons
+    before_post_return_path_reasons = before.get("connect_ip_receive_datagram_post_return_path_total", {})
+    after_post_return_path_reasons = after.get("connect_ip_receive_datagram_post_return_path_total", {})
+    post_return_path_reasons = {}
+    for reason, value in after_post_return_path_reasons.items():
+        diff = int(value) - int(before_post_return_path_reasons.get(reason, 0))
+        if diff > 0:
+            post_return_path_reasons[reason] = diff
+    delta["connect_ip_receive_datagram_post_return_path_total"] = post_return_path_reasons
+    before_http3_queue_pop_path = before.get("http3_stream_datagram_queue_pop_path_total", {})
+    after_http3_queue_pop_path = after.get("http3_stream_datagram_queue_pop_path_total", {})
+    http3_queue_pop_path = {}
+    for reason, value in after_http3_queue_pop_path.items():
+        diff = int(value) - int(before_http3_queue_pop_path.get(reason, 0))
+        if diff > 0:
+            http3_queue_pop_path[reason] = diff
+    delta["http3_stream_datagram_queue_pop_path_total"] = http3_queue_pop_path
+    before_http3_dispatch_path = before.get("http3_datagram_dispatch_path_total", {})
+    after_http3_dispatch_path = after.get("http3_datagram_dispatch_path_total", {})
+    http3_dispatch_path = {}
+    for reason, value in after_http3_dispatch_path.items():
+        diff = int(value) - int(before_http3_dispatch_path.get(reason, 0))
+        if diff > 0:
+            http3_dispatch_path[reason] = diff
+    delta["http3_datagram_dispatch_path_total"] = http3_dispatch_path
+    before_http3_receive_wait_path = before.get("http3_datagram_receive_wait_path_total", {})
+    after_http3_receive_wait_path = after.get("http3_datagram_receive_wait_path_total", {})
+    http3_receive_wait_path = {}
+    for reason, value in after_http3_receive_wait_path.items():
+        diff = int(value) - int(before_http3_receive_wait_path.get(reason, 0))
+        if diff > 0:
+            http3_receive_wait_path[reason] = diff
+    delta["http3_datagram_receive_wait_path_total"] = http3_receive_wait_path
+    before_quic_receive_wait_path = before.get("quic_datagram_receive_wait_path_total", {})
+    after_quic_receive_wait_path = after.get("quic_datagram_receive_wait_path_total", {})
+    quic_receive_wait_path = {}
+    for reason, value in after_quic_receive_wait_path.items():
+        diff = int(value) - int(before_quic_receive_wait_path.get(reason, 0))
+        if diff > 0:
+            quic_receive_wait_path[str(reason)] = diff
+    delta["quic_datagram_receive_wait_path_total"] = quic_receive_wait_path
+    before_quic_packet_receive_drop = _normalize_counter_map(
+        before.get("quic_packet_receive_drop_path_total", {}),
+        mandatory_keys=QUIC_PACKET_RECEIVE_DROP_MANDATORY_KEYS,
+    )
+    after_quic_packet_receive_drop = _normalize_counter_map(
+        after.get("quic_packet_receive_drop_path_total", {}),
+        mandatory_keys=QUIC_PACKET_RECEIVE_DROP_MANDATORY_KEYS,
+    )
+    quic_packet_receive_drop = {}
+    for reason in QUIC_PACKET_RECEIVE_DROP_MANDATORY_KEYS:
+        diff = int(after_quic_packet_receive_drop.get(reason, 0)) - int(
+            before_quic_packet_receive_drop.get(reason, 0)
+        )
+        quic_packet_receive_drop[str(reason)] = max(0, diff)
+    for reason, value in after_quic_packet_receive_drop.items():
+        if reason in quic_packet_receive_drop:
+            continue
+        diff = int(value) - int(before_quic_packet_receive_drop.get(reason, 0))
+        if diff > 0:
+            quic_packet_receive_drop[str(reason)] = diff
+    delta["quic_packet_receive_drop_path_total"] = quic_packet_receive_drop
+    before_quic_packet_receive_ingress = _normalize_counter_map(
+        before.get("quic_packet_receive_ingress_path_total", {}),
+        mandatory_keys=QUIC_PACKET_RECEIVE_INGRESS_MANDATORY_KEYS,
+    )
+    after_quic_packet_receive_ingress = _normalize_counter_map(
+        after.get("quic_packet_receive_ingress_path_total", {}),
+        mandatory_keys=QUIC_PACKET_RECEIVE_INGRESS_MANDATORY_KEYS,
+    )
+    quic_packet_receive_ingress = {}
+    for reason in QUIC_PACKET_RECEIVE_INGRESS_MANDATORY_KEYS:
+        diff = int(after_quic_packet_receive_ingress.get(reason, 0)) - int(
+            before_quic_packet_receive_ingress.get(reason, 0)
+        )
+        quic_packet_receive_ingress[str(reason)] = max(0, diff)
+    for reason, value in after_quic_packet_receive_ingress.items():
+        if reason in quic_packet_receive_ingress:
+            continue
+        diff = int(value) - int(before_quic_packet_receive_ingress.get(reason, 0))
+        if diff > 0:
+            quic_packet_receive_ingress[str(reason)] = diff
+    delta["quic_packet_receive_ingress_path_total"] = quic_packet_receive_ingress
+    before_quic_post_decrypt_path = _normalize_counter_map(
+        before.get("quic_datagram_post_decrypt_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_POST_DECRYPT_MANDATORY_KEYS,
+    )
+    after_quic_post_decrypt_path = _normalize_counter_map(
+        after.get("quic_datagram_post_decrypt_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_POST_DECRYPT_MANDATORY_KEYS,
+    )
+    quic_post_decrypt_path = {}
+    for reason in QUIC_DATAGRAM_POST_DECRYPT_MANDATORY_KEYS:
+        diff = int(after_quic_post_decrypt_path.get(reason, 0)) - int(before_quic_post_decrypt_path.get(reason, 0))
+        quic_post_decrypt_path[str(reason)] = max(0, diff)
+    for reason, value in after_quic_post_decrypt_path.items():
+        if reason in quic_post_decrypt_path:
+            continue
+        diff = int(value) - int(before_quic_post_decrypt_path.get(reason, 0))
+        if diff > 0:
+            quic_post_decrypt_path[str(reason)] = diff
+    delta["quic_datagram_post_decrypt_path_total"] = quic_post_decrypt_path
+    before_quic_send_path = _normalize_counter_map(
+        before.get("quic_datagram_send_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_SEND_MANDATORY_KEYS,
+    )
+    after_quic_send_path = _normalize_counter_map(
+        after.get("quic_datagram_send_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_SEND_MANDATORY_KEYS,
+    )
+    quic_send_path = {}
+    for reason in QUIC_DATAGRAM_SEND_MANDATORY_KEYS:
+        diff = int(after_quic_send_path.get(reason, 0)) - int(before_quic_send_path.get(reason, 0))
+        quic_send_path[str(reason)] = max(0, diff)
+    for reason, value in after_quic_send_path.items():
+        if reason in quic_send_path:
+            continue
+        diff = int(value) - int(before_quic_send_path.get(reason, 0))
+        if diff > 0:
+            quic_send_path[str(reason)] = diff
+    delta["quic_datagram_send_path_total"] = quic_send_path
+    before_quic_send_pipeline_path = _normalize_counter_map(
+        before.get("quic_datagram_send_pipeline_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_SEND_PIPELINE_MANDATORY_KEYS,
+    )
+    after_quic_send_pipeline_path = _normalize_counter_map(
+        after.get("quic_datagram_send_pipeline_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_SEND_PIPELINE_MANDATORY_KEYS,
+    )
+    quic_send_pipeline_path = {}
+    for reason in QUIC_DATAGRAM_SEND_PIPELINE_MANDATORY_KEYS:
+        diff = int(after_quic_send_pipeline_path.get(reason, 0)) - int(before_quic_send_pipeline_path.get(reason, 0))
+        quic_send_pipeline_path[str(reason)] = max(0, diff)
+    for reason, value in after_quic_send_pipeline_path.items():
+        if reason in quic_send_pipeline_path:
+            continue
+        diff = int(value) - int(before_quic_send_pipeline_path.get(reason, 0))
+        if diff > 0:
+            quic_send_pipeline_path[str(reason)] = diff
+    delta["quic_datagram_send_pipeline_path_total"] = quic_send_pipeline_path
+    before_quic_send_write_path = _normalize_counter_map(
+        before.get("quic_datagram_send_write_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_SEND_WRITE_MANDATORY_KEYS,
+    )
+    after_quic_send_write_path = _normalize_counter_map(
+        after.get("quic_datagram_send_write_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_SEND_WRITE_MANDATORY_KEYS,
+    )
+    quic_send_write_path = {}
+    for reason in QUIC_DATAGRAM_SEND_WRITE_MANDATORY_KEYS:
+        diff = int(after_quic_send_write_path.get(reason, 0)) - int(before_quic_send_write_path.get(reason, 0))
+        quic_send_write_path[str(reason)] = max(0, diff)
+    for reason, value in after_quic_send_write_path.items():
+        if reason in quic_send_write_path:
+            continue
+        diff = int(value) - int(before_quic_send_write_path.get(reason, 0))
+        if diff > 0:
+            quic_send_write_path[str(reason)] = diff
+    delta["quic_datagram_send_write_path_total"] = quic_send_write_path
+    quic_tx_path_before = _normalize_counter_map(
+        before.get("quic_datagram_tx_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_TX_MANDATORY_KEYS,
+    )
+    quic_tx_path_after = _normalize_counter_map(
+        after.get("quic_datagram_tx_path_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_TX_MANDATORY_KEYS,
+    )
+    quic_tx_path = {}
+    for reason in QUIC_DATAGRAM_TX_MANDATORY_KEYS:
+        quic_tx_path[reason] = int(quic_tx_path_after.get(reason, 0)) - int(quic_tx_path_before.get(reason, 0))
+    delta["quic_datagram_tx_path_total"] = quic_tx_path
+    quic_tx_packet_len_before = _normalize_counter_map(
+        before.get("quic_datagram_tx_packet_len_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_TX_PACKET_LEN_MANDATORY_KEYS,
+    )
+    quic_tx_packet_len_after = _normalize_counter_map(
+        after.get("quic_datagram_tx_packet_len_total", {}),
+        mandatory_keys=QUIC_DATAGRAM_TX_PACKET_LEN_MANDATORY_KEYS,
+    )
+    quic_tx_packet_len = {}
+    for reason in QUIC_DATAGRAM_TX_PACKET_LEN_MANDATORY_KEYS:
+        quic_tx_packet_len[reason] = int(quic_tx_packet_len_after.get(reason, 0)) - int(
+            quic_tx_packet_len_before.get(reason, 0)
+        )
+    delta["quic_datagram_tx_packet_len_total"] = quic_tx_packet_len
+    before_quic_pre_ingress_path = before.get("quic_datagram_pre_ingress_path_total", {})
+    after_quic_pre_ingress_path = after.get("quic_datagram_pre_ingress_path_total", {})
+    quic_pre_ingress_path = {}
+    for reason, value in after_quic_pre_ingress_path.items():
+        diff = int(value) - int(before_quic_pre_ingress_path.get(reason, 0))
+        if diff > 0:
+            quic_pre_ingress_path[str(reason)] = diff
+    delta["quic_datagram_pre_ingress_path_total"] = quic_pre_ingress_path
+    before_quic_ingress_path = before.get("quic_datagram_ingress_path_total", {})
+    after_quic_ingress_path = after.get("quic_datagram_ingress_path_total", {})
+    quic_ingress_path = {}
+    for reason, value in after_quic_ingress_path.items():
+        diff = int(value) - int(before_quic_ingress_path.get(reason, 0))
+        if diff > 0:
+            quic_ingress_path[str(reason)] = diff
+    delta["quic_datagram_ingress_path_total"] = quic_ingress_path
+    before_quic_queue_pop_path = before.get("quic_datagram_rcv_queue_pop_path_total", {})
+    after_quic_queue_pop_path = after.get("quic_datagram_rcv_queue_pop_path_total", {})
+    quic_queue_pop_path = {}
+    for reason, value in after_quic_queue_pop_path.items():
+        diff = int(value) - int(before_quic_queue_pop_path.get(reason, 0))
+        if diff > 0:
+            quic_queue_pop_path[reason] = diff
+    delta["quic_datagram_rcv_queue_pop_path_total"] = quic_queue_pop_path
     return delta
 
 
@@ -1032,7 +1922,15 @@ def connect_ip_observability(docker, before_client_logs, before_server_logs):
         after = _normalize_observability_snapshot(
             _fallback_observability_from_logs(after_client_logs, after_server_logs)
         )
-    delta = _diff_observability(before, after)
+        delta = _diff_observability(before, after)
+        delta_client = delta
+        delta_server = delta
+        observability_peer_split = False
+    else:
+        delta_client = _diff_observability(before_client_snapshot, after_client_snapshot)
+        delta_server = _diff_observability(before_server_snapshot, after_server_snapshot)
+        delta = _merge_observability_delta(delta_client, delta_server)
+        observability_peer_split = True
     numeric_delta_nonzero = any(
         _safe_int(delta.get(key, 0), 0) > 0
         for key in delta
@@ -1046,12 +1944,25 @@ def connect_ip_observability(docker, before_client_logs, before_server_logs):
             "connect_ip_packet_write_fail_reason_total",
             "connect_ip_packet_read_drop_reason_total",
             "connect_ip_policy_drop_icmp_reason_total",
+            "connect_ip_proxied_packet_drop_reason_total",
         }
     )
     map_delta_nonzero = any(delta.get("connect_ip_session_reset_total", {}).values()) or any(
         delta.get("connect_ip_packet_write_fail_reason_total", {}).values()
     ) or any(delta.get("connect_ip_packet_read_drop_reason_total", {}).values()) or any(
+        delta.get("connect_ip_bridge_write_err_reason_total", {}).values()
+    ) or any(
         delta.get("connect_ip_policy_drop_icmp_reason_total", {}).values()
+    ) or any(
+        delta.get("connect_ip_proxied_packet_drop_reason_total", {}).values()
+    ) or any(
+        delta.get("http3_datagram_receive_wait_path_total", {}).values()
+    ) or any(
+        delta.get("quic_datagram_send_path_total", {}).values()
+    ) or any(
+        delta.get("quic_packet_receive_drop_path_total", {}).values()
+    ) or any(
+        delta.get("quic_packet_receive_ingress_path_total", {}).values()
     )
     observability_gap = runtime_marker_seen and not (numeric_delta_nonzero or map_delta_nonzero)
     return {
@@ -1061,6 +1972,9 @@ def connect_ip_observability(docker, before_client_logs, before_server_logs):
         "before": before,
         "after": after,
         "delta": delta,
+        "delta_client": delta_client,
+        "delta_server": delta_server,
+        "observability_peer_split": observability_peer_split,
     }
 
 
@@ -1078,6 +1992,35 @@ def classify_tcp_ip_stop_reason(send_err, got, expected, hash_ok, settled, budge
             and obs_delta.get("connect_ip_packet_rx_total", 0) == 0
         ):
             return "bypass_path_connect_udp"
+        if (
+            obs_delta.get("connect_ip_bridge_udp_tx_attempt_total", 0) > 0
+            and obs_delta.get("connect_ip_packet_tx_total", 0) <= obs_delta.get("connect_ip_bridge_udp_tx_attempt_total", 0)
+            and obs_delta.get("connect_ip_packet_rx_total", 0) == 0
+            and obs_delta.get("connect_ip_engine_ingress_total", 0) == 0
+            and got < expected
+        ):
+            tx_path = obs_delta.get("quic_datagram_tx_path_total", {})
+            tx_packet_len = obs_delta.get("quic_datagram_tx_packet_len_total", {})
+            post_decrypt = obs_delta.get("quic_datagram_post_decrypt_path_total", {})
+            pre_ingress = obs_delta.get("quic_datagram_pre_ingress_path_total", {})
+            send_pipeline = obs_delta.get("quic_datagram_send_pipeline_path_total", {})
+            send_write = obs_delta.get("quic_datagram_send_write_path_total", {})
+            if (
+                isinstance(tx_path, dict)
+                and isinstance(tx_packet_len, dict)
+                and isinstance(post_decrypt, dict)
+                and isinstance(pre_ingress, dict)
+                and isinstance(send_pipeline, dict)
+                and isinstance(send_write, dict)
+                and tx_path.get("sendmsg_ok", 0) > 0
+                and tx_packet_len.get("le_1400", 0) > 0
+                and send_pipeline.get("send_queue_enqueued", 0) > 0
+                and send_write.get("write_ok", 0) > 0
+                and post_decrypt.get("contains_datagram_frame", 0) == 0
+                and pre_ingress.get("frame_type_seen", 0) == 0
+            ):
+                return "post_send_frame_visibility_absent"
+            return "bridge_boundary_stall"
         if reset_delta.get("write_fail_retry_exhausted", 0) > 0:
             return "session_reset_write_fail_retry_exhausted"
         if reset_delta.get("write_fail_fatal", 0) > 0:
@@ -1194,8 +2137,10 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
     sink = "/tmp/udp-python.bin"
     srv_to, cli_to, wait_cap = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
     chunk = _stand_udp_chunk(byte_count, udp_chunk)
-    if int(udp_rate_bps) > 0:
-        pause = float(chunk) / float(int(udp_rate_bps))
+    target_rate_bps = int(udp_rate_bps) if int(udp_rate_bps) > 0 else 0
+    udp_sender_sndbuf = int(os.environ.get("MASQUE_STAND_UDP_SNDBUF", str(16 * 1024 * 1024)))
+    if target_rate_bps > 0:
+        pause = 0.0
     else:
         raw = (os.environ.get("MASQUE_STAND_UDP_BULK_PAUSE") or "0").strip()
         try:
@@ -1224,23 +2169,43 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
         docker_exec(
             docker,
             CLIENT_CONTAINER,
-            _udp_tun_datagram_send_sh(byte_count, target_host, port, cli_to, chunk=chunk, pause_sec=pause),
+            _udp_tun_datagram_send_sh(
+                byte_count,
+                target_host,
+                port,
+                cli_to,
+                chunk=chunk,
+                pause_sec=pause,
+                rate_bps=target_rate_bps,
+                sndbuf=udp_sender_sndbuf,
+            ),
             check=False,
         )
         recv_wait = 10 if byte_count == BYTES_10KB else wait_cap
         got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
         elapsed = time.time() - start
+        tm_elapsed = max(float(elapsed), 1e-9)
+        tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
+        target_throughput_mbps = (target_rate_bps / 1_000_000.0) if target_rate_bps > 0 else None
+        min_ratio_raw = (os.environ.get("MASQUE_STAND_UDP_RATE_MIN_RATIO") or "0.9").strip()
+        try:
+            min_ratio = float(min_ratio_raw)
+        except ValueError:
+            min_ratio = 0.9
+        min_ratio = min(1.0, max(0.0, min_ratio))
+        throughput_ok = True
+        if target_throughput_mbps is not None:
+            throughput_ok = tmetrics["throughput_mbps"] >= (target_throughput_mbps * min_ratio)
+
         if float(udp_loss_pct) > 0:
             floor_ratio = max(0.85, 1.0 - (float(udp_loss_pct) + 4.0) / 100.0)
-            ok = int(got) >= int(float(byte_count) * floor_ratio)
+            ok = int(got) >= int(float(byte_count) * floor_ratio) and throughput_ok
         elif byte_count == BYTES_10KB:
             ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC
         else:
-            ok = got >= byte_count
+            ok = got >= byte_count and throughput_ok
         loss_b = max(0, int(byte_count) - int(got))
         meas_loss = (100.0 * loss_b / float(byte_count)) if byte_count > 0 else 0.0
-        tm_elapsed = max(float(elapsed), 1e-9)
-        tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
         t_min_50 = _theoretical_transfer_sec_at_mbps(byte_count, _BULK_HARNESS_BASELINE_MBPS)
         payload = {
             "scenario": "udp",
@@ -1253,7 +2218,11 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
             "ok": ok,
             "stand_udp_chunk_bytes": chunk,
             "stand_udp_pause_sec": round(pause, 6),
-            "udp_send_rate_bps": int(udp_rate_bps) if int(udp_rate_bps) > 0 else None,
+            "udp_send_rate_bps": target_rate_bps if target_rate_bps > 0 else None,
+            "udp_sender_sndbuf": udp_sender_sndbuf,
+            "throughput_target_mbps": round(target_throughput_mbps, 3) if target_throughput_mbps is not None else None,
+            "throughput_min_ratio": round(min_ratio, 4) if target_throughput_mbps is not None else None,
+            "throughput_target_met": throughput_ok if target_throughput_mbps is not None else None,
             "injected_loss_pct": float(udp_loss_pct),
             "measured_loss_pct_approx": round(meas_loss, 4),
         }
@@ -1261,11 +2230,36 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
             payload["error"] = None
             payload["error_class"] = "none"
             payload["error_source"] = "none"
+            payload["stop_reason"] = "none"
+            payload["stop_reason_source"] = "none"
+            payload["stop_reason_evidence"] = {
+                "throughput_target_met": bool(throughput_ok),
+                "bytes_received": int(got),
+                "bytes_expected": int(byte_count),
+                "measured_loss_pct_approx": round(meas_loss, 4),
+            }
         else:
-            hint = "timeout" if got < byte_count else "deadlineExceeded"
+            stop_reason, stop_reason_source, hint = _classify_udp_fail_reason(
+                got,
+                byte_count,
+                throughput_ok,
+                target_rate_bps,
+            )
             payload["error"] = hint
             payload["error_class"] = _classified_error_bucket(hint)
             payload["error_source"] = "runtime"
+            payload["stop_reason"] = stop_reason
+            payload["stop_reason_source"] = stop_reason_source
+            payload["stop_reason_evidence"] = {
+                "throughput_target_met": bool(throughput_ok),
+                "throughput_target_mbps": round(target_throughput_mbps, 3)
+                if target_throughput_mbps is not None
+                else None,
+                "throughput_mbps": tmetrics["throughput_mbps"],
+                "bytes_received": int(got),
+                "bytes_expected": int(byte_count),
+                "measured_loss_pct_approx": round(meas_loss, 4),
+            }
         return payload
     finally:
         _netem_clear(docker)
@@ -1375,6 +2369,7 @@ def run_tcp_ip(
     send_timeout_sec=None,
     wait_timeout_sec=None,
     tcp_ip_deadline_sec=None,
+    udp_rate_bps=0,
 ):
     # TUN-only hard switch: validate CONNECT-IP packet-plane directly.
     target_host, port = "10.200.0.2", 5601
@@ -1405,6 +2400,7 @@ def run_tcp_ip(
     if byte_count > BYTES_10KB and tcp_ip_deadline_sec is not None:
         strict_budget = max(1, int(tcp_ip_deadline_sec))
     if byte_count > BYTES_10KB and mode == "bulk_single_flow":
+        strict_budget = max(strict_budget, _tcp_ip_bulk_min_strict_budget_sec(byte_count))
         phase_slack = min(
             BULK_SINGLE_FLOW_RECEIVE_TAIL_CAP_SEC,
             BULK_SINGLE_FLOW_RECEIVE_TAIL_BASE_SEC + strict_budget * BULK_SINGLE_FLOW_RECEIVE_TAIL_PER_STRICT_SEC,
@@ -1412,10 +2408,11 @@ def run_tcp_ip(
     else:
         phase_slack = 0.0
     phase_deadline = start + strict_budget + phase_slack
-    send_timeout = send_timeout_sec if send_timeout_sec is not None else strict_budget
+    rate_bps = 0
     if mode == "churn_many_flows":
         chunk = 1024
         count = max(1, byte_count // chunk)
+        send_timeout = send_timeout_sec if send_timeout_sec is not None else strict_budget
         send_cmd = (
             f"timeout {send_timeout} sh -lc 'ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true; "
             f"for i in $(seq 1 {count}); do dd if=/dev/zero bs={chunk} count=1 2>/dev/null | "
@@ -1430,7 +2427,16 @@ def run_tcp_ip(
         if send_rate_limit == "1m":
             send_rate_limit = "1300k"
         rate_bps = parse_rate_limit_to_bps(send_rate_limit)
+        if int(udp_rate_bps) > 0:
+            rate_bps = int(udp_rate_bps)
         send_cmd = None
+        send_timeout = send_timeout_sec if send_timeout_sec is not None else strict_budget
+        # MASQUE_UDP_RATE_BPS in the paced script is bytes/sec (see target_elapsed = sent/RATE_BPS).
+        # MiB-derived strict_budget can be shorter than ceil(bytes/rate); avoid timeout-killing mid-transfer.
+        if rate_bps > 0:
+            min_wall_sec = max(1, int((byte_count + rate_bps - 1) // rate_bps))
+            slack_sec = max(5, strict_budget // 4)
+            send_timeout = max(send_timeout, min_wall_sec + slack_sec)
     before_client_logs = docker_logs_capture(docker, CLIENT_CONTAINER)
     before_server_logs = docker_logs_capture(docker, SERVER_CONTAINER)
     send_err = None
@@ -1438,7 +2444,12 @@ def run_tcp_ip(
         if mode == "churn_many_flows":
             docker_exec(docker, CLIENT_CONTAINER, send_cmd)
         else:
-            docker_exec(docker, CLIENT_CONTAINER, "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true")
+            docker_exec(
+                docker,
+                CLIENT_CONTAINER,
+                "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true",
+                check=False,
+            )
             run(
                 [
                     docker,
@@ -1638,9 +2649,167 @@ def run_tcp_ip(
     }
 
 
+def run_tcp_ip_threshold_sweep(
+    docker,
+    byte_count,
+    mode="bulk_single_flow",
+    tcp_ip_deadline_sec=None,
+    rate_limits=None,
+):
+    limits = [str(x).strip() for x in (rate_limits or []) if str(x).strip()]
+    if not limits:
+        limits = ["70m", "80m", "90m", "100m"]
+    previous = os.environ.get("MASQUE_TCP_IP_RATE_LIMIT")
+    trials = []
+    try:
+        for idx, rate in enumerate(limits):
+            # One compose_up runs in run_scenario before the sweep; reconnect after a FAIL
+            # can leave QUIC/CONNECT-IP wedged so later rates see bridge_boundary_stall/0 bytes.
+            if idx > 0 and not skip_stand_compose_up():
+                compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+            os.environ["MASQUE_TCP_IP_RATE_LIMIT"] = rate
+            result = run_tcp_ip(
+                docker,
+                byte_count,
+                mode=mode,
+                tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+            )
+            metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
+            trials.append(
+                {
+                    "rate_limit": rate,
+                    "loss_pct": float(metrics.get("loss_pct", 0.0) or 0.0),
+                    "stop_reason": str(result.get("stop_reason", "") or ""),
+                    "error_class": str(result.get("error_class", "") or ""),
+                    "ok": bool(result.get("ok")),
+                    "bytes_received": int(result.get("bytes_received", 0) or 0),
+                }
+            )
+    finally:
+        if previous is None:
+            os.environ.pop("MASQUE_TCP_IP_RATE_LIMIT", None)
+        else:
+            os.environ["MASQUE_TCP_IP_RATE_LIMIT"] = previous
+    last_pass = None
+    first_fail = None
+    for trial in trials:
+        if trial["ok"]:
+            last_pass = trial["rate_limit"]
+        elif first_fail is None:
+            first_fail = trial["rate_limit"]
+    return {
+        "scenario": "tcp_ip_threshold",
+        "mode": mode,
+        "bytes_expected": int(byte_count),
+        "rate_limits": limits,
+        "trials": trials,
+        "last_pass_rate_limit": last_pass,
+        "first_fail_rate_limit": first_fail,
+        "ok": all(bool(t.get("ok")) for t in trials),
+    }
+
+
+def _parse_csv_tcp_ip_rates_csv(s: str):
+    raw = (s or "").strip()
+    if not raw:
+        return ["8m", "10m", "12m", "14m"]
+    out = [x.strip() for x in raw.split(",") if x.strip()]
+    return out if out else ["8m", "10m", "12m"]
+
+
+def _parse_csv_udp_bps_rates(s: str):
+    raw = (s or "").strip()
+    # Default skips bps=0 (unmetered soak): Docker often misses bulk drain deadlines; add "0,"
+    # to MASQUE_DEGRADE_UDP_BPS when you explicitly want bursty/soak probing.
+    if not raw:
+        return [30_000_000, 50_000_000, 70_000_000]
+    out = []
+    for x in raw.split(","):
+        x = x.strip()
+        if x:
+            out.append(int(x))
+    return out if out else [0, 50_000_000]
+
+
+def run_degrade_matrix(docker, byte_count, tcp_ip_mode="bulk_single_flow", tcp_ip_deadline_sec=None):
+    """CONNECT-IP + UDP ladders for local dataplane degrade search (standalone compose isolation)."""
+    effective = byte_count if byte_count > BYTES_10KB else int(10 * 1024 * 1024)
+    tcp_rates_csv = os.environ.get("MASQUE_DEGRADE_TCP_IP_RATES", "")
+    udp_bps_csv = os.environ.get("MASQUE_DEGRADE_UDP_BPS", "")
+    tcp_rates = _parse_csv_tcp_ip_rates_csv(tcp_rates_csv)
+    udp_bps = _parse_csv_udp_bps_rates(udp_bps_csv)
+
+    tcp_summary = {}
+    tcp_ok = False
+    try:
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+        tcp_summary = run_tcp_ip_threshold_sweep(
+            docker,
+            effective,
+            mode=tcp_ip_mode,
+            tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+            rate_limits=tcp_rates,
+        )
+        tcp_ok = bool(tcp_summary.get("ok"))
+    except Exception as exc:
+        tcp_summary = {
+            "scenario": "tcp_ip_threshold",
+            "ok": False,
+            "error": str(exc),
+            "trials": [],
+            "rate_limits": list(tcp_rates),
+        }
+
+    udp_trials = []
+    udp_ok = True
+    for bps in udp_bps:
+        try:
+            if not skip_stand_compose_up():
+                compose_up(docker, DEFAULT_CLIENT_CONFIG)
+            row = run_udp(docker, effective, udp_chunk=0, udp_rate_bps=int(bps), udp_loss_pct=0.0)
+            row["udp_send_bps"] = int(bps)
+            udp_trials.append(row)
+            udp_ok = udp_ok and bool(row.get("ok"))
+        except Exception as exc:
+            udp_trials.append(
+                {
+                    "scenario": "udp",
+                    "ok": False,
+                    "udp_send_bps": int(bps),
+                    "error": str(exc),
+                    "error_class": classify_error(str(exc)),
+                }
+            )
+            udp_ok = False
+
+    out = {
+        "scenario": "degrade_matrix",
+        "bytes_expected": int(effective),
+        "tcp_rates_env": tcp_rates_csv or "(default ladder)",
+        "udp_bps_env": udp_bps_csv or "(default ladder)",
+        "tcp_ip_threshold_summary": tcp_summary,
+        "udp_trials": udp_trials,
+        "ok": bool(tcp_ok and udp_ok),
+    }
+    try:
+        (RUNTIME_DIR / "connect_ip_udp_degrade_matrix.json").write_text(
+            json.dumps(out, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return out
+
+
 def run_tcp_ip_icmp(docker, timeout_sec=5):
     target_host = "10.200.0.2"
-    docker_exec(docker, CLIENT_CONTAINER, "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true")
+    docker_exec(
+        docker,
+        CLIENT_CONTAINER,
+        "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true",
+        check=False,
+    )
     started = time.time()
     result = run_capture(
         [
@@ -1683,7 +2852,7 @@ def _run_malformed_scoped_harness() -> dict:
     artifact_path = RUNTIME_DIR / "malformed_scoped_runtime.json"
     if artifact_path.exists():
         artifact_path.unlink()
-    env = os.environ.copy()
+    env = _env_for_host_go_test()
     env["MASQUE_MALFORMED_SCOPED_ARTIFACT_PATH"] = str(artifact_path)
     cmd = [
         "go",
@@ -1752,7 +2921,7 @@ def _run_transport_malformed_scoped_harness() -> dict:
     artifact_path = RUNTIME_DIR / "malformed_scoped_transport_runtime.json"
     if artifact_path.exists():
         artifact_path.unlink()
-    env = os.environ.copy()
+    env = _env_for_host_go_test()
     env["MASQUE_MALFORMED_SCOPED_TRANSPORT_ARTIFACT_PATH"] = str(artifact_path)
     cmd = [
         "go",
@@ -1840,7 +3009,7 @@ def _run_route_advertise_dual_signal_harness() -> dict:
     artifact_path = RUNTIME_DIR / "route_advertise_dual_signal_runtime.json"
     if artifact_path.exists():
         artifact_path.unlink()
-    env = os.environ.copy()
+    env = _env_for_host_go_test()
     env["MASQUE_ROUTE_ADVERTISE_ARTIFACT_PATH"] = str(artifact_path)
     cmd = [
         "go",
@@ -1909,7 +3078,7 @@ def _run_peer_abort_lifecycle_harness() -> dict:
     artifact_path = RUNTIME_DIR / "peer_abort_lifecycle_runtime.json"
     if artifact_path.exists():
         artifact_path.unlink()
-    env = os.environ.copy()
+    env = _env_for_host_go_test()
     env["MASQUE_PEER_ABORT_ARTIFACT_PATH"] = str(artifact_path)
     cmd = [
         "go",
@@ -2588,6 +3757,8 @@ def _write_masque_smoke_contract_files(results: list, byte_count: int) -> None:
         payload = {
             "mode": mode,
             "result": "true" if row.get("ok") else "false",
+            "error_class": str(row.get("error_class", "") or "none"),
+            "error_source": str(row.get("error_source", "") or "none"),
             "metrics": {
                 "bytes_received": int(row.get("bytes_received", 0) or 0),
                 "elapsed_ms": elapsed_ms,
@@ -2665,12 +3836,55 @@ def _write_scoped_contract_artifact(results: list) -> None:
     (RUNTIME_DIR / "scoped_connect_ip_latest.json").write_text(json.dumps(contract, indent=2), encoding="utf-8")
 
 
+def _classify_runner_exception_source(scenario: str, message: str) -> str:
+    normalized = str(message or "").lower()
+    if skip_stand_compose_up():
+        return "runtime"
+    if scenario not in {
+        "udp",
+        "udp_matrix",
+        "tcp_stream",
+        "tcp_ip",
+        "tcp_ip_threshold",
+        "tcp_ip_icmp",
+        "tcp_ip_iperf",
+        "tun_rule_masque_perf",
+        "degrade_matrix",
+    }:
+        return "runtime"
+    compose_markers = (
+        "docker compose",
+        "container not ready",
+        "compose",
+        "network",
+        "masque-server",
+    )
+    if any(marker in normalized for marker in compose_markers):
+        return "compose_up"
+    return "runtime"
+
+
+def _effective_udp_send_bps_for_stand_scenario(
+    scenario: str, cli_bps: int, tcp_ip_mode: str
+) -> int:
+    if int(cli_bps) > 0:
+        return int(cli_bps)
+    if os.name != "nt":
+        return 0
+    if str(tcp_ip_mode) != "bulk_single_flow":
+        return 0
+    if scenario == "tcp_ip":
+        return _win_host_tcp_ip_default_udp_send_bps()
+    return 0
+
+
 def run_scenario(
     docker,
     scenario,
     byte_count,
     tcp_ip_mode,
     tcp_ip_deadline_sec=None,
+    tcp_ip_rate_sweep=None,
     iperf_cfg=None,
     udp_chunk=0,
     udp_rate_bps=0,
@@ -2703,7 +3917,23 @@ def run_scenario(
     if scenario == "tcp_ip":
         if not skip_stand_compose_up():
             compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
-        return run_tcp_ip(docker, byte_count, mode=tcp_ip_mode, tcp_ip_deadline_sec=tcp_ip_deadline_sec)
+        return run_tcp_ip(
+            docker,
+            byte_count,
+            mode=tcp_ip_mode,
+            tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+            udp_rate_bps=udp_rate_bps,
+        )
+    if scenario == "tcp_ip_threshold":
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+        return run_tcp_ip_threshold_sweep(
+            docker,
+            byte_count,
+            mode=tcp_ip_mode,
+            tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+            rate_limits=tcp_ip_rate_sweep,
+        )
     if scenario == "tcp_ip_scoped":
         return run_tcp_ip_scoped(
             docker,
@@ -2731,26 +3961,72 @@ def run_scenario(
         if not skip_stand_compose_up():
             compose_up(docker, DEFAULT_CLIENT_CONFIG)
         return run_tun_rule_masque_perf(docker, byte_count)
+    if scenario == "degrade_matrix":
+        return run_degrade_matrix(
+            docker,
+            byte_count,
+            tcp_ip_mode=tcp_ip_mode,
+            tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+        )
     raise ValueError(f"unsupported scenario: {scenario}")
+
+
+ALLOWED_SCENARIOS = frozenset(
+    {
+        "udp",
+        "udp_matrix",
+        "tcp_stream",
+        "tcp_ip",
+        "tcp_ip_threshold",
+        "tcp_ip_scoped",
+        "tcp_ip_icmp",
+        "tcp_ip_iperf",
+        "tun_rule_masque_perf",
+        "degrade_matrix",
+        "all",
+        "real",
+    }
+)
+
+
+def build_scenario_list(scenario_arg: str, byte_count: int) -> list[str]:
+    """Expand ``--scenario`` into an ordered list. Commas separate sequential runs (same process)."""
+    raw = (scenario_arg or "").strip()
+    if not raw:
+        raise ValueError("empty --scenario")
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    for p in parts:
+        if p not in ALLOWED_SCENARIOS:
+            raise ValueError(f"unknown scenario {p!r}")
+    if len(parts) > 1:
+        for p in parts:
+            if p in ("all", "real"):
+                raise ValueError(
+                    "'all' and 'real' must be used alone (not in a comma-separated queue)"
+                )
+        return parts
+    only = parts[0]
+    if only == "all":
+        if byte_count > BYTES_10KB:
+            return ["tcp_ip"]
+        return ["udp", "tcp_stream", "tcp_ip", "tcp_ip_icmp"]
+    if only == "real":
+        return ["tcp_ip_iperf"]
+    return [only]
 
 
 def main():
     parser = argparse.ArgumentParser(description="Single entrypoint for MASQUE stand scenarios")
     parser.add_argument(
         "--scenario",
-        choices=[
-            "udp",
-            "udp_matrix",
-            "tcp_stream",
-            "tcp_ip",
-            "tcp_ip_scoped",
-            "tcp_ip_icmp",
-            "tcp_ip_iperf",
-            "tun_rule_masque_perf",
-            "all",
-            "real",
-        ],
+        type=str,
         required=True,
+        metavar="NAME",
+        help=(
+            "Single scenario name, or comma-separated queue run in order "
+            "(e.g. udp,tcp_ip or tcp_ip_threshold,tcp_ip_icmp). "
+            "Special: all (smoke suite), real (tcp_ip_iperf)."
+        ),
     )
     parser.add_argument("--stress", action="store_true", help="run 500MB transfer instead of 10KB")
     parser.add_argument(
@@ -2773,6 +4049,12 @@ def main():
         default=None,
         metavar="S",
         help="override tcp_ip wall-clock budget (default: ceil(MiB) for bulk; use on slow hosts to verify hash/integrity)",
+    )
+    parser.add_argument(
+        "--tcp-ip-rate-sweep",
+        type=str,
+        default="70m,80m,90m,100m",
+        help="comma-separated MASQUE_TCP_IP_RATE_LIMIT values for tcp_ip_threshold scenario",
     )
     parser.add_argument("--mtu", type=int, default=1500, help="MTU target for CONNECT-IP real profile (default: 1500)")
     parser.add_argument(
@@ -2799,7 +4081,12 @@ def main():
         type=int,
         default=0,
         metavar="BPS",
-        help="pace UDP sender: inter-send pause = chunk/rate (0=no pacing; bulk default pause=0, override via MASQUE_STAND_UDP_BULK_PAUSE)",
+        help=(
+            "paced sender target in bytes/sec for scripts using MASQUE_UDP_RATE_BPS (0 = unlimited sender). "
+            "Applies to udp/udp_matrix and tcp_ip bulk_single_flow (name is legacy «bps»). "
+            "On Windows, tcp_ip still uses MASQUE_WIN_HOST_TCP_IP_DEFAULT_UDP_SEND_BPS when this is 0 "
+            "(set that env to 0 for unlimited CONNECT-IP bulk)."
+        ),
     )
     parser.add_argument(
         "--udp-loss-pct",
@@ -2851,6 +4138,10 @@ def main():
         iperf_rates = parse_iperf_rates(args.iperf_rates)
     except ValueError as exc:
         parser.error(str(exc))
+    tcp_ip_rate_sweep = [token.strip() for token in args.tcp_ip_rate_sweep.split(",") if token.strip()]
+    _scenario_tokens = [p.strip() for p in args.scenario.split(",") if p.strip()]
+    if "tcp_ip_threshold" in _scenario_tokens and not tcp_ip_rate_sweep:
+        parser.error("--tcp-ip-rate-sweep must provide at least one value when tcp_ip_threshold is in --scenario")
 
     docker = docker_bin()
     if args.stress:
@@ -2860,21 +4151,33 @@ def main():
     else:
         byte_count = BYTES_10KB
 
-    if args.scenario == "all":
-        scenarios = ["udp", "tcp_stream", "tcp_ip", "tcp_ip_icmp"]
-        if byte_count > BYTES_10KB:
-            scenarios = ["tcp_ip"]
-            print(
-                "Note: bulk size >10KB with --scenario all runs tcp_ip only "
-                "(udp/tcp_stream harness is smoke-sized).",
-                flush=True,
-            )
-    elif args.scenario == "real":
-        scenarios = ["tcp_ip_iperf"]
-    elif args.scenario == "udp_matrix":
-        scenarios = ["udp_matrix"]
-    else:
-        scenarios = [args.scenario]
+    if (
+        _scenario_tokens == ["degrade_matrix"]
+        and not args.stress
+        and args.megabytes is None
+    ):
+        byte_count = int(10 * 1024 * 1024)
+        print(
+            "Note: degrade_matrix defaults to 10 MiB (--megabytes 10). "
+            "Override with --megabytes. Ladders: MASQUE_DEGRADE_TCP_IP_RATES, MASQUE_DEGRADE_UDP_BPS.",
+            flush=True,
+        )
+
+    try:
+        scenarios = build_scenario_list(args.scenario, byte_count)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.scenario.strip() == "all" and byte_count > BYTES_10KB:
+        print(
+            "Note: bulk size >10KB with --scenario all runs tcp_ip only "
+            "(udp/tcp_stream harness is smoke-sized).",
+            flush=True,
+        )
+    if _stand_slow_docker_profile():
+        print(
+            "Note: MASQUE_STAND_SLOW_DOCKER=1 — relaxed bulk timeouts for CONNECT-UDP/CONNECT-IP (laptop Docker).",
+            flush=True,
+        )
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     compile_singbox()
@@ -2889,9 +4192,26 @@ def main():
 
     results = []
     overall_ok = True
+    global _WIN_TCP_IP_DEFAULT_PACE_NOTE_SHOWN
     for scenario in scenarios:
         print(f"\n=== Running scenario: {scenario} ({byte_count} bytes) ===")
         try:
+            eff_udp_bps = _effective_udp_send_bps_for_stand_scenario(
+                scenario, args.udp_send_bps, args.tcp_ip_mode
+            )
+            if (
+                eff_udp_bps > 0
+                and scenario == "tcp_ip"
+                and args.udp_send_bps == 0
+                and not _WIN_TCP_IP_DEFAULT_PACE_NOTE_SHOWN
+            ):
+                print(
+                    "Note: Windows host default CONNECT-IP bulk UDP send pacing "
+                    f"{eff_udp_bps} B/s for tcp_ip (env MASQUE_WIN_HOST_TCP_IP_DEFAULT_UDP_SEND_BPS); "
+                    "override with --udp-send-bps N.",
+                    flush=True,
+                )
+                _WIN_TCP_IP_DEFAULT_PACE_NOTE_SHOWN = True
             matrix_sizes = _parse_csv_ints(args.udp_matrix_sizes_mib, [10, 20])
             matrix_rates = _parse_csv_ints(args.udp_matrix_rates_bps, [0])
             matrix_losses = _parse_csv_floats(args.udp_matrix_loss_pct, [0.0])
@@ -2901,9 +4221,10 @@ def main():
                 byte_count,
                 args.tcp_ip_mode,
                 tcp_ip_deadline_sec=args.tcp_ip_deadline_sec,
+                tcp_ip_rate_sweep=tcp_ip_rate_sweep,
                 iperf_cfg=iperf_cfg,
                 udp_chunk=args.udp_chunk_bytes,
-                udp_rate_bps=args.udp_send_bps,
+                udp_rate_bps=eff_udp_bps,
                 udp_loss_pct=args.udp_loss_pct,
                 udp_matrix_sizes_mib=matrix_sizes,
                 udp_matrix_rates_bps=matrix_rates,
@@ -2912,6 +4233,7 @@ def main():
         except Exception as exc:
             txt = str(exc)
             ec = _classified_error_bucket(txt)
+            es = _classify_runner_exception_source(scenario, txt)
             result = {
                 "scenario": scenario,
                 "bytes_expected": byte_count,
@@ -2920,7 +4242,7 @@ def main():
                 "ok": False,
                 "error": txt,
                 "error_class": ec,
-                "error_source": "runtime",
+                "error_source": es,
             }
         results.append(result)
         overall_ok = overall_ok and bool(result.get("ok"))

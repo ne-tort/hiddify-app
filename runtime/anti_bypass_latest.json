@@ -1,0 +1,38 @@
+{
+  "failures": [],
+  "modes": [
+    {
+      "error_class": "timeout",
+      "error_source": "runtime",
+      "failures": [],
+      "mode": "tcp_stream",
+      "ok": true,
+      "runner_exit_code": 1,
+      "scenario": "tcp_stream",
+      "summary_ok": false
+    },
+    {
+      "error_class": "timeout",
+      "error_source": "runtime",
+      "failures": [],
+      "mode": "udp",
+      "ok": true,
+      "runner_exit_code": 1,
+      "scenario": "udp",
+      "summary_ok": false
+    },
+    {
+      "error_class": "transport_init",
+      "error_source": "runtime",
+      "failures": [],
+      "mode": "tcp_ip",
+      "ok": true,
+      "runner_exit_code": 1,
+      "scenario": "tcp_ip",
+      "summary_ok": false
+    }
+  ],
+  "ok": true,
+  "schema": "masque_anti_bypass_contract",
+  "schema_version": 1
+}

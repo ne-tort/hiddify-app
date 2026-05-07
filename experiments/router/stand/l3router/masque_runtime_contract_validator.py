@@ -14,6 +14,65 @@ SCOPED_SOURCE_ALLOWED = {"runtime", "compose_up"}
 ANTI_BYPASS_SCHEMA = "masque_anti_bypass_contract"
 ANTI_BYPASS_SCHEMA_VERSION = 1
 ANTI_BYPASS_ALLOWED_ERROR_SOURCES = {"runtime", "compose_up", "helper", "none"}
+CONNECT_IP_BRIDGE_REQUIRED_DELTA_KEYS = (
+    "connect_ip_bridge_build_total",
+    "connect_ip_bridge_write_enter_total",
+    "connect_ip_bridge_write_ok_total",
+    "connect_ip_bridge_write_err_total",
+    "connect_ip_bridge_read_enter_total",
+    "connect_ip_bridge_read_exit_total",
+    "connect_ip_bridge_read_exit_err_total",
+    "connect_ip_bridge_readpacket_enter_total",
+    "connect_ip_bridge_readpacket_return_total",
+    "connect_ip_bridge_readpacket_err_total",
+    "connect_ip_bridge_readpacket_timeout_total",
+    "connect_ip_bridge_readpacket_return_path_total",
+    "connect_ip_bridge_write_ok_to_read_enter_ms",
+    "connect_ip_bridge_read_enter_to_read_exit_ms",
+    "connect_ip_bridge_write_err_reason_total",
+    "connect_ip_receive_datagram_wait_total",
+    "connect_ip_receive_datagram_wait_err_total",
+    "connect_ip_receive_datagram_wait_closed_total",
+    "connect_ip_receive_datagram_wake_total",
+    "connect_ip_receive_datagram_wait_duration_total_ms",
+    "connect_ip_receive_datagram_wait_duration_max_ms",
+    "connect_ip_receive_datagram_last_wait_start_unix_milli",
+    "connect_ip_receive_datagram_last_wake_unix_milli",
+    "connect_ip_receive_datagram_close_cancel_enter_total",
+    "connect_ip_receive_datagram_close_cancel_fired_total",
+    "connect_ip_receive_datagram_close_cancel_return_ok_total",
+    "connect_ip_receive_datagram_close_cancel_return_err_total",
+    "connect_ip_receive_datagram_return_total",
+    "connect_ip_receive_datagram_return_path_total",
+    "connect_ip_receive_datagram_post_return_total",
+    "connect_ip_receive_datagram_post_return_path_total",
+    "connect_ip_engine_pmtu_update_total",
+    "connect_ip_engine_pmtu_update_reason_total",
+    "connect_ip_proxied_packet_drop_total",
+    "connect_ip_proxied_packet_drop_reason_total",
+    "http3_stream_datagram_queue_pop_total",
+    "http3_stream_datagram_queue_pop_path_total",
+    "http3_datagram_dispatch_path_total",
+    "http3_datagram_receive_wait_path_total",
+    "quic_datagram_receive_wait_path_total",
+    "quic_packet_receive_drop_path_total",
+    "quic_packet_receive_ingress_path_total",
+    "quic_datagram_post_decrypt_path_total",
+    "quic_datagram_send_path_total",
+    "quic_datagram_send_pipeline_path_total",
+    "quic_datagram_send_write_path_total",
+    "quic_datagram_tx_path_total",
+    "quic_datagram_tx_packet_len_total",
+    "quic_datagram_pre_ingress_path_total",
+    "quic_datagram_ingress_path_total",
+    "quic_datagram_rcv_queue_pop_total",
+    "quic_datagram_rcv_queue_pop_path_total",
+)
+CONNECT_IP_BRIDGE_ALLOWED_REASON_BUCKETS = {
+    "datagram_too_large",
+    "non_ptb_write_fail",
+    "ptb_feedback_err",
+}
 ANTI_BYPASS_EXPECTED_MODES = {
     "tcp_stream": "tcp_stream",
     "udp": "udp",
@@ -113,6 +172,28 @@ def _check_smoke_summary(runtime_dir: Path, failures: list):
         failures.append("summary: tcp_ip connect_ip_udp_bridge_ipv6_supported=true expected=false")
 
     obs_delta = (((tcp_ip.get("observability") or {}).get("delta")) or {})
+    for key in CONNECT_IP_BRIDGE_REQUIRED_DELTA_KEYS:
+        if key not in obs_delta:
+            failures.append(f"summary: tcp_ip observability.delta missing required key={key}")
+
+    unknown_reason_buckets = []
+    bridge_write_reason_map = obs_delta.get("connect_ip_bridge_write_err_reason_total")
+    if not isinstance(bridge_write_reason_map, dict):
+        failures.append("summary: tcp_ip connect_ip_bridge_write_err_reason_total missing/not-object")
+        bridge_write_reason_map = {}
+    for key, value in bridge_write_reason_map.items():
+        if str(key) not in CONNECT_IP_BRIDGE_ALLOWED_REASON_BUCKETS:
+            unknown_reason_buckets.append(str(key))
+            failures.append(
+                "summary: tcp_ip connect_ip_bridge_write_err_reason_total "
+                f"contains unsupported reason bucket={key!r}"
+            )
+        ivalue = _as_int(value, default=-1)
+        if ivalue < 0:
+            failures.append(
+                "summary: tcp_ip connect_ip_bridge_write_err_reason_total "
+                f"invalid value for bucket={key!r}: {value!r}"
+            )
     icmp_reason = obs_delta.get("connect_ip_policy_drop_icmp_reason_total")
     if not isinstance(icmp_reason, dict):
         failures.append("summary: tcp_ip connect_ip_policy_drop_icmp_reason_total missing/not-object")
@@ -122,6 +203,287 @@ def _check_smoke_summary(runtime_dir: Path, failures: list):
             ivalue = _as_int(value, default=-1)
             if ivalue < 0:
                 failures.append(f"summary: tcp_ip connect_ip_policy_drop_icmp_reason_total[{key}] invalid={value}")
+    proxied_drop_reason = obs_delta.get("connect_ip_proxied_packet_drop_reason_total")
+    if not isinstance(proxied_drop_reason, dict):
+        failures.append("summary: tcp_ip connect_ip_proxied_packet_drop_reason_total missing/not-object")
+    else:
+        for key in (
+            "context_id_unknown",
+            "malformed_datagram_quicvarint",
+            "empty_packet",
+            "packet_tuple_parse",
+            "src_not_allowed",
+            "dst_not_allowed",
+            "proto_not_allowed",
+        ):
+            value = proxied_drop_reason.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip connect_ip_proxied_packet_drop_reason_total[{key}] invalid={value}")
+    return_path_reason = obs_delta.get("connect_ip_receive_datagram_return_path_total")
+    if not isinstance(return_path_reason, dict):
+        failures.append("summary: tcp_ip connect_ip_receive_datagram_return_path_total missing/not-object")
+    else:
+        for key in ("ok", "closed", "error"):
+            value = return_path_reason.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip connect_ip_receive_datagram_return_path_total[{key}] invalid={value}")
+    post_return_path_reason = obs_delta.get("connect_ip_receive_datagram_post_return_path_total")
+    if not isinstance(post_return_path_reason, dict):
+        failures.append("summary: tcp_ip connect_ip_receive_datagram_post_return_path_total missing/not-object")
+    else:
+        for key in ("accepted", "context_id_unknown", "proxied_packet_drop", "malformed_datagram_quicvarint"):
+            value = post_return_path_reason.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip connect_ip_receive_datagram_post_return_path_total[{key}] invalid={value}")
+    wait_duration_total_ms = _as_int(obs_delta.get("connect_ip_receive_datagram_wait_duration_total_ms", 0), default=-1)
+    if wait_duration_total_ms < 0:
+        failures.append("summary: tcp_ip connect_ip_receive_datagram_wait_duration_total_ms invalid")
+    wait_duration_max_ms = _as_int(obs_delta.get("connect_ip_receive_datagram_wait_duration_max_ms", 0), default=-1)
+    if wait_duration_max_ms < 0:
+        failures.append("summary: tcp_ip connect_ip_receive_datagram_wait_duration_max_ms invalid")
+    last_wait_start_ms = _as_int(obs_delta.get("connect_ip_receive_datagram_last_wait_start_unix_milli", 0), default=-1)
+    if last_wait_start_ms < 0:
+        failures.append("summary: tcp_ip connect_ip_receive_datagram_last_wait_start_unix_milli invalid")
+    last_wake_ms = _as_int(obs_delta.get("connect_ip_receive_datagram_last_wake_unix_milli", 0), default=-1)
+    if last_wake_ms < 0:
+        failures.append("summary: tcp_ip connect_ip_receive_datagram_last_wake_unix_milli invalid")
+    readpacket_path_reason = obs_delta.get("connect_ip_bridge_readpacket_return_path_total")
+    if not isinstance(readpacket_path_reason, dict):
+        failures.append("summary: tcp_ip connect_ip_bridge_readpacket_return_path_total missing/not-object")
+    else:
+        for key in ("ok", "timeout", "closed", "error"):
+            value = readpacket_path_reason.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip connect_ip_bridge_readpacket_return_path_total[{key}] invalid={value}")
+    pmtu_update_reason = obs_delta.get("connect_ip_engine_pmtu_update_reason_total")
+    if not isinstance(pmtu_update_reason, dict):
+        failures.append("summary: tcp_ip connect_ip_engine_pmtu_update_reason_total missing/not-object")
+    http3_queue_pop_path = obs_delta.get("http3_stream_datagram_queue_pop_path_total")
+    if not isinstance(http3_queue_pop_path, dict):
+        failures.append("summary: tcp_ip http3_stream_datagram_queue_pop_path_total missing/not-object")
+    else:
+        for key in ("queue_pop_ok", "queue_empty", "queue_closed", "queue_pop_err"):
+            value = http3_queue_pop_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip http3_stream_datagram_queue_pop_path_total[{key}] invalid={value}")
+    http3_dispatch_path = obs_delta.get("http3_datagram_dispatch_path_total")
+    if not isinstance(http3_dispatch_path, dict):
+        failures.append("summary: tcp_ip http3_datagram_dispatch_path_total missing/not-object")
+    else:
+        for key in ("receive_ok", "parse_err", "invalid_quarter_stream_id", "stream_not_found", "enqueue_ok", "receive_err"):
+            value = http3_dispatch_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip http3_datagram_dispatch_path_total[{key}] invalid={value}")
+    http3_receive_wait_path = obs_delta.get("http3_datagram_receive_wait_path_total")
+    if not isinstance(http3_receive_wait_path, dict):
+        failures.append("summary: tcp_ip http3_datagram_receive_wait_path_total missing/not-object")
+    else:
+        for key in ("wait_enter", "return_ok", "return_err", "return_closed"):
+            value = http3_receive_wait_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip http3_datagram_receive_wait_path_total[{key}] invalid={value}")
+    quic_receive_wait_path = obs_delta.get("quic_datagram_receive_wait_path_total")
+    if not isinstance(quic_receive_wait_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_receive_wait_path_total missing/not-object")
+    else:
+        for key in ("wait_enter", "return_ok", "return_err", "return_closed"):
+            value = quic_receive_wait_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_receive_wait_path_total[{key}] invalid={value}")
+    quic_packet_receive_drop_path = obs_delta.get("quic_packet_receive_drop_path_total")
+    if not isinstance(quic_packet_receive_drop_path, dict):
+        failures.append("summary: tcp_ip quic_packet_receive_drop_path_total missing/not-object")
+    else:
+        for key in ("conn_queue_full_drop", "server_queue_full_drop"):
+            value = quic_packet_receive_drop_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_packet_receive_drop_path_total[{key}] invalid={value}")
+    quic_packet_receive_ingress_path = obs_delta.get("quic_packet_receive_ingress_path_total")
+    if not isinstance(quic_packet_receive_ingress_path, dict):
+        failures.append("summary: tcp_ip quic_packet_receive_ingress_path_total missing/not-object")
+    else:
+        for key in (
+            "transport_read_packet_total",
+            "ingress_recv_empty_total",
+            "ingress_demux_parse_conn_id_err_total",
+            "ingress_demux_routed_to_conn_total",
+            "ingress_demux_short_unknown_conn_drop_total",
+            "ingress_demux_long_server_queue_total",
+            "ingress_conn_ring_enqueue_total",
+            "ingress_handlepackets_pop_total",
+            "ingress_short_header_enter_total",
+            "ingress_short_header_dest_cid_parse_err_total",
+        ):
+            value = quic_packet_receive_ingress_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_packet_receive_ingress_path_total[{key}] invalid={value}")
+    quic_post_decrypt_path = obs_delta.get("quic_datagram_post_decrypt_path_total")
+    if not isinstance(quic_post_decrypt_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_post_decrypt_path_total missing/not-object")
+    else:
+        for key in (
+            "short_unpack_ok",
+            "short_unpack_err",
+            "payload_has_datagram_frame",
+            "payload_without_datagram_frame",
+            "payload_parse_err",
+            "contains_datagram_frame",
+            "ack_only_or_control_only",
+            "contains_stream_without_datagram_frame",
+        ):
+            value = quic_post_decrypt_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_post_decrypt_path_total[{key}] invalid={value}")
+    quic_pre_ingress_path = obs_delta.get("quic_datagram_pre_ingress_path_total")
+    if not isinstance(quic_pre_ingress_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_pre_ingress_path_total missing/not-object")
+    else:
+        for key in ("packet_without_datagram_frame", "frame_type_seen", "parse_err", "skip_handling", "handle_call"):
+            value = quic_pre_ingress_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_pre_ingress_path_total[{key}] invalid={value}")
+    quic_send_path = obs_delta.get("quic_datagram_send_path_total")
+    if not isinstance(quic_send_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_send_path_total missing/not-object")
+    else:
+        for key in (
+            "contains_datagram_frame",
+            "ack_only_or_control_only",
+            "contains_stream_without_datagram_frame",
+        ):
+            value = quic_send_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_send_path_total[{key}] invalid={value}")
+    quic_send_pipeline_path = obs_delta.get("quic_datagram_send_pipeline_path_total")
+    if not isinstance(quic_send_pipeline_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_send_pipeline_path_total missing/not-object")
+    else:
+        for key in (
+            "packed_with_datagram",
+            "encrypted_with_datagram",
+            "send_queue_enqueued",
+        ):
+            value = quic_send_pipeline_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_send_pipeline_path_total[{key}] invalid={value}")
+    quic_send_write_path = obs_delta.get("quic_datagram_send_write_path_total")
+    if not isinstance(quic_send_write_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_send_write_path_total missing/not-object")
+    else:
+        for key in (
+            "send_loop_enter",
+            "write_attempt",
+            "write_ok",
+            "write_err",
+        ):
+            value = quic_send_write_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_send_write_path_total[{key}] invalid={value}")
+    quic_tx_path = obs_delta.get("quic_datagram_tx_path_total")
+    if not isinstance(quic_tx_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_tx_path_total missing/not-object")
+    else:
+        for key in (
+            "tx_path_enter",
+            "sendmsg_attempt",
+            "sendmsg_ok",
+            "sendmsg_err",
+        ):
+            value = quic_tx_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_tx_path_total[{key}] invalid={value}")
+    quic_tx_packet_len = obs_delta.get("quic_datagram_tx_packet_len_total")
+    if not isinstance(quic_tx_packet_len, dict):
+        failures.append("summary: tcp_ip quic_datagram_tx_packet_len_total missing/not-object")
+    else:
+        for key in (
+            "le_256",
+            "le_512",
+            "le_1024",
+            "le_1200",
+            "le_1400",
+            "gt_1400",
+        ):
+            value = quic_tx_packet_len.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_tx_packet_len_total[{key}] invalid={value}")
+    quic_ingress_path = obs_delta.get("quic_datagram_ingress_path_total")
+    if not isinstance(quic_ingress_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_ingress_path_total missing/not-object")
+    else:
+        for key in ("frame_enter", "frame_reject_too_large", "enqueue_ok"):
+            value = quic_ingress_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_ingress_path_total[{key}] invalid={value}")
+    quic_queue_pop_path = obs_delta.get("quic_datagram_rcv_queue_pop_path_total")
+    if not isinstance(quic_queue_pop_path, dict):
+        failures.append("summary: tcp_ip quic_datagram_rcv_queue_pop_path_total missing/not-object")
+    else:
+        for key in ("queue_pop_ok", "queue_empty", "queue_closed", "queue_pop_err"):
+            value = quic_queue_pop_path.get(key, 0)
+            ivalue = _as_int(value, default=-1)
+            if ivalue < 0:
+                failures.append(f"summary: tcp_ip quic_datagram_rcv_queue_pop_path_total[{key}] invalid={value}")
+    stop_reason = str(tcp_ip.get("stop_reason", "")).strip().lower()
+    tx_sendmsg_ok = _as_int((quic_tx_path or {}).get("sendmsg_ok", 0), 0)
+    tx_le_1400 = _as_int((quic_tx_packet_len or {}).get("le_1400", 0), 0)
+    send_queue_enqueued = _as_int((quic_send_pipeline_path or {}).get("send_queue_enqueued", 0), 0)
+    send_write_ok = _as_int((quic_send_write_path or {}).get("write_ok", 0), 0)
+    post_contains_datagram = _as_int((quic_post_decrypt_path or {}).get("contains_datagram_frame", 0), 0)
+    post_payload_has_datagram = _as_int((quic_post_decrypt_path or {}).get("payload_has_datagram_frame", 0), 0)
+    pre_frame_seen = _as_int((quic_pre_ingress_path or {}).get("frame_type_seen", 0), 0)
+    frame_visibility_absent_branch = (
+        tx_sendmsg_ok > 0
+        and tx_le_1400 > 0
+        and send_queue_enqueued > 0
+        and send_write_ok > 0
+        and post_contains_datagram == 0
+        and pre_frame_seen == 0
+    )
+    enforce_post_send_stop_reason = not bool(tcp_ip.get("ok"))
+    if (
+        enforce_post_send_stop_reason
+        and frame_visibility_absent_branch
+        and stop_reason != "post_send_frame_visibility_absent"
+    ):
+        failures.append(
+            "summary: tcp_ip frame-visibility branch requires "
+            "stop_reason=post_send_frame_visibility_absent"
+        )
+    remote_visibility_absent = post_payload_has_datagram == 0 and pre_frame_seen == 0
+    post_send_remote_visibility_absent_correlation = (
+        tx_sendmsg_ok > 0
+        and send_queue_enqueued > 0
+        and send_write_ok > 0
+        and remote_visibility_absent
+    )
+    if (
+        enforce_post_send_stop_reason
+        and post_send_remote_visibility_absent_correlation
+        and stop_reason != "post_send_frame_visibility_absent"
+    ):
+        failures.append(
+            "summary: tcp_ip post-send remote-visibility correlation requires "
+            "stop_reason=post_send_frame_visibility_absent"
+        )
 
     classified = _as_int(obs_delta.get("connect_ip_engine_classified_total", 0), 0)
     packet_tx = _as_int(obs_delta.get("connect_ip_packet_tx_total", 0), 0)
@@ -134,7 +496,40 @@ def _check_smoke_summary(runtime_dir: Path, failures: list):
     if read_exit != 0:
         failures.append(f"summary: tcp_ip packet_read_exit_total={read_exit} expected=0")
 
-    return {"summary_ok": True}
+    return {
+        "summary_ok": True,
+        "connect_ip_bridge_write_err_reason_parity": {
+            "ok": len(unknown_reason_buckets) == 0,
+            "allowed_reason_buckets": sorted(CONNECT_IP_BRIDGE_ALLOWED_REASON_BUCKETS),
+            "unknown_reason_buckets": sorted(set(unknown_reason_buckets)),
+        },
+        "connect_ip_post_send_frame_visibility_branch": {
+            "ok": (not frame_visibility_absent_branch)
+            or (not enforce_post_send_stop_reason)
+            or stop_reason == "post_send_frame_visibility_absent",
+            "active": frame_visibility_absent_branch,
+            "stop_reason": stop_reason,
+            "tx_sendmsg_ok": tx_sendmsg_ok,
+            "tx_packet_len_le_1400": tx_le_1400,
+            "send_queue_enqueued": send_queue_enqueued,
+            "send_write_ok": send_write_ok,
+            "post_contains_datagram_frame": post_contains_datagram,
+            "pre_frame_type_seen": pre_frame_seen,
+        },
+        "connect_ip_post_send_remote_visibility_correlation": {
+            "ok": (not post_send_remote_visibility_absent_correlation)
+            or (not enforce_post_send_stop_reason)
+            or stop_reason == "post_send_frame_visibility_absent",
+            "active": post_send_remote_visibility_absent_correlation,
+            "stop_reason": stop_reason,
+            "tx_sendmsg_ok": tx_sendmsg_ok,
+            "send_queue_enqueued": send_queue_enqueued,
+            "send_write_ok": send_write_ok,
+            "remote_payload_has_datagram_frame": post_payload_has_datagram,
+            "remote_pre_frame_type_seen": pre_frame_seen,
+            "remote_visibility_absent": remote_visibility_absent,
+        },
+    }
 
 
 def _check_runtime_harness_artifacts(runtime_dir: Path, failures: list):

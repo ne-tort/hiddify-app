@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from masque_runtime_contract_validator import _check_anti_bypass_contract, validate_runtime_contract
+from masque_runtime_contract_validator import (
+    CONNECT_IP_BRIDGE_REQUIRED_DELTA_KEYS,
+    _check_anti_bypass_contract,
+    _check_smoke_summary,
+    validate_runtime_contract,
+)
 
 
 def _base_artifact() -> dict:
@@ -202,6 +207,91 @@ class TestValidateRuntimeContractAntiBypassAggregation(unittest.TestCase):
         self.assertTrue(
             any("anti_bypass:parity mode=udp mismatch anti_bypass" in failure for failure in anti["failures"]),
             msg=f"expected udp parity mismatch failure, got: {anti['failures']}",
+        )
+
+
+def _base_tcp_ip_observability_delta() -> dict:
+    delta = {key: 0 for key in CONNECT_IP_BRIDGE_REQUIRED_DELTA_KEYS}
+    delta["connect_ip_bridge_write_err_reason_total"] = {}
+    delta["connect_ip_policy_drop_icmp_reason_total"] = {}
+    delta["connect_ip_proxied_packet_drop_reason_total"] = {}
+    delta["connect_ip_receive_datagram_return_path_total"] = {}
+    delta["connect_ip_receive_datagram_post_return_path_total"] = {}
+    delta["connect_ip_bridge_readpacket_return_path_total"] = {}
+    delta["connect_ip_engine_pmtu_update_reason_total"] = {}
+    delta["http3_stream_datagram_queue_pop_path_total"] = {}
+    delta["http3_datagram_dispatch_path_total"] = {}
+    delta["http3_datagram_receive_wait_path_total"] = {}
+    delta["quic_datagram_receive_wait_path_total"] = {}
+    delta["quic_packet_receive_drop_path_total"] = {
+        "conn_queue_full_drop": 0,
+        "server_queue_full_drop": 0,
+    }
+    delta["quic_packet_receive_ingress_path_total"] = {
+        "transport_read_packet_total": 0,
+        "ingress_recv_empty_total": 0,
+        "ingress_demux_parse_conn_id_err_total": 0,
+        "ingress_demux_routed_to_conn_total": 0,
+        "ingress_demux_short_unknown_conn_drop_total": 0,
+        "ingress_demux_long_server_queue_total": 0,
+        "ingress_conn_ring_enqueue_total": 0,
+        "ingress_handlepackets_pop_total": 0,
+        "ingress_short_header_enter_total": 0,
+        "ingress_short_header_dest_cid_parse_err_total": 0,
+    }
+    delta["quic_datagram_post_decrypt_path_total"] = {
+        "payload_has_datagram_frame": 0,
+        "contains_datagram_frame": 0,
+    }
+    delta["quic_datagram_send_path_total"] = {}
+    delta["quic_datagram_send_pipeline_path_total"] = {"send_queue_enqueued": 1}
+    delta["quic_datagram_send_write_path_total"] = {"write_ok": 1}
+    delta["quic_datagram_tx_path_total"] = {"sendmsg_ok": 1}
+    delta["quic_datagram_tx_packet_len_total"] = {"le_1400": 1}
+    delta["quic_datagram_pre_ingress_path_total"] = {"frame_type_seen": 0}
+    delta["quic_datagram_ingress_path_total"] = {}
+    delta["quic_datagram_rcv_queue_pop_path_total"] = {}
+    delta["connect_ip_packet_tx_total"] = 1
+    return delta
+
+
+class TestConnectIPPostSendRemoteVisibilityCorrelation(unittest.TestCase):
+    def _run_summary_check(self, stop_reason: str):
+        summary = {
+            "ok": True,
+            "results": [
+                {
+                    "scenario": "tcp_ip",
+                    "stop_reason": stop_reason,
+                    "connect_ip_udp_bridge_contract": "ipv4_only",
+                    "connect_ip_udp_bridge_ipv6_supported": False,
+                    "observability": {"delta": _base_tcp_ip_observability_delta()},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "masque_python_runner_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            failures: list[str] = []
+            checks = _check_smoke_summary(runtime_dir, failures)
+            return checks, failures
+
+    def test_green_when_remote_visibility_absent_has_typed_stop_reason(self):
+        checks, failures = self._run_summary_check("post_send_frame_visibility_absent")
+        row = checks["connect_ip_post_send_remote_visibility_correlation"]
+        self.assertTrue(row["active"])
+        self.assertTrue(row["ok"], msg=f"unexpected failures: {failures}")
+        self.assertEqual(row["remote_payload_has_datagram_frame"], 0)
+        self.assertEqual(row["remote_pre_frame_type_seen"], 0)
+
+    def test_red_when_remote_visibility_absent_has_mismatched_stop_reason(self):
+        checks, failures = self._run_summary_check("receiver_incomplete")
+        row = checks["connect_ip_post_send_remote_visibility_correlation"]
+        self.assertTrue(row["active"])
+        self.assertFalse(row["ok"])
+        self.assertIn(
+            "summary: tcp_ip post-send remote-visibility correlation requires stop_reason=post_send_frame_visibility_absent",
+            failures,
         )
 
 

@@ -1,0 +1,28 @@
+{
+  "host": "windows_docker_desktop",
+  "scenario": "tcp_ip",
+  "mode": "bulk_single_flow",
+  "megabytes": 10,
+  "bytes_expected": 10485760,
+  "bytes_received_sample": 302376,
+  "stop_reason": "bridge_boundary_stall",
+  "post_change_note": "After removing WriteTo sleep keyed on zero engine_ingress (transport/masque); stand still FAIL",
+  "quic_receive_queue_drops_observed": {
+    "merged_delta_conn_queue_full_drop": 0,
+    "merged_delta_server_queue_full_drop": 0,
+    "note": "Counters from quic_packet_receive_drop_path_total; zero => not Conn 256 / server 1024 caps"
+  },
+  "signature": {
+    "merged_packet_tx_total_approx": 258,
+    "delta_client_sendmsg_ok_approx": 257,
+    "quic_datagram_send_write_attempt_vs_write_ok": "257 vs 256",
+    "delta_server_transport_read_packet_total_approx": 15,
+    "delta_server_short_unpack_ok_approx": 11,
+    "bridge_readpacket_enter_total": 1,
+    "bridge_readpacket_return_total": 0,
+    "packet_rx_total": 0,
+    "engine_ingress_total": 0,
+    "observability_peer_split": true
+  },
+  "full_summary_path": "experiments/router/stand/l3router/runtime/masque_python_runner_summary.json"
+}

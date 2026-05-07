@@ -17,6 +17,7 @@ MANDATORY_CHECKS = (
     ("anti_bypass_contract", "parity_with_summary.ok", True),
     ("runtime_artifacts", "malformed_scoped_transport.ok", True),
     ("runtime_artifacts", "malformed_scoped_boundary_parity.ok", True),
+    ("summary", "connect_ip_post_send_remote_visibility_correlation.ok", True),
 )
 REQUIRED_SCHEMA = "masque_runtime_contract"
 REQUIRED_TOP_LEVEL_FIELDS = ("ok", "runtime_dir", "checks", "failures")
@@ -40,6 +41,9 @@ ANTI_BYPASS_MODE_TO_CLIENT_CONFIG = {
 }
 ANTI_BYPASS_PARITY_ROW_MODES = ("tcp_stream", "udp", "tcp_ip")
 ANTI_BYPASS_SCENARIO_SET = frozenset(ANTI_BYPASS_MODE_TO_SCENARIO.values())
+CONNECT_IP_BRIDGE_ALLOWED_REASON_BUCKETS = frozenset(
+    ("datagram_too_large", "non_ptb_write_fail", "ptb_feedback_err")
+)
 CONNECT_STREAM_NON_AUTH_MATRIX_TESTS = (
     "TestDialTCPStreamNonAuthStatusMapsToDialClass",
     "TestDialTCPStreamInProcessHTTP3ProxyNonAuthStatusMapsToDialClass",
@@ -126,6 +130,71 @@ def _assert_runtime_contract_scoped_parity_rows(checks: dict) -> list[str]:
         failure = _assert_expected(checks, check_name, field, expected)
         if failure:
             failures.append(failure)
+    return failures
+
+
+def _assert_runtime_contract_connect_ip_bridge_reason_parity(checks: dict) -> list[str]:
+    failures: list[str] = []
+    summary = checks.get("summary")
+    if not isinstance(summary, dict):
+        return ["missing runtime check: checks.summary"]
+    row = summary.get("connect_ip_bridge_write_err_reason_parity")
+    if not isinstance(row, dict):
+        return ["missing runtime check: checks.summary.connect_ip_bridge_write_err_reason_parity"]
+    if row.get("ok") is not True:
+        failures.append(
+            "gate failed: "
+            "checks.summary.connect_ip_bridge_write_err_reason_parity.ok="
+            f"{row.get('ok')!r} expected=True"
+        )
+    unknown = row.get("unknown_reason_buckets")
+    if isinstance(unknown, list) and unknown:
+        failures.append(
+            "gate failed: checks.summary.connect_ip_bridge_write_err_reason_parity.unknown_reason_buckets="
+            f"{unknown!r} expected=[]"
+        )
+    allowed = row.get("allowed_reason_buckets")
+    if isinstance(allowed, list):
+        expected = sorted(CONNECT_IP_BRIDGE_ALLOWED_REASON_BUCKETS)
+        if sorted(str(item) for item in allowed) != expected:
+            failures.append(
+                "gate failed: checks.summary.connect_ip_bridge_write_err_reason_parity.allowed_reason_buckets="
+                f"{allowed!r} expected={expected!r}"
+            )
+    else:
+        failures.append(
+            "gate failed: checks.summary.connect_ip_bridge_write_err_reason_parity.allowed_reason_buckets missing/not-list"
+        )
+    return failures
+
+
+def _assert_runtime_contract_connect_ip_post_send_remote_visibility_correlation(checks: dict) -> list[str]:
+    failures: list[str] = []
+    summary = checks.get("summary")
+    if not isinstance(summary, dict):
+        return ["missing runtime check: checks.summary"]
+    row = summary.get("connect_ip_post_send_remote_visibility_correlation")
+    if not isinstance(row, dict):
+        return ["missing runtime check: checks.summary.connect_ip_post_send_remote_visibility_correlation"]
+    # Debug gate is strict only when branch is active in the artifact.
+    # For green/non-strict artifacts active=false is expected and should not fail this point-check.
+    if row.get("active") is not True:
+        return failures
+    stop_reason = str(row.get("stop_reason", "")).strip().lower()
+    if stop_reason == "none" and row.get("ok") is True:
+        return failures
+    if row.get("ok") is not True:
+        failures.append(
+            "gate failed: "
+            "checks.summary.connect_ip_post_send_remote_visibility_correlation.ok="
+            f"{row.get('ok')!r} expected=True"
+        )
+    if stop_reason != "post_send_frame_visibility_absent":
+        failures.append(
+            "gate failed: "
+            "checks.summary.connect_ip_post_send_remote_visibility_correlation.stop_reason="
+            f"{row.get('stop_reason')!r} expected='post_send_frame_visibility_absent'"
+        )
     return failures
 
 
@@ -355,13 +424,23 @@ def _green_tcp_ip_from_tcp_ip_scoped(rows: list) -> dict | None:
 def _merge_post_anti_bypass_summary(backup_text: str, negative_by_scenario: dict[str, dict]) -> dict:
     data = json.loads(backup_text)
     raw = [x for x in data.get("results", []) if isinstance(x, dict)]
+    preserved_green_tcp_ip = next(
+        (
+            x
+            for x in raw
+            if x.get("scenario") == "tcp_ip"
+            and bool(x.get("ok"))
+            and str(x.get("error_class") or "").strip().lower() in {"none", ""}
+        ),
+        None,
+    )
     stripped = [x for x in raw if x.get("scenario") not in ANTI_BYPASS_SCENARIO_SET]
     has_green_flat = any(
         isinstance(x, dict) and x.get("scenario") == "tcp_ip" and bool(x.get("ok")) for x in stripped
     )
     merged: list[dict] = list(stripped)
     if not has_green_flat:
-        injected = _green_tcp_ip_from_tcp_ip_scoped(stripped)
+        injected = preserved_green_tcp_ip or _green_tcp_ip_from_tcp_ip_scoped(stripped)
         if isinstance(injected, dict):
             merged.append(injected)
     for scen in ("tcp_stream", "udp"):
@@ -527,6 +606,22 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--assert-connect-ip-bridge-reason-parity",
+        action="store_true",
+        help=(
+            "Assert typed CONNECT-IP bridge write-error reason parity rows "
+            "from aggregated runtime contract."
+        ),
+    )
+    parser.add_argument(
+        "--assert-connect-ip-post-send-remote-visibility-correlation",
+        action="store_true",
+        help=(
+            "Assert typed post-send remote-visibility correlation row "
+            "from aggregated runtime contract."
+        ),
+    )
+    parser.add_argument(
         "--assert-connect-ip-negative-control",
         type=Path,
         default=None,
@@ -665,6 +760,26 @@ def main() -> int:
                 print(" -", failure)
             return 1
         print("MASQUE runtime scoped/lifecycle parity row gate passed.")
+        return 0
+
+    if args.assert_connect_ip_bridge_reason_parity:
+        failures.extend(_assert_runtime_contract_connect_ip_bridge_reason_parity(checks))
+        if failures:
+            print("MASQUE runtime CONNECT-IP bridge reason parity gate failures:")
+            for failure in failures:
+                print(" -", failure)
+            return 1
+        print("MASQUE runtime CONNECT-IP bridge reason parity gate passed.")
+        return 0
+
+    if args.assert_connect_ip_post_send_remote_visibility_correlation:
+        failures.extend(_assert_runtime_contract_connect_ip_post_send_remote_visibility_correlation(checks))
+        if failures:
+            print("MASQUE runtime CONNECT-IP post-send remote-visibility correlation gate failures:")
+            for failure in failures:
+                print(" -", failure)
+            return 1
+        print("MASQUE runtime CONNECT-IP post-send remote-visibility correlation gate passed.")
         return 0
 
     if args.assert_schema:
