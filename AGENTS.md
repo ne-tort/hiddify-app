@@ -167,7 +167,7 @@ parity с unit gate CI: добавить `./common/masque/... ./include/...`; ra
 
 **Third-party RFC-слои (где искать wire):** **`third_party/masque-go`** — bootstrap CONNECT/stream/UDP (MASQUE/H3); **`third_party/connect-ip-go`** — IP-датаграммы и TTL/PTB на **`Conn`**. Из **`hiddify-sing-box`** для tuple/IPv6: **`go test -C third_party/connect-ip-go -run TestPacketTupleRejectsAmbiguousIPv6ExtensionChain .`** (как в **`masque-gates`**).
 
-**Hot path packet-builder (CONNECT-IP UDP bridge):** в `transport/masque/transport.go` для IPv4 fast-path избегать `netip.Addr.AsSlice()` в per-packet цикле (`WriteTo`/builder) — предпочитать `As4()` + inplace-буфер, иначе лишние аллокации/копии ухудшают стабильность на верхней границе `tcp_ip_threshold`.
+**Hot path packet-builder (CONNECT-IP UDP bridge):** в `transport/masque/transport.go` для IPv4 на **`WriteTo`**: DST из **`UDPAddr`** через **`IP.To4()`** + литерал **`[4]byte`** (не **`netip.AddrFromSlice`**); на **`ReadFrom`/parse**: src IPv4 из фиксированных байт заголовка — **`netip.AddrFrom4`**; сборка кадра — **`As4()` + inplace-буфер**, без **`netip.Addr.AsSlice()`** в горячем цикле.
 
 ## 7) Current autonomous cycle (overwrite each iteration)
 
@@ -178,18 +178,18 @@ parity с unit gate CI: добавить `./common/masque/... ./include/...`; ra
   Формат записи должен быть числовым и воспроизводимым по runtime-артефактам (`experiments/router/stand/l3router/runtime/*.json`), без общих формулировок.
 
 - **Дата:** 2026-05-07  
-- **Старт итерации / текущий фокус:** CONNECT-IP **gVisor netstack** — **`addStackAddress`** / **`convertToFullAddr`** переведены на **`tcpip.AddrFrom4` / `tcpip.AddrFrom16`** вместо **`AddrFromSlice(addr.AsSlice())`**. **UDP-мост CONNECT-IP:** один раз выделяется **`localBind`** (`*net.UDPAddr`) для **`LocalAddr()`**, без повторных **`net.IPv4`** на запрос. **Compose:** `python masque_stand_runner.py --scenario all` на Docker Desktop — **PASS** (~48 s), затем `docker compose … down -v`. Матрица **`--udp-send-bps`** (130M/140M) в этой итерации **не снималась**.
-- **`hiddify-core` `HEAD`:** **`75e525a682e334e9927f8983d9e8bc8451321640`**.
+- **Старт итерации / текущий фокус:** **UDP-мост CONNECT-IP** (`connectIPUDPPacketConn`): egress **`WriteTo`** — разбор DST через **`IP.To4()`** + литерал **`[4]byte{…}`** вместо **`netip.AddrFromSlice`/`Unmap`/`Is4`** на каждый вызов; ingress **`parseIPv4UDPPacket`** — **`netip.AddrFrom4([4]byte{packet[12..15]})`** вместо **`AddrFromSlice`**. Цель — меньше аллокаций/ветвлений на hot path при **`tcp_ip` bulk**. **Compose:** `masque_stand_runner.py --scenario all` (Docker Desktop) — **PASS** (~47 s). Матрица **`130000000` / `140000000`** (**`--udp-send-bps`**) в этой итерации **не снималась**.
+- **`hiddify-core` `HEAD`:** **`bc699a15d2972c5cfae95f77f3602ff3dad65474`**.
 - **Отправная точка (current baseline):** `20 MiB`, `tcp_ip`, `bulk_single_flow`, `--udp-send-bps` (байт/с).
 - **Строгие тайминги (без `MASQUE_STAND_SLOW_DOCKER`):** последний зафиксированный артефакт — `110000000` на Docker Desktop (Windows): узкий промах по дедлайну (`near_full_loss_under_cadence`); пересмотр после прогона на Linux/WSL.
 - **Лестница с `MASQUE_STAND_SLOW_DOCKER=1`:** опорная лестница прежней сессии: **`max_pass=130000000`**, **`next_boundary=140000000`** (`experiments/router/stand/l3router/runtime/masque_python_runner_summary.json`); новый sweep не делался.
 - **Предыдущая PASS-точка:** `130000000` (slow-docker профиль).
-- **Контрольные прогоны после правок:** `go test -count=1 -short -tags with_masque ./transport/masque/... ./protocol/masque/... ./common/masque/...` — PASS; `python -m unittest test_masque_runtime_ci_gate_asserts test_masque_stand_runner_smoke_contract test_masque_runtime_contract_validator` — PASS; **`masque_stand_runner.py --scenario all`** — PASS.
+- **Контрольные прогоны после правок:** `go test -count=1 -short -tags with_masque ./transport/masque/... ./protocol/masque/... ./common/masque/...` — PASS; `python -m unittest …` (три модуля контрактов) — PASS; **`masque_stand_runner.py --scenario all`** после **`GOOS=linux GOARCH=amd64`** build артефакта — PASS.
 - **Источник истины по шагам CI:** **`hiddify-core/.github/workflows/ci.yml`**, job **`masque-gates`**.
 
 ## 8) Next iteration tasks (single-thread, code-first)
 
 1. **Подтвердить границу `130000000` / `140000000` на Linux CI или WSL** без `MASQUE_STAND_SLOW_DOCKER`; узкий sweep при необходимости; зафиксировать `max_pass` / `runtime/*.json`.
 2. **`connect_udp` на потолке:** `udp`, `20 MiB`, высокие `--udp-send-bps`; сравнить с CONNECT-IP — общий ли предел QUIC DATAGRAM.
-3. **Следующий слой копирования на wire:** `wire.DatagramFrame.Append` (`append(b, f.Data...)`) в plaintext до Seal; трогать только при сигнале со стенда/профиля.
-4. **`hiddify-app`:** обновить указатель submodule **`hiddify-core`** на **`75e525a682e334e9927f8983d9e8bc8451321640`** (или новее после push) и закоммитить монорепо.
+3. **Следующий слой копирования на wire:** `wire.DatagramFrame.Append` (`append(b, f.Data...)`) в plaintext до Seal; трогать только при сигнале со стенда/профиля (`sendmsg_ok` vs доставка, профилирование).
+4. **Push/sync:** отправить **`hiddify-core`** и монорепо после **`push`** submodule (локально: submodule **`bc699a15`**; родитель с обновлением указателя можно коммитить отдельно от черновых правок **`experiments/...`**).
