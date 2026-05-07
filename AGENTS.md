@@ -113,11 +113,15 @@
 
 **HTTP/3 per-stream DATAGRAM backlog:** очередь в **`replace/quic-go-patched/http3/state_tracking_stream.go`** (`streamDatagramQueueLen`). При заполнении `enqueueDatagram` **молча дропает** → **`http3_stream_datagram_queue_drop_total`**; QUIC приём буферизует до **`maxDatagramRcvQueueLen`** (**`replace/quic-go-patched/datagram_queue.go`**). **Триаж:** при **`drop_total`** > **0** и bulk-loss — главный подозреваемый; при **`drop_total`** = **0** не списывать stall на этот слой (**см.`delta_client`/`merged`**).
 
+**Исходящий HTTP/3 DATAGRAM (патч QUIC):** капсула собирается в буфер из **`AcquireHTTP3DatagramBuffer`**, в очередь ставится **`(*Conn).EnqueuePooledHTTPDatagram`** — без второго `make+copy` внутри старого **`SendDatagram`**. У **`wire.DatagramFrame`** поле **`OutgoingPayloadRelease`**: пул освобождается после сериализации в packer, при discard «не влезло в пакет» и при drain send-queue в **`CloseWithError`**. Внешний **`SendDatagram([]byte)`** по-прежнему копирует данные в пул и шарит тот же контур.
+
 **OBS peer-split (`delta_client` / `delta_server`):** merged/`observability_delta` частично суммирует процессы; **`connect_ip_receive_datagram_*`**, **`http3_datagram_dispatch_path_total`** и QUIC ingress на **клиенте** vs **сервере** различать явно (**`observability_peer_split`** в JSON раннера). Для uni-directional bulk на sink не путать серверный **`enqueue_ok`** с клиентским приёмом.
 
 **Резерв OBS `connect_ip_bypass_listenpacket_total`:** поле в снимке CONNECT-IP для bypass/`ListenPacket`; инкремента может не быть, пока bypass-путь не включён — нулевое значение **не** доказывает «нет обхода» без сверки с кодом (**IDEAL**, глава 7).
 
-**Счётчики UDP-моста (не смешивать смысл):** в **`transport/masque/transport.go`**, тип **`connectIPUDPPacketConn`**: **`connect_ip_engine_classified_total`** инкрементируется после успешного **`WritePacket`** в **`WriteTo`**, параллельно с **`connect_ip_bridge_write_ok_*`** — это не входящий **`ReadFrom`/ingress**. Рост **`connect_ip_engine_ingress_total`** только после успешного разбора пакета в **`ReadFrom`** (после **`session.ReadPacket`**). Если **`connect_ip_bridge_readpacket_enter_total` ≥ 1**, а **`connect_ip_bridge_readpacket_return_total`** = 0 до снимка — вызов залип внутри `session.ReadPacket`.
+**Счётчики UDP-моста (не смешивать смысл):** в **`transport/masque/transport.go`**, тип **`connectIPUDPPacketConn`**: **`connect_ip_engine_classified_total`** инкрементируется после успешного **`WritePacket`** в **`WriteTo`**, параллельно с **`connect_ip_bridge_write_ok_*`** — это не входящий **`ReadFrom`/ingress**. Рост **`connect_ip_engine_ingress_total`** только после успешного разбора пакета в **`ReadFrom`** (после **`session.ReadPacket`**). Если **`connect_ip_bridge_readpacket_enter_total` ≥ 1**, а **`connect_ip_bridge_readpacket_return_total`** = 0 до снимка — вызов залип внутри `session.ReadPacket`. Для triage write-path дополнительно держать в snapshot `connect_ip_bridge_udp_tx_attempt_total` / `connect_ip_bridge_build_total` / `connect_ip_bridge_write_enter_total` / `connect_ip_bridge_write_chunk_total` / `connect_ip_bridge_write_err_reason_total`.
+
+**Cadence эмита CONNECT-IP OBS:** `maybeEmitConnectIPActiveSnapshot` троттлит по `lastActiveEmitUnixMilli` (окно ~1s). Для коротких bulk-window (`send_elapsed` < 1s) write-path может дать только один delta-снимок, даже при полном объёме доставки; это диагностический артефакт эмита, а не автоматическое доказательство single-packet dataplane.
 
 **`bridge_boundary_stall` (раннер):** **`masque_stand_runner.py`**, классификация при источнике **`runtime_snapshot_log_marker`**, неполном **`bytes_received`**: попытки UDP-моста, **`connect_ip_packet_rx_total`** = 0 и **`connect_ip_engine_ingress_total`** = 0 при подтверждённом tx; узкий случай **`post_send_frame_visibility_absent`** отделяется по нулевому **`contains_datagram_frame`**/`pre_ingress` на merged delta при ненулевом **`sendmsg_ok`**.
 
@@ -163,6 +167,8 @@ parity с unit gate CI: добавить `./common/masque/... ./include/...`; ra
 
 **Third-party RFC-слои (где искать wire):** **`third_party/masque-go`** — bootstrap CONNECT/stream/UDP (MASQUE/H3); **`third_party/connect-ip-go`** — IP-датаграммы и TTL/PTB на **`Conn`**. Из **`hiddify-sing-box`** для tuple/IPv6: **`go test -C third_party/connect-ip-go -run TestPacketTupleRejectsAmbiguousIPv6ExtensionChain .`** (как в **`masque-gates`**).
 
+**Hot path packet-builder (CONNECT-IP UDP bridge):** в `transport/masque/transport.go` для IPv4 fast-path избегать `netip.Addr.AsSlice()` в per-packet цикле (`WriteTo`/builder) — предпочитать `As4()` + inplace-буфер, иначе лишние аллокации/копии ухудшают стабильность на верхней границе `tcp_ip_threshold`.
+
 ## 7) Current autonomous cycle (overwrite each iteration)
 
 - **Матрица скорости (обязательно обновлять в каждой итерации):**
@@ -172,19 +178,18 @@ parity с unit gate CI: добавить `./common/masque/... ./include/...`; ra
   Формат записи должен быть числовым и воспроизводимым по runtime-артефактам (`experiments/router/stand/l3router/runtime/*.json`), без общих формулировок.
 
 - **Дата:** 2026-05-07  
-- **Старт итерации / текущий фокус:** начинаем новую рабочую итерацию с фокусом на прод-качество MASQUE endpoint: рост скорости без потерь и без hash drift на Docker-стенде, поиск и устранение bottleneck в hot path (`transport/masque`, `protocol/masque`, HTTP3/QUIC queues) только по подтверждённой наблюдаемости.
-- **`hiddify-core` `HEAD`:** **`9c8b7f97f84a1a1aadfe191ecf2628cac70b0a21`**  
-- **Отправная точка (current baseline):** `20 MiB`, Docker stand (`degrade_matrix`), режим `bulk_single_flow`, Windows через WSL + Docker Desktop.
-- **Предыдущая PASS-точка:** `connect_ip`: `max_pass=80m` (no fail в текущей лестнице `20m..80m`); `connect_udp`: устойчиво `80-100 Mbps` на `20 MiB`.
-- **Последний прогон матрицы:** `20 MiB`, `tcp_rates=20m,30m,40m,50m,60m,70m,80m`, `udp_bps=50..120 Mbps`:
-  - `connect_ip`: `last_pass_rate_limit=80m`, `first_fail_rate_limit=null`.
-  - `connect_udp`: `max_pass=100 Mbps`, `next_boundary=120 Mbps`, `first_fail=120 Mbps` (`throughput_target_unmet`, при полном `bytes_received`).
+- **Старт итерации / текущий фокус:** hot path **исходящего HTTP/3 DATAGRAM** в **`replace/quic-go-patched`**: убран лишний memcpy между пулом http3 и **`wire.DatagramFrame`** (`EnqueuePooledHTTPDatagram` + **`OutgoingPayloadRelease`** + корректный recycle при discard/close); в **`datagramQueue.Add`** закрытие конкурентно побеждает «ложный» **`sent`**, если очередь дренировали в **`CloseWithError`**. Матрица скорости на compose в этой сессии не переснималась (нужен Linux/WSL для паритета с CI).
+- **`hiddify-core` `HEAD`:** **`744b0c96de4ebce730bbdbe8c2b55149b518a42e`** (коммит только в quic-патче; в submodule остаются несвязанные локальные правки `endpoint_server.go` / `transport*.go` вне этого коммита).
+- **Отправная точка (current baseline):** `20 MiB`, `tcp_ip`, `bulk_single_flow`, `--udp-send-bps` (байт/с).
+- **Строгие тайминги (без `MASQUE_STAND_SLOW_DOCKER`):** `110000000` на Docker Desktop (Windows): `bytes_received=20965660`, `loss_pct=0.0279`, `budget_margin_sec=-0.181`, `stop_reason=near_full_loss_under_cadence`, `ok=false` (узкий промах по дедлайну; использовать вместе с Linux/WSL-паритетом).
+- **Лестница с `MASQUE_STAND_SLOW_DOCKER=1` (ноутбучный профиль, не CI gate):** `110000000` / `120000000` / `130000000` — полная доставка, `loss_pct=0`, `hash_ok=true`, `send_elapsed_sec≈0.425/0.372/0.346`, `ok=true`; `140000000` и `150000000` — `ok=false`, `budget_exceeded`, `loss_pct≈0.24%` / `0.20%`. **Итог:** `max_pass=130000000`, `first_fail=140000000`, `next_boundary=140000000`. Файл артефакта: `experiments/router/stand/l3router/runtime/masque_python_runner_summary.json`.
+- **Предыдущая PASS-точка (исторический артефакт до этой матрицы):** `110000000` strict в логах агента; `120000000` давал падение — см. прошлые записи §7 при сверке с CI.
+- **Контрольные прогоны после правок:** `go test -count=1 -short ./replace/quic-go-patched/...` (cwd **`hiddify-core/hiddify-sing-box/replace/quic-go-patched`**) — PASS; `go test -count=1 -short -tags with_masque ./transport/masque ./protocol/masque ./common/masque ./include` (cwd **`hiddify-core/hiddify-sing-box`**) — PASS; `python -m unittest test_masque_runtime_ci_gate_asserts test_masque_stand_runner_smoke_contract test_masque_runtime_contract_validator` (cwd **`experiments/router/stand/l3router`**) — PASS.
 - **Источник истины по шагам CI:** **`hiddify-core/.github/workflows/ci.yml`**, job **`masque-gates`**.
 
 ## 8) Next iteration tasks (single-thread, code-first)
 
-1. **Каноничный стендовый цикл (единственный валидный для e2e):** запускать из WSL + Docker Desktop: `degrade_matrix` на `20 MiB`, затем матрицу только по правилу **`max_pass + next_boundary`** (где `next_boundary` — первый уровень выше `max_pass`, который ранее был fail).  
-2. **Целевой поиск проблем в коде MASQUE endpoint:** на каждом fail брать `runtime/*.json` и `observability_delta` (`delta_client`/`delta_server`), локализовать boundary (bridge/netstack/http3/quic/session lifecycle), править один слой за итерацию, не менять пороги ради PASS.  
-3. **Оптимизация hot path (объективно):** при подтверждённом bottleneck выполнять точечные оптимизации (аллоки/очереди/дропы/блокировки/лишние копии), затем немедленно подтверждать эффект на той же матрице (`max_pass` должен смещаться вверх или стабилизироваться на меньших потерях).  
-4. **Контроль после патча:** `go test -tags with_masque` по затронутым пакетам + Python-контракты раннера; далее стендовый прогон матрицы.  
-5. **Фиксация результата в §7:** после каждого прогона обязательно обновлять `baseline`, `prev_pass`, `last_run(max_pass,next_boundary,first_fail)` с числовыми значениями из runtime-артефактов.
+1. **Подтвердить границу `130000000` / `140000000` на Linux CI или WSL** без `MASQUE_STAND_SLOW_DOCKER`; при необходимости узкий sweep `131–139M`; переснять лестницу после патча H3→QUIC DATAGRAM (ожидаемый эффект — меньше CPU на копировании, не «магия» лимита).
+2. **`connect_udp` на потолке:** `udp`, `20 MiB`, высокие `--udp-send-bps`; сравнить с CONNECT-IP — общий ли предел QUIC DATAGRAM.
+3. **Следующий слой копирования на wire:** `wire.DatagramFrame.Append` всё ещё кладёт payload в буфер пакета (`append(b, f.Data...)`); оценивать только по профилю/стенду, не отрываясь от observability очередей.
+4. **Родитель `hiddify-app`:** зафиксировать SHA submodule после вашего push `hiddify-core`; в submodule — довести до коммита или откатить посторонние локальные правки `endpoint_server.go` / `transport*.go`, если они не часть текущей задачи.
