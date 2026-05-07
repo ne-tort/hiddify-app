@@ -9,6 +9,290 @@ import masque_stand_runner as runner
 
 
 class TestSmokeContractArtifacts(unittest.TestCase):
+    def test_extract_writer_pids_from_probe_deduplicates_and_filters(self):
+        pids = runner._extract_writer_pids_from_probe(
+            "123 socat -u ...\n"
+            "124 timeout 10 socat ...\n"
+            "123 socat -u ...\n"
+            "999 sh -lc pgrep -af 'socat.*ip-connect-ip-python\\.bin'\n"
+            "badline\n"
+            "0 ignored"
+        )
+        self.assertEqual(pids, [123, 124])
+
+    def test_stand_tcp_ip_udp_chunk_honors_cli_size(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            raw, effective = runner._stand_tcp_ip_udp_chunk(1000)
+        self.assertEqual(raw, 1000)
+        self.assertEqual(effective, 1000)
+
+    def test_stand_tcp_ip_udp_chunk_honors_shared_env_and_cap(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MASQUE_STAND_UDP_CHUNK": "1000",
+                "MASQUE_TCP_IP_UDP_PAYLOAD_CAP": "900",
+            },
+            clear=True,
+        ):
+            raw, effective = runner._stand_tcp_ip_udp_chunk(0)
+        self.assertEqual(raw, 1000)
+        self.assertEqual(effective, 900)
+
+    def test_stand_tcp_ip_udp_chunk_keeps_legacy_datagram_override(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MASQUE_TCP_IP_DATAGRAM": "800",
+                "MASQUE_STAND_UDP_CHUNK": "1000",
+            },
+            clear=True,
+        ):
+            raw, effective = runner._stand_tcp_ip_udp_chunk(1100)
+        self.assertEqual(raw, 800)
+        self.assertEqual(effective, 800)
+
+    def test_classify_error_route_guard_maps_to_policy(self):
+        self.assertEqual(
+            runner.classify_error("RuntimeError: route_guard_target_not_on_tun0"),
+            "policy",
+        )
+
+    def test_collect_tcp_ip_sink_udp_diag_collects_probe_outputs(self):
+        with mock.patch.object(
+            runner,
+            "docker_exec_capture",
+            side_effect=[
+                "ss",
+                "netstat",
+                "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\nUdp: 100 0 0 0 0 0",
+                "probe-out",
+                "probe-out",
+                "probe-out",
+                "probe-out",
+                "probe-out",
+                "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\nUdp: 104 0 0 0 0 0",
+            ],
+        ) as capture, mock.patch.object(
+            runner,
+            "_collect_writer_proc_sample",
+            side_effect=[
+                {"captured": True, "sink_file_stat": "s1"},
+                {"captured": True, "sink_file_stat": "s2"},
+            ],
+        ) as collect_writer:
+            diag = runner._collect_tcp_ip_sink_udp_diag("docker")
+        self.assertTrue(diag["captured"])
+        self.assertEqual(diag["ss_udp"], "ss")
+        self.assertEqual(diag["netstat_udp"], "netstat")
+        self.assertIn("Udp:", diag["udp_snmp"])
+        self.assertEqual(diag["sink_file_stat"], "probe-out")
+        self.assertEqual(diag["socat_log_tail"], "probe-out")
+        self.assertEqual(diag["writer_processes"], "probe-out")
+        self.assertEqual(diag["writer_timeout_processes"], "probe-out")
+        self.assertEqual(diag["writer_process_probe"], "probe-out")
+        self.assertIn("udp_snmp_sample_1", diag)
+        self.assertIn("udp_snmp_sample_2", diag)
+        self.assertIn("udp_snmp_progress", diag)
+        self.assertEqual(diag["udp_snmp_progress"]["delta_in_datagrams"], 4)
+        self.assertEqual(diag["udp_snmp_progress"]["delta_in_errors"], 0)
+        self.assertIn("sample_1", diag["writer_samples"])
+        self.assertIn("sample_2", diag["writer_samples"])
+        self.assertIn("writer_summary", diag)
+        self.assertEqual(diag["writer_summary"]["sink_writer_progress_bytes"], 0)
+        self.assertNotIn("errors", diag)
+        self.assertEqual(capture.call_count, 9)
+        self.assertEqual(collect_writer.call_count, 2)
+
+    def test_collect_tcp_ip_sink_udp_diag_keeps_errors_non_fatal(self):
+        with mock.patch.object(
+            runner,
+            "docker_exec_capture",
+            side_effect=RuntimeError("probe failed"),
+        ), mock.patch.object(
+            runner,
+            "_collect_writer_proc_sample",
+            return_value={"captured": False},
+        ):
+            diag = runner._collect_tcp_ip_sink_udp_diag("docker")
+        self.assertFalse(diag["captured"])
+        self.assertIn("errors", diag)
+        self.assertIn("ss_udp", diag["errors"])
+
+    def test_parse_udp_snmp_error_counters_extracts_inerrors_and_rcvbuf(self):
+        parsed = runner._parse_udp_snmp_error_counters(
+            "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n"
+            "Udp: 17845 0 0 17846 0 0"
+        )
+        self.assertTrue(parsed["parsed"])
+        self.assertEqual(parsed["in_datagrams"], 17845)
+        self.assertEqual(parsed["in_errors"], 0)
+        self.assertEqual(parsed["rcvbuf_errors"], 0)
+
+    def test_classify_sink_udp_ingress_datagram_gap_no_udp_errors(self):
+        signal = runner._classify_sink_writer_boundary_signal(
+            settled=False,
+            late_growth_bytes=0,
+            sink_udp_diag={
+                "udp_snmp": (
+                    "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n"
+                    "Udp: 20956 0 0 0 0 0"
+                )
+            },
+            expected_datagrams=20972,
+        )
+        self.assertEqual(signal, "sink_udp_ingress_datagram_gap_no_udp_errors")
+
+    def test_classify_sink_udp_gap_prefers_snmp_progress_delta_for_current_run(self):
+        signal = runner._classify_sink_writer_boundary_signal(
+            settled=False,
+            late_growth_bytes=0,
+            sink_udp_diag={
+                "udp_snmp": (
+                    "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n"
+                    "Udp: 999999 0 0 0 0 0"
+                ),
+                "udp_snmp_progress": {
+                    "delta_in_datagrams": 20956,
+                    "delta_in_errors": 0,
+                },
+            },
+            expected_datagrams=20972,
+        )
+        self.assertEqual(signal, "sink_udp_ingress_datagram_gap_no_udp_errors")
+
+    def test_classify_sink_writer_boundary_signal_no_udp_errors(self):
+        signal = runner._classify_sink_writer_boundary_signal(
+            settled=False,
+            late_growth_bytes=0,
+            sink_udp_diag={
+                "udp_snmp": (
+                    "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n"
+                    "Udp: 17845 0 0 17846 0 0"
+                )
+            },
+        )
+        self.assertEqual(signal, "sink_writer_boundary_no_udp_errors")
+
+    def test_classify_sink_writer_boundary_signal_process_absent(self):
+        signal = runner._classify_sink_writer_boundary_signal(
+            settled=False,
+            late_growth_bytes=0,
+            sink_udp_diag={
+                "captured": True,
+                "writer_processes": " ",
+                "writer_timeout_processes": "",
+                "writer_process_probe": "",
+                "udp_snmp": (
+                    "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n"
+                    "Udp: 17845 0 0 17846 0 0"
+                ),
+            },
+        )
+        self.assertEqual(signal, "sink_writer_process_absent")
+
+    def test_classify_sink_writer_process_absent_requires_empty_probe(self):
+        signal = runner._classify_sink_writer_boundary_signal(
+            settled=False,
+            late_growth_bytes=0,
+            sink_udp_diag={
+                "captured": True,
+                "writer_processes": "",
+                "writer_timeout_processes": "",
+                "writer_process_probe": "123 socat ...",
+                "udp_snmp": (
+                    "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n"
+                    "Udp: 17845 0 0 17846 0 0"
+                ),
+            },
+        )
+        self.assertEqual(signal, "sink_writer_boundary_no_udp_errors")
+
+    def test_classify_sink_writer_boundary_signal_requires_stalled_and_unsettled(self):
+        signal = runner._classify_sink_writer_boundary_signal(
+            settled=True,
+            late_growth_bytes=0,
+            sink_udp_diag={
+                "udp_snmp": (
+                    "Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n"
+                    "Udp: 17845 0 0 17846 0 0"
+                )
+            },
+        )
+        self.assertIsNone(signal)
+
+    def test_should_collect_sink_udp_diag_for_bridge_signals(self):
+        self.assertTrue(
+            runner._should_collect_sink_udp_diag(
+                stop_reason="bridge_boundary_stall",
+                got=1024,
+                expected=4096,
+            )
+        )
+
+    def test_should_collect_sink_udp_diag_for_near_full_budget_exceeded(self):
+        self.assertTrue(
+            runner._should_collect_sink_udp_diag(
+                stop_reason="budget_exceeded",
+                got=20960000,
+                expected=20971520,
+            )
+        )
+
+    def test_should_collect_sink_udp_diag_skips_non_near_full_budget_exceeded(self):
+        self.assertFalse(
+            runner._should_collect_sink_udp_diag(
+                stop_reason="budget_exceeded",
+                got=10000000,
+                expected=20971520,
+            )
+        )
+
+    def test_summarize_sink_writer_samples_extracts_size_mtime_and_proc_delta(self):
+        summary = runner._summarize_sink_writer_samples(
+            {
+                "writer_samples": {
+                    "sample_1": {
+                        "sink_file_stat": (
+                            "100 /tmp/ip-connect-ip-python.bin\n"
+                            "sink_file_size_bytes=100 sink_file_mtime_ns=10"
+                        ),
+                        "proc_io": {"12": "write_bytes: 1000"},
+                    },
+                    "sample_2": {
+                        "sink_file_stat": (
+                            "164 /tmp/ip-connect-ip-python.bin\n"
+                            "sink_file_size_bytes=164 sink_file_mtime_ns=42"
+                        ),
+                        "proc_io": {"12": "write_bytes: 1096"},
+                    },
+                }
+            }
+        )
+        self.assertEqual(summary["sample_1"]["sink_file_size_bytes"], 100)
+        self.assertEqual(summary["sample_2"]["sink_file_size_bytes"], 164)
+        self.assertEqual(summary["sink_writer_progress_bytes"], 64)
+        self.assertEqual(summary["sink_writer_progress_mtime_ns"], 32)
+        self.assertEqual(summary["sink_writer_progress_proc_write_bytes"], 96)
+        self.assertEqual(summary["writer_idle_vs_blocked"], "writer_progressing")
+
+    def test_classify_writer_idle_vs_blocked_idle(self):
+        self.assertEqual(runner._classify_writer_idle_vs_blocked(0, 0, 0), "idle_no_progress")
+
+    def test_classify_writer_idle_vs_blocked_blocked_after_write(self):
+        self.assertEqual(runner._classify_writer_idle_vs_blocked(0, 0, 64), "blocked_after_write")
+
+    def test_obs_nested_counter_extracts_int_or_zero(self):
+        self.assertEqual(
+            runner._obs_nested_counter(
+                {"quic_datagram_tx_path_total": {"sendmsg_ok": 7}},
+                "quic_datagram_tx_path_total",
+                "sendmsg_ok",
+            ),
+            7,
+        )
+        self.assertEqual(runner._obs_nested_counter({}, "quic_datagram_tx_path_total", "sendmsg_ok"), 0)
+
     def test_smoke_contract_writes_error_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime_dir = Path(temp_dir)
@@ -290,6 +574,146 @@ class TestSmokeContractArtifacts(unittest.TestCase):
         )
         self.assertEqual(reason, "bridge_boundary_stall")
 
+    def test_classify_tcp_ip_stop_reason_near_full_under_cadence(self):
+        # `maybeEmitConnectIPActiveSnapshot` throttles to 1s per emit, so a
+        # sub-second bulk window with `bytes_received` near full and only one
+        # observability emit must not be classified as a hard `bridge_boundary_stall`.
+        obs = {
+            "source": "runtime_snapshot_log_marker",
+            "delta": {
+                "connect_ip_bridge_udp_tx_attempt_total": 1,
+                "connect_ip_packet_tx_total": 1,
+                "connect_ip_packet_rx_total": 0,
+                "connect_ip_engine_ingress_total": 0,
+            },
+        }
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err=None,
+            got=20948080,
+            expected=20971520,
+            hash_ok=False,
+            settled=True,
+            budget_exceeded=False,
+            obs=obs,
+        )
+        self.assertEqual(reason, "near_full_loss_under_cadence")
+
+    def test_classify_tcp_ip_stop_reason_route_guard_is_typed(self):
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err="RuntimeError: route_guard_target_not_on_tun0",
+            got=0,
+            expected=20971520,
+            hash_ok=False,
+            settled=False,
+            budget_exceeded=True,
+            obs={},
+        )
+        self.assertEqual(reason, "route_guard_target_not_on_tun0")
+
+    def test_classify_tcp_ip_stop_reason_near_full_micro_loss_at_deadline(self):
+        obs = {
+            "source": "runtime_snapshot_log_marker",
+            "delta": {
+                "connect_ip_bridge_udp_tx_attempt_total": 2,
+                "connect_ip_packet_tx_total": 2,
+                "connect_ip_packet_rx_total": 0,
+                "connect_ip_engine_ingress_total": 0,
+            },
+        }
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err=None,
+            got=20948080,
+            expected=20971520,
+            hash_ok=False,
+            settled=True,
+            budget_exceeded=True,
+            obs=obs,
+            budget_margin_sec=-0.15,
+        )
+        self.assertEqual(reason, "near_full_micro_loss_at_deadline")
+
+    def test_classify_tcp_ip_stop_reason_near_full_micro_loss_requires_near_deadline_budget(self):
+        obs = {
+            "source": "runtime_snapshot_log_marker",
+            "delta": {
+                "connect_ip_bridge_udp_tx_attempt_total": 2,
+                "connect_ip_packet_tx_total": 2,
+                "connect_ip_packet_rx_total": 0,
+                "connect_ip_engine_ingress_total": 0,
+            },
+        }
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err=None,
+            got=20948080,
+            expected=20971520,
+            hash_ok=False,
+            settled=True,
+            budget_exceeded=True,
+            obs=obs,
+            budget_margin_sec=-3.2,
+        )
+        self.assertEqual(reason, "near_full_loss_under_cadence")
+
+    def test_connect_ip_cadence_sparse_signal_marks_full_delivery_with_thin_obs(self):
+        obs = {
+            "observability_peer_split": True,
+            "delta": {
+                "connect_ip_bridge_udp_tx_attempt_total": 1,
+                "connect_ip_packet_tx_total": 1,
+                "connect_ip_packet_rx_total": 0,
+                "quic_datagram_tx_path_total": {"sendmsg_ok": 0},
+                "quic_datagram_post_decrypt_path_total": {"short_unpack_ok": 0},
+            },
+        }
+        signal = runner._connect_ip_cadence_sparse_signal(obs, got=20971520, expected=20971520)
+        self.assertTrue(signal["flag"])
+        self.assertEqual(signal["reason"], "cadence_sparse")
+
+    def test_connect_ip_cadence_sparse_signal_skips_partial_delivery(self):
+        obs = {
+            "delta": {
+                "connect_ip_bridge_udp_tx_attempt_total": 1,
+                "connect_ip_packet_tx_total": 1,
+                "connect_ip_packet_rx_total": 0,
+            },
+        }
+        signal = runner._connect_ip_cadence_sparse_signal(obs, got=2048, expected=4096)
+        self.assertFalse(signal["flag"])
+        self.assertEqual(signal["reason"], "delivery_not_full")
+
+    def test_ensure_tun_route_for_tcp_ip_detects_tun0(self):
+        with mock.patch.object(
+            runner,
+            "docker_exec_capture",
+            side_effect=["", "10.200.0.2 dev tun0 src 10.0.0.2 uid 0"],
+        ) as capture:
+            probe, on_tun0 = runner._ensure_tun_route_for_tcp_ip("docker", "10.200.0.2")
+        self.assertTrue(on_tun0)
+        self.assertIn("dev tun0", probe)
+        self.assertEqual(capture.call_count, 2)
+
+    def test_read_tun0_dev_bytes_parses_rx_tx(self):
+        with mock.patch.object(
+            runner,
+            "docker_exec_capture",
+            return_value="12345 67890",
+        ):
+            stats = runner._read_tun0_dev_bytes("docker")
+        self.assertTrue(stats["ok"])
+        self.assertEqual(stats["rx_bytes"], 12345)
+        self.assertEqual(stats["tx_bytes"], 67890)
+
+    def test_read_tun0_dev_bytes_handles_missing_tun(self):
+        with mock.patch.object(
+            runner,
+            "docker_exec_capture",
+            return_value="",
+        ):
+            stats = runner._read_tun0_dev_bytes("docker")
+        self.assertFalse(stats["ok"])
+        self.assertEqual(stats["rx_bytes"], 0)
+        self.assertEqual(stats["tx_bytes"], 0)
+
     def test_parse_csv_tcp_ip_rates_default_and_trim(self):
         self.assertEqual(runner._parse_csv_tcp_ip_rates_csv(""), ["8m", "10m", "12m", "14m"])
         self.assertEqual(runner._parse_csv_tcp_ip_rates_csv("15m, 16m "), ["15m", "16m"])
@@ -363,6 +787,87 @@ class TestStandBulkHarness(unittest.TestCase):
         ):
             w = runner._bulk_min_goodput_wall_sec(runner.BYTES_500MB)
         self.assertEqual(w, 0)
+
+
+class TestTcpIpPacedTailHelpers(unittest.TestCase):
+    def test_receive_tail_cap_ci_neutral(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                runner._tcp_ip_receive_phase_tail_cap_sec(runner.BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD),
+                runner.BULK_SINGLE_FLOW_RECEIVE_TAIL_CAP_SEC,
+            )
+
+    def test_receive_tail_cap_slow_high_rate(self):
+        with mock.patch.dict(os.environ, {"MASQUE_STAND_SLOW_DOCKER": "1"}, clear=True):
+            self.assertEqual(
+                runner._tcp_ip_receive_phase_tail_cap_sec(runner.BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD),
+                min(120.0, float(runner.BULK_SINGLE_FLOW_RECEIVE_TAIL_CAP_SEC) + 60.0),
+            )
+
+    def test_near_full_extra_cap_slow_high_rate(self):
+        with mock.patch.dict(os.environ, {"MASQUE_STAND_SLOW_DOCKER": "1"}, clear=True):
+            want = min(
+                120.0,
+                float(runner.BULK_TCP_IP_NEAR_FULL_RECV_CAP_SEC) + 30.0,
+            )
+            self.assertEqual(
+                runner._tcp_ip_near_full_extra_cap_sec(runner.BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD),
+                want,
+            )
+
+    def test_phase_slack_slow_high_rate_uses_tail_cap(self):
+        """Regression: linear slack (12 + 0.2 * strict) must not clamp below raised tail cap."""
+        strict_20mib = 240  # 20 MiB * 12 s/MiB under slow profile
+        rate = 140_000_000
+        with mock.patch.dict(os.environ, {"MASQUE_STAND_SLOW_DOCKER": "1"}, clear=True):
+            slack = runner._tcp_ip_receive_phase_slack_sec(strict_20mib, rate)
+            self.assertEqual(
+                slack,
+                runner._tcp_ip_receive_phase_tail_cap_sec(rate),
+            )
+        self.assertGreater(slack, 12.0 + strict_20mib * runner.BULK_SINGLE_FLOW_RECEIVE_TAIL_PER_STRICT_SEC)
+
+    def test_phase_slack_ci_neutral_high_rate(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            slack = runner._tcp_ip_receive_phase_slack_sec(240, 140_000_000)
+        self.assertEqual(slack, 60.0)
+
+    def test_socket_buf_ci_neutral_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            buf_bytes = runner._tcp_ip_socket_buf_bytes(140_000_000)
+        self.assertEqual(buf_bytes, runner.BULK_TCP_IP_SOCKET_BUF_DEFAULT)
+
+    def test_socket_buf_slow_high_rate(self):
+        with mock.patch.dict(os.environ, {"MASQUE_STAND_SLOW_DOCKER": "1"}, clear=True):
+            buf_bytes = runner._tcp_ip_socket_buf_bytes(runner.BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD)
+        self.assertEqual(buf_bytes, runner.BULK_TCP_IP_SOCKET_BUF_SLOW_HIGH_RATE)
+
+    def test_socket_buf_env_override_clamped(self):
+        with mock.patch.dict(
+            os.environ,
+            {"MASQUE_TCP_IP_SOCKET_BUF_BYTES": str(runner.BULK_TCP_IP_SOCKET_BUF_MAX * 2)},
+            clear=True,
+        ):
+            buf_bytes = runner._tcp_ip_socket_buf_bytes(0)
+        self.assertEqual(buf_bytes, runner.BULK_TCP_IP_SOCKET_BUF_MAX)
+
+
+class TestTcpIpSmokeDeadlineThroughputGate(unittest.TestCase):
+    def test_applies_smoke_deadline_for_10kb(self):
+        ok = runner._apply_tcp_ip_smoke_deadline_to_throughput_ok(
+            throughput_ok=True,
+            send_elapsed=runner.SMOKE_DEADLINE_SEC + 0.1,
+            byte_count=runner.BYTES_10KB,
+        )
+        self.assertFalse(ok)
+
+    def test_does_not_apply_smoke_deadline_for_non_smoke_payload(self):
+        ok = runner._apply_tcp_ip_smoke_deadline_to_throughput_ok(
+            throughput_ok=True,
+            send_elapsed=runner.SMOKE_DEADLINE_SEC + 5.0,
+            byte_count=runner.BYTES_10KB * 2,
+        )
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":

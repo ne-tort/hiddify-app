@@ -295,5 +295,239 @@ class TestConnectIPPostSendRemoteVisibilityCorrelation(unittest.TestCase):
         )
 
 
+class TestSinkWriterBoundaryContract(unittest.TestCase):
+    def _run_summary_check(self, row: dict):
+        summary = {"ok": False, "results": [row]}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "masque_python_runner_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            failures: list[str] = []
+            checks = _check_smoke_summary(runtime_dir, failures)
+            return checks, failures
+
+    def test_green_for_typed_sink_writer_boundary_contract(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_writer_boundary_no_udp_errors",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": False,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_writer_boundary_no_udp_errors",
+                "sink_udp_diag_captured": True,
+                "sink_udp_snmp": {"in_errors": 0},
+            },
+            "sink_udp_diag": {"captured": True},
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertTrue(contract["ok"], msg=f"unexpected failures: {failures}")
+
+    def test_green_for_sink_udp_ingress_datagram_gap_contract(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_udp_ingress_datagram_gap_no_udp_errors",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": False,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_udp_ingress_datagram_gap_no_udp_errors",
+                "sink_udp_diag_captured": True,
+                "sink_udp_expected_datagrams": 20972,
+                "sink_udp_datagram_gap": 16,
+                "sink_udp_in_datagrams_delta": 0,
+                "sink_udp_in_errors_delta": 0,
+                "sink_udp_snmp": {"in_datagrams": 20956, "in_errors": 0},
+            },
+            "sink_udp_diag": {"captured": True},
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertTrue(contract["ok"], msg=f"unexpected failures: {failures}")
+
+    def test_green_for_sink_udp_ingress_datagram_gap_contract_with_positive_delta(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_udp_ingress_datagram_gap_no_udp_errors",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": False,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_udp_ingress_datagram_gap_no_udp_errors",
+                "sink_udp_diag_captured": True,
+                "sink_udp_expected_datagrams": 20972,
+                "sink_udp_datagram_gap": 16,
+                "sink_udp_in_datagrams_delta": 20956,
+                "sink_udp_in_errors_delta": 0,
+                "sink_udp_snmp": {"in_datagrams": 20956, "in_errors": 0},
+            },
+            "sink_udp_diag": {"captured": True},
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertTrue(contract["ok"], msg=f"unexpected failures: {failures}")
+
+    def test_red_for_sink_writer_boundary_when_settled(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_writer_boundary_no_udp_errors",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": True,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_writer_boundary_no_udp_errors",
+                "sink_udp_diag_captured": True,
+                "sink_udp_snmp": {"in_errors": 0},
+            },
+            "sink_udp_diag": {"captured": True},
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertFalse(contract["ok"])
+        self.assertIn(
+            "summary: tcp_ip sink_writer_boundary_no_udp_errors requires receiver_settled=false, late_growth_bytes=0, sink_udp_snmp.in_errors=0, stop_reason_source=runtime_observability, matching stop_reason_evidence signal and sink_udp_diag_captured parity with top-level sink_udp_diag presence",
+            failures,
+        )
+
+    def test_red_for_sink_writer_boundary_when_sink_udp_diag_parity_mismatch(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_writer_boundary_no_udp_errors",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": False,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_writer_boundary_no_udp_errors",
+                "sink_udp_diag_captured": True,
+                "sink_udp_snmp": {"in_errors": 0},
+            },
+            "sink_udp_diag": None,
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertFalse(contract["ok"])
+        self.assertTrue(contract["sink_udp_diag_captured"])
+        self.assertFalse(contract["sink_udp_diag_present"])
+        self.assertIn(
+            "summary: tcp_ip sink_writer_boundary_no_udp_errors requires receiver_settled=false, late_growth_bytes=0, sink_udp_snmp.in_errors=0, stop_reason_source=runtime_observability, matching stop_reason_evidence signal and sink_udp_diag_captured parity with top-level sink_udp_diag presence",
+            failures,
+        )
+
+    def test_green_for_sink_writer_process_absent_typed_contract(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_writer_process_absent",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": False,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_writer_process_absent",
+                "sink_udp_diag_captured": True,
+                "sink_udp_snmp": {"in_errors": 0},
+            },
+            "sink_udp_diag": {
+                "captured": True,
+                "writer_processes": "",
+                "writer_timeout_processes": "",
+            },
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertTrue(contract["ok"], msg=f"unexpected failures: {failures}")
+        self.assertTrue(contract["sink_writer_process_absent"])
+
+    def test_red_for_sink_writer_process_absent_when_writer_processes_present(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_writer_process_absent",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": False,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_writer_process_absent",
+                "sink_udp_diag_captured": True,
+                "sink_udp_snmp": {"in_errors": 0},
+            },
+            "sink_udp_diag": {
+                "captured": True,
+                "writer_processes": "123 socat",
+                "writer_timeout_processes": "",
+            },
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertFalse(contract["ok"])
+        self.assertFalse(contract["sink_writer_process_absent"])
+        self.assertIn(
+            "summary: tcp_ip sink_writer_process_absent requires receiver_settled=false, late_growth_bytes=0, stop_reason_source=runtime_observability, matching stop_reason_evidence signal, sink_udp_diag captured/present and empty writer process probes",
+            failures,
+        )
+
+    def test_red_for_sink_writer_process_absent_when_probe_present(self):
+        row = {
+            "scenario": "tcp_ip",
+            "ok": False,
+            "stop_reason": "sink_writer_process_absent",
+            "stop_reason_source": "runtime_observability",
+            "receiver_settled": False,
+            "late_growth_bytes": 0,
+            "connect_ip_udp_bridge_contract": "ipv4_only",
+            "connect_ip_udp_bridge_ipv6_supported": False,
+            "stop_reason_evidence": {
+                "sink_writer_boundary_signal": "sink_writer_process_absent",
+                "sink_udp_diag_captured": True,
+                "sink_udp_snmp": {"in_errors": 0},
+            },
+            "sink_udp_diag": {
+                "captured": True,
+                "writer_processes": "",
+                "writer_timeout_processes": "",
+                "writer_process_probe": "123 socat",
+            },
+            "observability": {"delta": _base_tcp_ip_observability_delta()},
+        }
+        checks, failures = self._run_summary_check(row)
+        contract = checks["connect_ip_sink_writer_boundary_contract"]
+        self.assertTrue(contract["active"])
+        self.assertFalse(contract["ok"])
+        self.assertFalse(contract["sink_writer_process_absent"])
+        self.assertEqual(contract["sink_writer_process_probe"], "123 socat")
+
+
 if __name__ == "__main__":
     unittest.main()

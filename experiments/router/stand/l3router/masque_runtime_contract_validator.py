@@ -443,6 +443,89 @@ def _check_smoke_summary(runtime_dir: Path, failures: list):
             if ivalue < 0:
                 failures.append(f"summary: tcp_ip quic_datagram_rcv_queue_pop_path_total[{key}] invalid={value}")
     stop_reason = str(tcp_ip.get("stop_reason", "")).strip().lower()
+    stop_reason_source = str(tcp_ip.get("stop_reason_source", "")).strip().lower()
+    stop_reason_evidence = tcp_ip.get("stop_reason_evidence") or {}
+    sink_udp_snmp = stop_reason_evidence.get("sink_udp_snmp") or {}
+    sink_udp_diag_captured = bool(stop_reason_evidence.get("sink_udp_diag_captured"))
+    sink_udp_diag_row = tcp_ip.get("sink_udp_diag")
+    sink_udp_diag_present = isinstance(sink_udp_diag_row, dict)
+    sink_writer_processes = str((sink_udp_diag_row or {}).get("writer_processes", "")).strip() if sink_udp_diag_present else ""
+    sink_writer_timeout_processes = (
+        str((sink_udp_diag_row or {}).get("writer_timeout_processes", "")).strip() if sink_udp_diag_present else ""
+    )
+    sink_writer_process_probe = str((sink_udp_diag_row or {}).get("writer_process_probe", "")).strip() if sink_udp_diag_present else ""
+    sink_writer_process_absent = not sink_writer_processes and not sink_writer_timeout_processes and not sink_writer_process_probe
+    sink_snmp_in_errors = _as_int(sink_udp_snmp.get("in_errors"), -1) if isinstance(sink_udp_snmp, dict) else -1
+    sink_snmp_in_datagrams = _as_int(sink_udp_snmp.get("in_datagrams"), -1) if isinstance(sink_udp_snmp, dict) else -1
+    sink_udp_expected_datagrams = _as_int(stop_reason_evidence.get("sink_udp_expected_datagrams"), -1)
+    sink_udp_datagram_gap = _as_int(stop_reason_evidence.get("sink_udp_datagram_gap"), -1)
+    sink_udp_in_datagrams_delta = _as_int(stop_reason_evidence.get("sink_udp_in_datagrams_delta"), -1)
+    sink_udp_in_errors_delta = _as_int(stop_reason_evidence.get("sink_udp_in_errors_delta"), -1)
+    sink_boundary_signal = str(stop_reason_evidence.get("sink_writer_boundary_signal", "")).strip().lower()
+    receiver_settled = bool(tcp_ip.get("receiver_settled"))
+    late_growth_bytes = _as_int(tcp_ip.get("late_growth_bytes", 0), 0)
+    sink_boundary_contract_ok = True
+    if stop_reason == "sink_writer_boundary_no_udp_errors":
+        sink_boundary_contract_ok = (
+            not receiver_settled
+            and late_growth_bytes == 0
+            and sink_snmp_in_errors == 0
+            and stop_reason_source == "runtime_observability"
+            and sink_boundary_signal == "sink_writer_boundary_no_udp_errors"
+            and sink_udp_diag_captured == sink_udp_diag_present
+        )
+        if not sink_boundary_contract_ok:
+            failures.append(
+                "summary: tcp_ip sink_writer_boundary_no_udp_errors requires "
+                "receiver_settled=false, late_growth_bytes=0, sink_udp_snmp.in_errors=0, "
+                "stop_reason_source=runtime_observability, matching stop_reason_evidence signal "
+                "and sink_udp_diag_captured parity with top-level sink_udp_diag presence"
+            )
+    if stop_reason == "sink_udp_ingress_datagram_gap_no_udp_errors":
+        datagram_delta_ok = True
+        if sink_udp_in_datagrams_delta >= 0 and sink_udp_expected_datagrams > 0:
+            datagram_delta_ok = sink_udp_in_datagrams_delta < sink_udp_expected_datagrams
+        error_delta_ok = sink_udp_in_errors_delta == 0 if sink_udp_in_errors_delta >= 0 else True
+        sink_boundary_contract_ok = (
+            not receiver_settled
+            and late_growth_bytes == 0
+            and sink_snmp_in_errors == 0
+            and sink_snmp_in_datagrams >= 0
+            and sink_udp_expected_datagrams > 0
+            and sink_snmp_in_datagrams < sink_udp_expected_datagrams
+            and sink_udp_datagram_gap == sink_udp_expected_datagrams - sink_snmp_in_datagrams
+            and datagram_delta_ok
+            and error_delta_ok
+            and stop_reason_source == "runtime_observability"
+            and sink_boundary_signal == "sink_udp_ingress_datagram_gap_no_udp_errors"
+            and sink_udp_diag_captured == sink_udp_diag_present
+        )
+        if not sink_boundary_contract_ok:
+            failures.append(
+                "summary: tcp_ip sink_udp_ingress_datagram_gap_no_udp_errors requires "
+                "receiver_settled=false, late_growth_bytes=0, sink_udp_snmp.in_errors=0, "
+                "sink_udp_snmp.in_datagrams < sink_udp_expected_datagrams with matching gap, "
+                "optional sink_udp_in_datagrams_delta<sink_udp_expected_datagrams and "
+                "sink_udp_in_errors_delta==0 when deltas are present, "
+                "stop_reason_source=runtime_observability, matching stop_reason_evidence signal "
+                "and sink_udp_diag_captured parity with top-level sink_udp_diag presence"
+            )
+    if stop_reason == "sink_writer_process_absent":
+        sink_boundary_contract_ok = (
+            not receiver_settled
+            and late_growth_bytes == 0
+            and stop_reason_source == "runtime_observability"
+            and sink_boundary_signal == "sink_writer_process_absent"
+            and sink_udp_diag_captured
+            and sink_udp_diag_present
+            and sink_writer_process_absent
+        )
+        if not sink_boundary_contract_ok:
+            failures.append(
+                "summary: tcp_ip sink_writer_process_absent requires "
+                "receiver_settled=false, late_growth_bytes=0, stop_reason_source=runtime_observability, "
+                "matching stop_reason_evidence signal, sink_udp_diag captured/present and empty writer process probes"
+            )
     tx_sendmsg_ok = _as_int((quic_tx_path or {}).get("sendmsg_ok", 0), 0)
     tx_le_1400 = _as_int((quic_tx_packet_len or {}).get("le_1400", 0), 0)
     send_queue_enqueued = _as_int((quic_send_pipeline_path or {}).get("send_queue_enqueued", 0), 0)
@@ -528,6 +611,26 @@ def _check_smoke_summary(runtime_dir: Path, failures: list):
             "remote_payload_has_datagram_frame": post_payload_has_datagram,
             "remote_pre_frame_type_seen": pre_frame_seen,
             "remote_visibility_absent": remote_visibility_absent,
+        },
+        "connect_ip_sink_writer_boundary_contract": {
+            "ok": sink_boundary_contract_ok,
+            "active": stop_reason
+            in {
+                "sink_writer_boundary_no_udp_errors",
+                "sink_writer_process_absent",
+                "sink_udp_ingress_datagram_gap_no_udp_errors",
+            },
+            "stop_reason_source": stop_reason_source,
+            "receiver_settled": receiver_settled,
+            "late_growth_bytes": late_growth_bytes,
+            "sink_udp_snmp_in_errors": sink_snmp_in_errors,
+            "sink_writer_boundary_signal": sink_boundary_signal,
+            "sink_udp_diag_captured": sink_udp_diag_captured,
+            "sink_udp_diag_present": sink_udp_diag_present,
+            "sink_writer_processes": sink_writer_processes,
+            "sink_writer_timeout_processes": sink_writer_timeout_processes,
+            "sink_writer_process_probe": sink_writer_process_probe,
+            "sink_writer_process_absent": sink_writer_process_absent,
         },
     }
 

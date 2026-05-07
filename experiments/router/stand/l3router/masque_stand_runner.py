@@ -314,6 +314,7 @@ SMOKE_DEADLINE_SEC = 5.0
 # (see hiddify-sing-box/transport/masque `masqueUDPWriteHardCap`, ~1152 B). This is not
 # Ethernet MTU 1500: each user datagram is wrapped (IP/UDP + MASQUE/HTTP3 framing).
 MASQUE_STAND_UDP_CHUNK_MAX = 1152
+MASQUE_STAND_TCP_IP_UDP_CHUNK_MAX = 1172
 
 # CONNECT-UDP / connect_stream bulk: wall-clock caps derived from a **minimum acceptable**
 # goodput (relative to this baseline, decimal Mb/s). If the path cannot finish within
@@ -385,6 +386,60 @@ def _bulk_min_goodput_wall_sec(byte_count: int) -> int:
         except ValueError:
             pass
     return min(sec, cap)
+
+
+def _tcp_ip_receive_phase_tail_cap_sec(rate_bps: int) -> float:
+    """Upper bound on CONNECT-IP bulk receive-phase slack (single-flow only)."""
+    cap = float(BULK_SINGLE_FLOW_RECEIVE_TAIL_CAP_SEC)
+    if (
+        _stand_slow_docker_profile()
+        and int(rate_bps) >= BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD
+    ):
+        return min(120.0, cap + 60.0)
+    return cap
+
+
+def _tcp_ip_receive_phase_slack_sec(strict_budget: int, rate_bps: int) -> float:
+    """Receive-phase slack after paced send; must stay CI-neutral without MASQUE_STAND_SLOW_DOCKER."""
+    _tail_cap = _tcp_ip_receive_phase_tail_cap_sec(rate_bps)
+    computed_recv_slack = (
+        BULK_SINGLE_FLOW_RECEIVE_TAIL_BASE_SEC + float(strict_budget) * BULK_SINGLE_FLOW_RECEIVE_TAIL_PER_STRICT_SEC
+    )
+    phase_slack = min(_tail_cap, computed_recv_slack)
+    if (
+        _stand_slow_docker_profile()
+        and int(rate_bps) >= BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD
+    ):
+        phase_slack = float(_tail_cap)
+    return float(phase_slack)
+
+
+def _tcp_ip_near_full_extra_cap_sec(rate_bps: int) -> float:
+    """Max extra wait when receiver is near full for paced CONNECT-IP bulk."""
+    cap = float(BULK_TCP_IP_NEAR_FULL_RECV_CAP_SEC)
+    if (
+        _stand_slow_docker_profile()
+        and int(rate_bps) >= BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD
+    ):
+        return min(120.0, cap + 30.0)
+    return cap
+
+
+def _tcp_ip_socket_buf_bytes(rate_bps: int) -> int:
+    """UDP socket buffer for CONNECT-IP harness sink/sender (CI-neutral defaults)."""
+    raw = (os.environ.get("MASQUE_TCP_IP_SOCKET_BUF_BYTES") or "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+            return max(BULK_TCP_IP_SOCKET_BUF_MIN, min(BULK_TCP_IP_SOCKET_BUF_MAX, parsed))
+        except ValueError:
+            pass
+    if (
+        _stand_slow_docker_profile()
+        and int(rate_bps) >= BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD
+    ):
+        return BULK_TCP_IP_SOCKET_BUF_SLOW_HIGH_RATE
+    return BULK_TCP_IP_SOCKET_BUF_DEFAULT
 
 
 def _tcp_ip_bulk_min_strict_budget_sec(byte_count: int) -> int:
@@ -467,6 +522,27 @@ BULK_SINGLE_FLOW_RECEIVE_TAIL_PER_STRICT_SEC = 0.2
 BULK_SINGLE_FLOW_RECEIVE_TAIL_CAP_SEC = 60.0
 # Second-phase poll budget after primary wait (still capped by phase_deadline).
 BULK_SINGLE_FLOW_NEAR_COMPLETE_DRAIN_SEC = 10.0
+
+# CONNECT-IP bulk pacing: отправка может уложиться в субсекунду, затем QUIC/HTTP3 датаграммы +
+# очередь sink на Docker Desktop доползают миллисекундами после `phase_deadline`. Rescue уже
+# обрезан остатком до дедлайна — без отдельного bounded-хвоста near-full recv обрывает приёмку
+# при реальном недоборе <1% без ослабления hash/байт-контракта.
+BULK_TCP_IP_NEAR_FULL_RECV_RATIO = 0.995
+BULK_TCP_IP_NEAR_FULL_RECV_MIN_EXTRA_SEC = 8.0
+BULK_TCP_IP_NEAR_FULL_RECV_CAP_SEC = 45.0
+# Tiny-loss boundary: classify near-deadline micro-loss separately from cadence-sparse
+# observability so we can triage deadline pressure vs bridge/runtime stalls.
+BULK_TCP_IP_NEAR_FULL_MICRO_LOSS_MAX_BYTES = 64 * 1024
+BULK_TCP_IP_NEAR_FULL_MICRO_LOSS_BUDGET_MARGIN_ABS_SEC = 1.0
+# Extra headroom vs BULK_TCP_IP_NEAR_FULL_RECV_CAP_SEC when CONNECT-IP bulk is paced very
+# high (bytes/sec >> default CI matrix) under slow Desktop Docker: drain/hashing need more
+# wall clock without loosening ratio/hash gates.
+BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD = 100_000_000
+# UDP socket buffers for CONNECT-IP bulk harness path (socat sink + sender socket).
+BULK_TCP_IP_SOCKET_BUF_DEFAULT = 16 * 1024 * 1024
+BULK_TCP_IP_SOCKET_BUF_SLOW_HIGH_RATE = 64 * 1024 * 1024
+BULK_TCP_IP_SOCKET_BUF_MIN = 256 * 1024
+BULK_TCP_IP_SOCKET_BUF_MAX = 128 * 1024 * 1024
 
 
 def bytes_from_megabytes_arg(mb: int) -> int:
@@ -569,6 +645,389 @@ def docker_logs_capture(docker, container):
     return (result.stdout or "") + (result.stderr or "")
 
 
+def _extract_writer_pids_from_probe(probe_text: str) -> list[int]:
+    pids: list[int] = []
+    for line in str(probe_text or "").splitlines():
+        if "pgrep -af" in line:
+            continue
+        token = (line or "").strip().split(" ", 1)[0]
+        if not token:
+            continue
+        try:
+            pid = int(token)
+        except ValueError:
+            continue
+        if pid > 0 and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def _collect_writer_proc_sample(docker: str, pids: list[int], sink_file: str) -> dict:
+    sample = {
+        "captured": False,
+        "pids": list(pids),
+        "sink_file_stat": "",
+        "proc_io": {},
+        "proc_fd_stat": {},
+        "errors": {},
+    }
+    try:
+        sample["sink_file_stat"] = docker_exec_capture(
+            docker,
+            IPERF_CONTAINER,
+            (
+                f"if [ -f {sink_file} ]; then "
+                f"wc -c {sink_file}; "
+                f"stat -c 'sink_file_size_bytes=%s sink_file_mtime_ns=%Y000000000' {sink_file} 2>/dev/null || true; "
+                "else echo ''; fi"
+            ),
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive diagnostic path
+        sample["errors"]["sink_file_stat"] = str(exc)
+    for pid in pids:
+        io_script = (
+            f"if [ -r /proc/{int(pid)}/io ]; then "
+            f"awk '/^(rchar|wchar|read_bytes|write_bytes):/{{print}}' /proc/{int(pid)}/io; "
+            "fi"
+        )
+        fd_script = (
+            f"if [ -d /proc/{int(pid)}/fd ]; then "
+            f"echo fd_count=$(ls -1 /proc/{int(pid)}/fd 2>/dev/null | wc -l); "
+            f"stat -c 'fd_dir_mtime=%Y fd_dir_ctime=%Z' /proc/{int(pid)}/fd 2>/dev/null || true; "
+            "fi"
+        )
+        try:
+            sample["proc_io"][str(pid)] = docker_exec_capture(
+                docker,
+                IPERF_CONTAINER,
+                io_script,
+                check=False,
+            )
+        except Exception as exc:  # pragma: no cover - defensive diagnostic path
+            sample["errors"][f"proc_io_{pid}"] = str(exc)
+        try:
+            sample["proc_fd_stat"][str(pid)] = docker_exec_capture(
+                docker,
+                IPERF_CONTAINER,
+                fd_script,
+                check=False,
+            )
+        except Exception as exc:  # pragma: no cover - defensive diagnostic path
+            sample["errors"][f"proc_fd_stat_{pid}"] = str(exc)
+    sample["captured"] = bool(sample["sink_file_stat"] or sample["proc_io"] or sample["proc_fd_stat"])
+    if not sample["errors"]:
+        sample.pop("errors", None)
+    return sample
+
+
+def _sink_sample_file_stat_fields(sample: dict) -> dict:
+    fields = {
+        "sink_file_size_bytes": 0,
+        "sink_file_mtime_ns": 0,
+    }
+    text = str((sample or {}).get("sink_file_stat", "") or "")
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        if "sink_file_size_bytes=" in raw or "sink_file_mtime_ns=" in raw:
+            for token in raw.split():
+                if token.startswith("sink_file_size_bytes="):
+                    fields["sink_file_size_bytes"] = _safe_int(token.split("=", 1)[1], 0)
+                elif token.startswith("sink_file_mtime_ns="):
+                    fields["sink_file_mtime_ns"] = _safe_int(token.split("=", 1)[1], 0)
+        elif " " in raw:
+            fields["sink_file_size_bytes"] = max(fields["sink_file_size_bytes"], _safe_int(raw.split(" ", 1)[0], 0))
+    return fields
+
+
+def _sink_sample_proc_write_bytes(sample: dict) -> int:
+    total_write_bytes = 0
+    proc_io = (sample or {}).get("proc_io", {})
+    if not isinstance(proc_io, dict):
+        return 0
+    for proc_text in proc_io.values():
+        for line in str(proc_text or "").splitlines():
+            raw = line.strip()
+            if raw.startswith("write_bytes:"):
+                total_write_bytes += _safe_int(raw.split(":", 1)[1], 0)
+    return total_write_bytes
+
+
+def _classify_writer_idle_vs_blocked(
+    progress_bytes: int,
+    progress_mtime_ns: int,
+    progress_proc_write_bytes: int,
+) -> str:
+    bytes_progress = max(0, int(progress_bytes))
+    mtime_progress = max(0, int(progress_mtime_ns))
+    proc_progress = max(0, int(progress_proc_write_bytes))
+    if proc_progress > 0 and bytes_progress == 0 and mtime_progress == 0:
+        return "blocked_after_write"
+    if proc_progress > 0:
+        return "writer_progressing"
+    if bytes_progress > 0 or mtime_progress > 0:
+        return "external_file_growth"
+    return "idle_no_progress"
+
+
+def _summarize_sink_writer_samples(diag: dict) -> dict:
+    writer_samples = diag.get("writer_samples", {}) if isinstance(diag, dict) else {}
+    sample_1 = writer_samples.get("sample_1", {}) if isinstance(writer_samples, dict) else {}
+    sample_2 = writer_samples.get("sample_2", {}) if isinstance(writer_samples, dict) else {}
+    sample_1_fields = _sink_sample_file_stat_fields(sample_1 if isinstance(sample_1, dict) else {})
+    sample_2_fields = _sink_sample_file_stat_fields(sample_2 if isinstance(sample_2, dict) else {})
+    sample_1_proc_write_bytes = _sink_sample_proc_write_bytes(sample_1 if isinstance(sample_1, dict) else {})
+    sample_2_proc_write_bytes = _sink_sample_proc_write_bytes(sample_2 if isinstance(sample_2, dict) else {})
+    sink_writer_progress_bytes = max(
+        0,
+        sample_2_fields["sink_file_size_bytes"] - sample_1_fields["sink_file_size_bytes"],
+    )
+    sink_writer_progress_mtime_ns = max(
+        0,
+        sample_2_fields["sink_file_mtime_ns"] - sample_1_fields["sink_file_mtime_ns"],
+    )
+    sink_writer_progress_proc_write_bytes = max(0, sample_2_proc_write_bytes - sample_1_proc_write_bytes)
+    return {
+        "sample_1": {
+            "sink_file_size_bytes": sample_1_fields["sink_file_size_bytes"],
+            "sink_file_mtime_ns": sample_1_fields["sink_file_mtime_ns"],
+            "proc_write_bytes": sample_1_proc_write_bytes,
+        },
+        "sample_2": {
+            "sink_file_size_bytes": sample_2_fields["sink_file_size_bytes"],
+            "sink_file_mtime_ns": sample_2_fields["sink_file_mtime_ns"],
+            "proc_write_bytes": sample_2_proc_write_bytes,
+        },
+        "sink_writer_progress_bytes": sink_writer_progress_bytes,
+        "sink_writer_progress_mtime_ns": sink_writer_progress_mtime_ns,
+        "sink_writer_progress_proc_write_bytes": sink_writer_progress_proc_write_bytes,
+        "writer_idle_vs_blocked": _classify_writer_idle_vs_blocked(
+            sink_writer_progress_bytes,
+            sink_writer_progress_mtime_ns,
+            sink_writer_progress_proc_write_bytes,
+        ),
+    }
+
+
+def _collect_tcp_ip_sink_udp_diag(docker: str) -> dict:
+    diag = {
+        "container": IPERF_CONTAINER,
+        "captured": False,
+        "ss_udp": "",
+        "netstat_udp": "",
+        "udp_snmp": "",
+        "sink_file_stat": "",
+        "socat_log_tail": "",
+        "writer_processes": "",
+        "writer_timeout_processes": "",
+        "writer_process_probe": "",
+        "writer_samples": {},
+        "errors": {},
+    }
+    probes = (
+        (
+            "ss_udp",
+            "ss -u -i -n -a 2>/dev/null || true",
+        ),
+        (
+            "netstat_udp",
+            "netstat -su 2>/dev/null || netstat -s -u 2>/dev/null || true",
+        ),
+        (
+            "udp_snmp",
+            "awk '/^Udp:/{print}' /proc/net/snmp 2>/dev/null || true",
+        ),
+        (
+            "sink_file_stat",
+            "if [ -f /tmp/ip-connect-ip-python.bin ]; then wc -c /tmp/ip-connect-ip-python.bin; else echo ''; fi",
+        ),
+        (
+            "socat_log_tail",
+            "tail -n 60 /tmp/ip-connect-ip-python.log 2>/dev/null || true",
+        ),
+        (
+            "writer_processes",
+            "ps -o pid,ppid,stat,etime,args -C socat 2>/dev/null || true",
+        ),
+        (
+            "writer_timeout_processes",
+            "ps -o pid,ppid,stat,etime,args -C timeout 2>/dev/null || true",
+        ),
+        (
+            "writer_process_probe",
+            "pgrep -af 'socat.*ip-connect-ip-python\\.bin|timeout.*socat.*UDP-RECV' 2>/dev/null || true",
+        ),
+    )
+    for key, script in probes:
+        try:
+            diag[key] = docker_exec_capture(docker, IPERF_CONTAINER, script, check=False)
+        except Exception as exc:  # pragma: no cover - defensive diagnostic path
+            diag["errors"][key] = str(exc)
+    diag["udp_snmp_sample_1"] = diag.get("udp_snmp", "")
+    writer_pids = _extract_writer_pids_from_probe(diag.get("writer_process_probe", ""))
+    diag["writer_samples"]["sample_1"] = _collect_writer_proc_sample(
+        docker,
+        writer_pids,
+        "/tmp/ip-connect-ip-python.bin",
+    )
+    time.sleep(0.25)
+    diag["writer_samples"]["sample_2"] = _collect_writer_proc_sample(
+        docker,
+        writer_pids,
+        "/tmp/ip-connect-ip-python.bin",
+    )
+    try:
+        diag["udp_snmp_sample_2"] = docker_exec_capture(
+            docker,
+            IPERF_CONTAINER,
+            "awk '/^Udp:/{print}' /proc/net/snmp 2>/dev/null || true",
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive diagnostic path
+        diag["udp_snmp_sample_2"] = ""
+        diag["errors"]["udp_snmp_sample_2"] = str(exc)
+    snmp_sample_1 = _parse_udp_snmp_error_counters(diag.get("udp_snmp_sample_1", ""))
+    snmp_sample_2 = _parse_udp_snmp_error_counters(diag.get("udp_snmp_sample_2", ""))
+    diag["udp_snmp_progress"] = {
+        "sample_1": snmp_sample_1,
+        "sample_2": snmp_sample_2,
+        "delta_in_datagrams": (
+            int(snmp_sample_2["in_datagrams"]) - int(snmp_sample_1["in_datagrams"])
+            if isinstance(snmp_sample_1.get("in_datagrams"), int) and isinstance(snmp_sample_2.get("in_datagrams"), int)
+            else None
+        ),
+        "delta_in_errors": (
+            int(snmp_sample_2["in_errors"]) - int(snmp_sample_1["in_errors"])
+            if isinstance(snmp_sample_1.get("in_errors"), int) and isinstance(snmp_sample_2.get("in_errors"), int)
+            else None
+        ),
+        "delta_rcvbuf_errors": (
+            int(snmp_sample_2["rcvbuf_errors"]) - int(snmp_sample_1["rcvbuf_errors"])
+            if isinstance(snmp_sample_1.get("rcvbuf_errors"), int) and isinstance(snmp_sample_2.get("rcvbuf_errors"), int)
+            else None
+        ),
+    }
+    if diag.get("udp_snmp_sample_2"):
+        diag["udp_snmp"] = diag["udp_snmp_sample_2"]
+    diag["captured"] = any(diag.get(key) for key, _ in probes)
+    if not diag["captured"]:
+        diag["captured"] = any(
+            bool(sample.get("captured"))
+            for sample in diag.get("writer_samples", {}).values()
+            if isinstance(sample, dict)
+        )
+    diag["writer_summary"] = _summarize_sink_writer_samples(diag)
+    if not diag["errors"]:
+        diag.pop("errors", None)
+    return diag
+
+
+def _parse_udp_snmp_error_counters(snmp_text: str) -> dict:
+    parsed = {
+        "parsed": False,
+        "in_datagrams": None,
+        "in_errors": None,
+        "rcvbuf_errors": None,
+    }
+    lines = [line.strip() for line in str(snmp_text or "").splitlines() if line.strip().startswith("Udp:")]
+    if len(lines) < 2:
+        return parsed
+    field_names = lines[-2].split()[1:]
+    field_values = lines[-1].split()[1:]
+    if not field_names or len(field_names) != len(field_values):
+        return parsed
+    values_by_field = {}
+    for key, raw_value in zip(field_names, field_values):
+        try:
+            values_by_field[str(key)] = int(raw_value)
+        except ValueError:
+            values_by_field[str(key)] = None
+    parsed["parsed"] = True
+    parsed["in_datagrams"] = values_by_field.get("InDatagrams")
+    parsed["in_errors"] = values_by_field.get("InErrors")
+    parsed["rcvbuf_errors"] = values_by_field.get("RcvbufErrors")
+    return parsed
+
+
+def _classify_sink_writer_boundary_signal(
+    settled: bool,
+    late_growth_bytes: int,
+    sink_udp_diag: dict | None,
+    expected_datagrams: int | None = None,
+) -> str | None:
+    if settled:
+        return None
+    if int(late_growth_bytes) != 0:
+        return None
+    if not isinstance(sink_udp_diag, dict):
+        return None
+    if bool(sink_udp_diag.get("captured")):
+        writer_processes = str(sink_udp_diag.get("writer_processes", "")).strip()
+        writer_timeout_processes = str(sink_udp_diag.get("writer_timeout_processes", "")).strip()
+        writer_process_probe = str(sink_udp_diag.get("writer_process_probe", "")).strip()
+        if not writer_processes and not writer_timeout_processes and not writer_process_probe:
+            return "sink_writer_process_absent"
+    counters = _parse_udp_snmp_error_counters(sink_udp_diag.get("udp_snmp", ""))
+    expected_int = int(expected_datagrams) if expected_datagrams is not None else 0
+    in_datagrams = counters.get("in_datagrams")
+    in_errors = counters.get("in_errors")
+    snmp_progress = sink_udp_diag.get("udp_snmp_progress", {})
+    if isinstance(snmp_progress, dict):
+        delta_in_datagrams = snmp_progress.get("delta_in_datagrams")
+        delta_in_errors = snmp_progress.get("delta_in_errors")
+        if (
+            isinstance(delta_in_datagrams, int)
+            and expected_int > 0
+            and delta_in_datagrams < expected_int
+            and (
+                (isinstance(delta_in_errors, int) and delta_in_errors == 0)
+                or (delta_in_errors is None and in_errors == 0)
+            )
+        ):
+            return "sink_udp_ingress_datagram_gap_no_udp_errors"
+    if (
+        isinstance(in_datagrams, int)
+        and expected_int > 0
+        and in_datagrams < expected_int
+        and in_errors == 0
+    ):
+        return "sink_udp_ingress_datagram_gap_no_udp_errors"
+    if counters.get("in_errors") == 0:
+        return "sink_writer_boundary_no_udp_errors"
+    return None
+
+
+def _should_collect_sink_udp_diag(stop_reason: str, got: int, expected: int) -> bool:
+    immediate_reasons = {
+        "near_full_micro_loss_at_deadline",
+        "near_full_loss_under_cadence",
+        "bridge_boundary_stall",
+        "post_send_frame_visibility_absent",
+    }
+    if stop_reason in immediate_reasons:
+        return True
+    expected_int = int(expected) if expected else 0
+    got_int = int(got) if got else 0
+    near_full_delivery = expected_int > 0 and got_int >= int(expected_int * 0.99)
+    if stop_reason in {"budget_exceeded", "receiver_incomplete", "receiver_not_settled"} and near_full_delivery:
+        return True
+    return False
+
+
+def _expected_udp_datagrams(byte_count: int, payload_size: int) -> int:
+    payload = max(1, int(payload_size))
+    return int(math.ceil(max(0, int(byte_count)) / float(payload)))
+
+
+def _obs_nested_counter(obs_delta: dict, counter_name: str, key_name: str) -> int:
+    row = obs_delta.get(counter_name, {}) if isinstance(obs_delta, dict) else {}
+    if not isinstance(row, dict):
+        return 0
+    return _safe_int(row.get(key_name, 0), 0)
+
+
 def _udp_tun_datagram_send_sh(
     byte_count: int,
     target_host: str,
@@ -604,6 +1063,24 @@ def _stand_udp_chunk(byte_count: int, udp_chunk: int) -> int:
     if byte_count <= BYTES_10KB:
         return 960
     return MASQUE_STAND_UDP_CHUNK_MAX
+
+
+def _stand_tcp_ip_udp_chunk(udp_chunk: int) -> tuple[int, int]:
+    raw = 1172
+    explicit_raw = (os.environ.get("MASQUE_TCP_IP_DATAGRAM") or "").strip()
+    if explicit_raw:
+        raw = _safe_int(explicit_raw, 1172)
+    elif 256 <= int(udp_chunk) <= MASQUE_STAND_TCP_IP_UDP_CHUNK_MAX:
+        raw = int(udp_chunk)
+    else:
+        shared_raw = (os.environ.get("MASQUE_STAND_UDP_CHUNK") or "").strip()
+        if shared_raw:
+            raw = _safe_int(shared_raw, 1172)
+
+    payload_cap = _safe_int(os.environ.get("MASQUE_TCP_IP_UDP_PAYLOAD_CAP", "1172"), 1172)
+    payload_cap = max(256, min(MASQUE_STAND_TCP_IP_UDP_CHUNK_MAX, payload_cap))
+    effective = max(256, min(MASQUE_STAND_TCP_IP_UDP_CHUNK_MAX, raw, payload_cap))
+    return raw, effective
 
 
 def _client_default_dev(docker) -> str:
@@ -990,6 +1467,8 @@ def classify_error(err):
         return "dial_failed"
     if "receiver incomplete" in low or "budget exceeded" in low:
         return "timeout"
+    if "route_guard_target_not_on_tun0" in low:
+        return "policy"
     return "unknown"
 
 
@@ -1057,6 +1536,7 @@ def _zero_observability_snapshot():
         "connect_ip_bridge_udp_rx_attempt_total": 0,
         "connect_ip_bridge_build_total": 0,
         "connect_ip_bridge_write_enter_total": 0,
+        "connect_ip_bridge_write_chunk_total": 0,
         "connect_ip_bridge_write_ok_total": 0,
         "connect_ip_bridge_write_err_total": 0,
         "connect_ip_bridge_read_enter_total": 0,
@@ -1978,13 +2458,33 @@ def connect_ip_observability(docker, before_client_logs, before_server_logs):
     }
 
 
-def classify_tcp_ip_stop_reason(send_err, got, expected, hash_ok, settled, budget_exceeded, obs):
+def classify_tcp_ip_stop_reason(send_err, got, expected, hash_ok, settled, budget_exceeded, obs, budget_margin_sec=None):
     obs_delta = obs.get("delta", {}) if isinstance(obs, dict) else {}
     obs_source = obs.get("source", "") if isinstance(obs, dict) else ""
     obs_gap = bool(obs.get("observability_gap", False)) if isinstance(obs, dict) else False
     reset_delta = obs_delta.get("connect_ip_session_reset_total", {}) if isinstance(obs_delta, dict) else {}
     if send_err:
+        if "route_guard_target_not_on_tun0" in str(send_err):
+            return "route_guard_target_not_on_tun0"
         return classify_error(send_err)
+    # Sub-second bulk windows (`send_elapsed < 1s`) only emit a single
+    # `periodic_active` snapshot via `maybeEmitConnectIPActiveSnapshot` (1s
+    # throttle), so bridge/connect-ip counters appear as `1` even when the data
+    # plane delivered the full payload. Treat near-full delivery as a separate
+    # signal so we don't conflate cadence-sparse deltas with a real stall.
+    expected_int = int(expected) if expected else 0
+    got_int = int(got) if got else 0
+    near_full_delivery = expected_int > 0 and got_int >= int(expected_int * 0.99)
+    tiny_loss_bytes = max(0, expected_int - got_int)
+    budget_margin = float(budget_margin_sec) if budget_margin_sec is not None else None
+    near_deadline_budget = budget_margin is not None and abs(budget_margin) <= BULK_TCP_IP_NEAR_FULL_MICRO_LOSS_BUDGET_MARGIN_ABS_SEC
+    if (
+        budget_exceeded
+        and near_full_delivery
+        and tiny_loss_bytes <= BULK_TCP_IP_NEAR_FULL_MICRO_LOSS_MAX_BYTES
+        and near_deadline_budget
+    ):
+        return "near_full_micro_loss_at_deadline"
     if obs_source == "runtime_snapshot_log_marker":
         if (
             obs_delta.get("connect_ip_bypass_listenpacket_total", 0) > 0
@@ -1999,6 +2499,8 @@ def classify_tcp_ip_stop_reason(send_err, got, expected, hash_ok, settled, budge
             and obs_delta.get("connect_ip_engine_ingress_total", 0) == 0
             and got < expected
         ):
+            if near_full_delivery and obs_delta.get("connect_ip_bridge_udp_tx_attempt_total", 0) <= 2:
+                return "near_full_loss_under_cadence"
             tx_path = obs_delta.get("quic_datagram_tx_path_total", {})
             tx_packet_len = obs_delta.get("quic_datagram_tx_packet_len_total", {})
             post_decrypt = obs_delta.get("quic_datagram_post_decrypt_path_total", {})
@@ -2070,6 +2572,12 @@ def classify_tcp_ip_stop_reason(send_err, got, expected, hash_ok, settled, budge
     return "none"
 
 
+def _apply_tcp_ip_smoke_deadline_to_throughput_ok(throughput_ok: bool, send_elapsed: float, byte_count: int) -> bool:
+    if int(byte_count) == BYTES_10KB:
+        return bool(throughput_ok and send_elapsed <= SMOKE_DEADLINE_SEC)
+    return bool(throughput_ok)
+
+
 def _connect_ip_accounting_confirmed(obs):
     if not isinstance(obs, dict):
         return False
@@ -2083,6 +2591,69 @@ def _connect_ip_accounting_confirmed(obs):
     packet_tx = _safe_int(delta.get("connect_ip_packet_tx_total", 0), 0)
     bytes_tx = _safe_int(delta.get("connect_ip_bytes_tx_total", 0), 0)
     return packet_tx > 0 and bytes_tx > 0
+
+
+def _connect_ip_cadence_sparse_signal(obs, got: int, expected: int) -> dict:
+    if not isinstance(obs, dict):
+        return {"flag": False, "reason": "obs_missing"}
+    delta = obs.get("delta", {})
+    if not isinstance(delta, dict):
+        return {"flag": False, "reason": "delta_missing"}
+    expected_int = int(expected) if expected else 0
+    got_int = int(got) if got else 0
+    if expected_int <= 0 or got_int < expected_int:
+        return {"flag": False, "reason": "delivery_not_full"}
+    bridge_tx = _safe_int(delta.get("connect_ip_bridge_udp_tx_attempt_total", 0), 0)
+    packet_tx = _safe_int(delta.get("connect_ip_packet_tx_total", 0), 0)
+    packet_rx = _safe_int(delta.get("connect_ip_packet_rx_total", 0), 0)
+    quic_send = _safe_int((delta.get("quic_datagram_tx_path_total") or {}).get("sendmsg_ok", 0), 0)
+    quic_ingress = _safe_int((delta.get("quic_datagram_post_decrypt_path_total") or {}).get("short_unpack_ok", 0), 0)
+    flag = bridge_tx <= 1 and packet_tx <= 1 and packet_rx == 0 and quic_send == 0 and quic_ingress == 0
+    return {
+        "flag": bool(flag),
+        "reason": "cadence_sparse" if flag else "none",
+        "bridge_udp_tx_attempt_total": int(bridge_tx),
+        "packet_tx_total": int(packet_tx),
+        "packet_rx_total": int(packet_rx),
+        "quic_sendmsg_ok": int(quic_send),
+        "quic_short_unpack_ok": int(quic_ingress),
+        "observability_peer_split": bool(obs.get("observability_peer_split", False)),
+    }
+
+
+def _ensure_tun_route_for_tcp_ip(docker: str, target_host: str) -> tuple[str, bool]:
+    docker_exec_capture(
+        docker,
+        CLIENT_CONTAINER,
+        "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true",
+        check=False,
+    )
+    probe = docker_exec_capture(docker, CLIENT_CONTAINER, f"ip route get {target_host}", check=False)
+    on_tun = " dev tun0" in (probe or "")
+    return probe, on_tun
+
+
+def _read_tun0_dev_bytes(docker: str) -> dict:
+    probe = docker_exec_capture(
+        docker,
+        CLIENT_CONTAINER,
+        (
+            "awk -F '[: ]+' '/^[[:space:]]*tun0[[:space:]]*:/ "
+            "{print $3\" \"$11; exit}' /proc/net/dev"
+        ),
+        check=False,
+    ).strip()
+    if not probe:
+        return {"ok": False, "rx_bytes": 0, "tx_bytes": 0, "raw": ""}
+    parts = probe.split()
+    if len(parts) < 2:
+        return {"ok": False, "rx_bytes": 0, "tx_bytes": 0, "raw": probe}
+    try:
+        rx_bytes = int(parts[0])
+        tx_bytes = int(parts[1])
+    except ValueError:
+        return {"ok": False, "rx_bytes": 0, "tx_bytes": 0, "raw": probe}
+    return {"ok": True, "rx_bytes": rx_bytes, "tx_bytes": tx_bytes, "raw": probe}
 
 
 def _parse_csv_ints(s, default):
@@ -2280,6 +2851,7 @@ def run_tcp_stream(docker, byte_count):
     wait_socks_ready(docker)
     time.sleep(0.35)
 
+    route_probe = docker_exec_capture(docker, CLIENT_CONTAINER, f"ip route get {target_host}", check=False)
     start = time.time()
     exec_err = None
     try:
@@ -2369,18 +2941,22 @@ def run_tcp_ip(
     send_timeout_sec=None,
     wait_timeout_sec=None,
     tcp_ip_deadline_sec=None,
+    udp_chunk=0,
     udp_rate_bps=0,
 ):
     # TUN-only hard switch: validate CONNECT-IP packet-plane directly.
     target_host, port = "10.200.0.2", 5601
     sink = "/tmp/ip-connect-ip-python.bin"
-    raw_datagram_size = int(os.environ.get("MASQUE_TCP_IP_DATAGRAM", "1172"))
-    payload_cap = int(os.environ.get("MASQUE_TCP_IP_UDP_PAYLOAD_CAP", "1172"))
-    if payload_cap < 512:
-        payload_cap = 512
-    datagram_size = min(raw_datagram_size, payload_cap)
-    if datagram_size < 1172:
-        datagram_size = 1172
+    raw_datagram_size, datagram_size = _stand_tcp_ip_udp_chunk(udp_chunk)
+    rate_bps = 0
+    if mode == "bulk_single_flow":
+        send_rate_limit = os.environ.get("MASQUE_TCP_IP_RATE_LIMIT", "").strip()
+        if send_rate_limit == "1m":
+            send_rate_limit = "1300k"
+        rate_bps = parse_rate_limit_to_bps(send_rate_limit)
+        if int(udp_rate_bps) > 0:
+            rate_bps = int(udp_rate_bps)
+    socket_buf_bytes = _tcp_ip_socket_buf_bytes(rate_bps)
     docker_exec(docker, IPERF_CONTAINER, f"rm -f {sink}", check=False)
     listener_timeout = 20 if byte_count == BYTES_10KB else 1800
     recv_timeout_opt = "-T1 " if byte_count == BYTES_10KB else ""
@@ -2389,46 +2965,34 @@ def run_tcp_ip(
         IPERF_CONTAINER,
         (
             f"nohup timeout {listener_timeout} "
-            f"socat -u {recv_timeout_opt}UDP-RECV:{port},reuseaddr,rcvbuf=16777216 OPEN:{sink},creat,trunc,append "
+            f"socat -u {recv_timeout_opt}UDP-RECV:{port},reuseaddr,rcvbuf={socket_buf_bytes} OPEN:{sink},creat,trunc,append "
             f">/tmp/ip-connect-ip-python.log 2>&1 &"
         ),
     )
     wait_udp_listener(docker, IPERF_CONTAINER, port)
 
+    route_probe, route_on_tun0 = _ensure_tun_route_for_tcp_ip(docker, target_host)
+    tun0_before = _read_tun0_dev_bytes(docker)
     start = time.time()
+
     strict_budget = 3 if byte_count == BYTES_10KB else strict_timeout_sec(byte_count, floor_sec=1)
     if byte_count > BYTES_10KB and tcp_ip_deadline_sec is not None:
         strict_budget = max(1, int(tcp_ip_deadline_sec))
     if byte_count > BYTES_10KB and mode == "bulk_single_flow":
         strict_budget = max(strict_budget, _tcp_ip_bulk_min_strict_budget_sec(byte_count))
-        phase_slack = min(
-            BULK_SINGLE_FLOW_RECEIVE_TAIL_CAP_SEC,
-            BULK_SINGLE_FLOW_RECEIVE_TAIL_BASE_SEC + strict_budget * BULK_SINGLE_FLOW_RECEIVE_TAIL_PER_STRICT_SEC,
-        )
+        phase_slack = _tcp_ip_receive_phase_slack_sec(strict_budget, rate_bps)
     else:
         phase_slack = 0.0
     phase_deadline = start + strict_budget + phase_slack
-    rate_bps = 0
     if mode == "churn_many_flows":
         chunk = 1024
         count = max(1, byte_count // chunk)
         send_timeout = send_timeout_sec if send_timeout_sec is not None else strict_budget
         send_cmd = (
-            f"timeout {send_timeout} sh -lc 'ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true; "
-            f"for i in $(seq 1 {count}); do dd if=/dev/zero bs={chunk} count=1 2>/dev/null | "
+            f"timeout {send_timeout} sh -lc 'for i in $(seq 1 {count}); do dd if=/dev/zero bs={chunk} count=1 2>/dev/null | "
             f"socat -u - UDP4:{target_host}:{port} || exit 1; done'"
         )
     else:
-        send_rate_limit = os.environ.get("MASQUE_TCP_IP_RATE_LIMIT", "").strip()
-        # pv interprets "m" as decimal MB/s. Strict budget uses MiB sizing.
-        # Normalize the common "1m" knob to a higher decimal rate so
-        # strict 1 MiB/s budgets remain reachable despite UDP framing
-        # and userspace pipeline overhead in the stand.
-        if send_rate_limit == "1m":
-            send_rate_limit = "1300k"
-        rate_bps = parse_rate_limit_to_bps(send_rate_limit)
-        if int(udp_rate_bps) > 0:
-            rate_bps = int(udp_rate_bps)
         send_cmd = None
         send_timeout = send_timeout_sec if send_timeout_sec is not None else strict_budget
         # MASQUE_UDP_RATE_BPS in the paced script is bytes/sec (see target_elapsed = sent/RATE_BPS).
@@ -2441,15 +3005,11 @@ def run_tcp_ip(
     before_server_logs = docker_logs_capture(docker, SERVER_CONTAINER)
     send_err = None
     try:
+        if not route_on_tun0:
+            raise RuntimeError("route_guard_target_not_on_tun0")
         if mode == "churn_many_flows":
             docker_exec(docker, CLIENT_CONTAINER, send_cmd)
         else:
-            docker_exec(
-                docker,
-                CLIENT_CONTAINER,
-                "ip route add 10.200.0.0/24 dev tun0 2>/dev/null || true",
-                check=False,
-            )
             run(
                 [
                     docker,
@@ -2465,7 +3025,7 @@ def run_tcp_ip(
                     "-e",
                     f"MASQUE_UDP_RATE_BPS={rate_bps}",
                     "-e",
-                    "MASQUE_UDP_SNDBUF=16777216",
+                    f"MASQUE_UDP_SNDBUF={socket_buf_bytes}",
                     CLIENT_CONTAINER,
                     "timeout",
                     str(send_timeout),
@@ -2496,6 +3056,25 @@ def run_tcp_ip(
                 got,
                 wait_for_bytes(docker, IPERF_CONTAINER, sink, byte_count, rescue_budget),
             )
+    if (
+        byte_count > BYTES_10KB
+        and mode == "bulk_single_flow"
+        and send_err is None
+        and got < byte_count
+        and got >= int(byte_count * BULK_TCP_IP_NEAR_FULL_RECV_RATIO)
+    ):
+        tail = byte_count - got
+        if rate_bps > 0:
+            wire_sec = tail / float(rate_bps)
+        else:
+            wire_sec = float(tail) / max(byte_count / max(send_elapsed, 1e-3), 1.0)
+        jitter_floor = max(12.0, phase_slack * 0.5)
+        near_cap = _tcp_ip_near_full_extra_cap_sec(rate_bps)
+        bounded = min(near_cap, wire_sec + jitter_floor)
+        near_extra = max(BULK_TCP_IP_NEAR_FULL_RECV_MIN_EXTRA_SEC, bounded)
+        near_extra = min(near_extra, max(0.0, phase_deadline - time.time()))
+        if near_extra > 0.05:
+            got = max(got, wait_for_bytes(docker, IPERF_CONTAINER, sink, byte_count, near_extra))
     settle_timeout = max(0.0, phase_deadline - time.time())
     if byte_count > BYTES_10KB and mode == "bulk_single_flow" and got >= byte_count:
         settle_timeout = max(settle_timeout, 2.0)
@@ -2509,6 +3088,15 @@ def run_tcp_ip(
         interval_sec=0.2,
     )
     got = max(got, settled_got)
+    tun0_after = _read_tun0_dev_bytes(docker)
+    tun0_delta = {
+        "ok": bool(tun0_before.get("ok")) and bool(tun0_after.get("ok")),
+        "rx_bytes": max(0, int(tun0_after.get("rx_bytes", 0)) - int(tun0_before.get("rx_bytes", 0))),
+        "tx_bytes": max(0, int(tun0_after.get("tx_bytes", 0)) - int(tun0_before.get("tx_bytes", 0))),
+        "before_raw": str(tun0_before.get("raw", "")),
+        "after_raw": str(tun0_after.get("raw", "")),
+    }
+    tun0_activity = bool(tun0_delta["ok"] and (tun0_delta["rx_bytes"] > 0 or tun0_delta["tx_bytes"] > 0))
     late_growth_bytes = max(0, got - bytes_at_deadline)
     expected_hash = zero_payload_sha256(byte_count)
     actual_hash = ""
@@ -2562,16 +3150,34 @@ def run_tcp_ip(
     error_class = classify_error(send_err)
     observability = connect_ip_observability(docker, before_client_logs, before_server_logs)
     accounting_confirmed = _connect_ip_accounting_confirmed(observability)
+    cadence_sparse_signal = _connect_ip_cadence_sparse_signal(observability, got, byte_count)
     # Sender-side gate stays strict_budget (`timeout` on client). Receiver drain/settle
     # can extend wall clock; do not fold total elapsed into throughput_ok.
     throughput_ok = send_err is None and send_elapsed <= strict_budget and (
         got == byte_count or (got > byte_count and hash_ok)
     )
+    throughput_ok = _apply_tcp_ip_smoke_deadline_to_throughput_ok(throughput_ok, send_elapsed, byte_count)
     budget_exceeded = not throughput_ok
-    stop_reason = classify_tcp_ip_stop_reason(send_err, got, byte_count, hash_ok, settled, budget_exceeded, observability)
+    budget_margin_sec = round(strict_budget + phase_slack - elapsed, 3)
+    stop_reason = classify_tcp_ip_stop_reason(
+        send_err,
+        got,
+        byte_count,
+        hash_ok,
+        settled,
+        budget_exceeded,
+        observability,
+        budget_margin_sec=budget_margin_sec,
+    )
     if send_err:
         stop_reason_source = "runner_guard"
-    elif stop_reason in {"budget_exceeded", "receiver_incomplete", "receiver_not_settled", "hash_mismatch"}:
+    elif stop_reason in {
+        "budget_exceeded",
+        "receiver_incomplete",
+        "receiver_not_settled",
+        "hash_mismatch",
+        "near_full_micro_loss_at_deadline",
+    }:
         stop_reason_source = "runner_integrity"
     elif stop_reason == "none":
         stop_reason_source = "none"
@@ -2603,16 +3209,59 @@ def run_tcp_ip(
         "observability_ok": observability_ok,
         "runtime_health_ok": runtime_health_ok,
         "transfer_elapsed_sec": round(send_elapsed, 3),
+        "tun0_activity": tun0_activity,
+        "tun0_bytes_delta": {"rx_bytes": tun0_delta["rx_bytes"], "tx_bytes": tun0_delta["tx_bytes"]},
     }
     budget_margin_sec = round(strict_budget + phase_slack - elapsed, 3)
-    if byte_count == BYTES_10KB:
-        throughput_ok = throughput_ok and send_elapsed <= SMOKE_DEADLINE_SEC
     ok = throughput_ok and integrity_ok and observability_ok
+    sink_udp_diag = None
+    expected_sink_udp_datagrams = _expected_udp_datagrams(byte_count, datagram_size)
+    if _should_collect_sink_udp_diag(stop_reason=stop_reason, got=got, expected=byte_count):
+        sink_udp_diag = _collect_tcp_ip_sink_udp_diag(docker)
+        stop_reason_evidence["sink_udp_diag_captured"] = bool(sink_udp_diag.get("captured"))
+        stop_reason_evidence["sink_writer_samples"] = sink_udp_diag.get("writer_summary", {})
+        sink_udp_snmp = _parse_udp_snmp_error_counters(sink_udp_diag.get("udp_snmp", ""))
+        stop_reason_evidence["sink_udp_snmp"] = sink_udp_snmp
+        sink_udp_snmp_progress = sink_udp_diag.get("udp_snmp_progress", {})
+        if isinstance(sink_udp_snmp_progress, dict):
+            stop_reason_evidence["sink_udp_snmp_progress"] = sink_udp_snmp_progress
+        stop_reason_evidence["sink_udp_expected_datagrams"] = expected_sink_udp_datagrams
+        if isinstance(sink_udp_snmp.get("in_datagrams"), int):
+            stop_reason_evidence["sink_udp_datagram_gap"] = max(
+                0,
+                expected_sink_udp_datagrams - int(sink_udp_snmp.get("in_datagrams")),
+            )
+        if isinstance(sink_udp_snmp_progress, dict):
+            in_datagrams_delta = sink_udp_snmp_progress.get("delta_in_datagrams")
+            in_errors_delta = sink_udp_snmp_progress.get("delta_in_errors")
+            if isinstance(in_datagrams_delta, int):
+                stop_reason_evidence["sink_udp_in_datagrams_delta"] = in_datagrams_delta
+            if isinstance(in_errors_delta, int):
+                stop_reason_evidence["sink_udp_in_errors_delta"] = in_errors_delta
+        sink_boundary_signal = _classify_sink_writer_boundary_signal(
+            settled=settled,
+            late_growth_bytes=late_growth_bytes,
+            sink_udp_diag=sink_udp_diag,
+            expected_datagrams=expected_sink_udp_datagrams,
+        )
+        if sink_boundary_signal:
+            stop_reason = sink_boundary_signal
+            stop_reason_source = "runtime_observability"
+            stop_reason_evidence["sink_writer_boundary_signal"] = sink_boundary_signal
     if not ok and classify_error(send_err) == "none":
-        if stop_reason in {"budget_exceeded", "receiver_incomplete", "receiver_not_settled", "hash_mismatch"}:
+        if stop_reason in {
+            "budget_exceeded",
+            "receiver_incomplete",
+            "receiver_not_settled",
+            "hash_mismatch",
+            "near_full_micro_loss_at_deadline",
+        }:
             error_class = "timeout"
         else:
             error_class = "transport_init"
+    delta_client = observability.get("delta_client", {}) if isinstance(observability, dict) else {}
+    delta_server = observability.get("delta_server", {}) if isinstance(observability, dict) else {}
+    sink_writer_summary = (sink_udp_diag or {}).get("writer_summary", {}) if isinstance(sink_udp_diag, dict) else {}
     return {
         "scenario": "tcp_ip",
         "mode": mode,
@@ -2634,6 +3283,7 @@ def run_tcp_ip(
         "send_guard_timeout_sec": send_timeout,
         "wait_guard_timeout_sec": wait_timeout,
         "send_elapsed_sec": round(send_elapsed, 3),
+        "udp_socket_buf_bytes": int(socket_buf_bytes),
         "receiver_settled": settled,
         "bytes_at_deadline": bytes_at_deadline,
         "late_growth_bytes": late_growth_bytes,
@@ -2642,6 +3292,20 @@ def run_tcp_ip(
         "stop_reason_source": stop_reason_source,
         "stop_reason_evidence": stop_reason_evidence,
         "observability": observability,
+        "observability_cadence": cadence_sparse_signal,
+        "route_probe": route_probe,
+        "route_on_tun0": bool(route_on_tun0),
+        "tun0_dev_bytes": {
+            "before": tun0_before,
+            "after": tun0_after,
+            "delta": tun0_delta,
+            "activity": tun0_activity,
+        },
+        "delta_client_sendmsg_ok": _obs_nested_counter(delta_client, "quic_datagram_tx_path_total", "sendmsg_ok"),
+        "delta_server_packet_rx": _safe_int(delta_server.get("connect_ip_packet_rx_total", 0), 0),
+        "sink_writer_progress_bytes": _safe_int(sink_writer_summary.get("sink_writer_progress_bytes", 0), 0),
+        "sink_udp_expected_datagrams": expected_sink_udp_datagrams,
+        "sink_udp_diag": sink_udp_diag,
         "error": send_err,
         "error_class": error_class,
         "error_source": "none" if ok else "runtime",
@@ -3922,6 +4586,7 @@ def run_scenario(
             byte_count,
             mode=tcp_ip_mode,
             tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+            udp_chunk=udp_chunk,
             udp_rate_bps=udp_rate_bps,
         )
     if scenario == "tcp_ip_threshold":

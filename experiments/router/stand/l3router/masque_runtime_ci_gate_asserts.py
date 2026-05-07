@@ -451,9 +451,13 @@ def _merge_post_anti_bypass_summary(backup_text: str, negative_by_scenario: dict
     if isinstance(tip, dict):
         merged.append(tip)
     data["results"] = merged
-    data["ok"] = all(
-        bool(x.get("ok")) for x in merged if x.get("scenario") not in ANTI_BYPASS_SCENARIO_SET
-    )
+    non_anti = [
+        x
+        for x in merged
+        if isinstance(x, dict) and x.get("scenario") not in ANTI_BYPASS_SCENARIO_SET
+    ]
+    # Вакуумное all([])==True недопустимо: без строк из «основной» матрицы summary не имеет права быть зелёным.
+    data["ok"] = bool(non_anti) and all(bool(x.get("ok")) for x in non_anti)
     return data
 
 
