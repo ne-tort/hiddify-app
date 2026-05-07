@@ -178,18 +178,18 @@ parity с unit gate CI: добавить `./common/masque/... ./include/...`; ra
   Формат записи должен быть числовым и воспроизводимым по runtime-артефактам (`experiments/router/stand/l3router/runtime/*.json`), без общих формулировок.
 
 - **Дата:** 2026-05-07  
-- **Старт итерации / текущий фокус:** CONNECT-IP **UDP-мост** — убран дублирующий **`maybeEmitConnectIPActiveSnapshot`** в **`connectIPUDPPacketConn.WriteTo`** (кадр OBS остаётся на **`connectIPPacketSession.WritePacket`**). Ранее: буфер/`As4`/PTB recovery в цикле фрагментации, серверный **`ReadPacket`** без memmove payload, H3 DATAGRAM pooled enqueue. **Compose-матрица скорости в этой сессии не переснималась** (Docker Desktop / паритет CI — Linux/WSL).
-- **`hiddify-core` `HEAD`:** **`d2757c462bd59c488f716f84e41e8b3d25f74ae2`**.
+- **Старт итерации / текущий фокус:** CONNECT-IP **gVisor netstack** — **`addStackAddress`** / **`convertToFullAddr`** переведены на **`tcpip.AddrFrom4` / `tcpip.AddrFrom16`** вместо **`AddrFromSlice(addr.AsSlice())`**. **UDP-мост CONNECT-IP:** один раз выделяется **`localBind`** (`*net.UDPAddr`) для **`LocalAddr()`**, без повторных **`net.IPv4`** на запрос. **Compose:** `python masque_stand_runner.py --scenario all` на Docker Desktop — **PASS** (~48 s), затем `docker compose … down -v`. Матрица **`--udp-send-bps`** (130M/140M) в этой итерации **не снималась**.
+- **`hiddify-core` `HEAD`:** **`75e525a682e334e9927f8983d9e8bc8451321640`**.
 - **Отправная точка (current baseline):** `20 MiB`, `tcp_ip`, `bulk_single_flow`, `--udp-send-bps` (байт/с).
 - **Строгие тайминги (без `MASQUE_STAND_SLOW_DOCKER`):** последний зафиксированный артефакт — `110000000` на Docker Desktop (Windows): узкий промах по дедлайну (`near_full_loss_under_cadence`); пересмотр после прогона на Linux/WSL.
-- **Лестница с `MASQUE_STAND_SLOW_DOCKER=1`:** без нового compose-прогона в этой итерации; опорная лестница прежней сессии: **`max_pass=130000000`**, **`next_boundary=140000000`** (`experiments/router/stand/l3router/runtime/masque_python_runner_summary.json`).
-- **Предыдущая PASS-точка:** `130000000` (slow-docker профиль из §7 предыдущей записи).
-- **Контрольные прогоны после правок:** `go test -count=1 -short ./replace/quic-go-patched/...` — PASS; `go test -count=1 -short -tags with_masque ./transport/masque/... ./protocol/masque/...` — PASS; `python -m unittest test_masque_runtime_ci_gate_asserts test_masque_stand_runner_smoke_contract test_masque_runtime_contract_validator` — PASS.
+- **Лестница с `MASQUE_STAND_SLOW_DOCKER=1`:** опорная лестница прежней сессии: **`max_pass=130000000`**, **`next_boundary=140000000`** (`experiments/router/stand/l3router/runtime/masque_python_runner_summary.json`); новый sweep не делался.
+- **Предыдущая PASS-точка:** `130000000` (slow-docker профиль).
+- **Контрольные прогоны после правок:** `go test -count=1 -short -tags with_masque ./transport/masque/... ./protocol/masque/... ./common/masque/...` — PASS; `python -m unittest test_masque_runtime_ci_gate_asserts test_masque_stand_runner_smoke_contract test_masque_runtime_contract_validator` — PASS; **`masque_stand_runner.py --scenario all`** — PASS.
 - **Источник истины по шагам CI:** **`hiddify-core/.github/workflows/ci.yml`**, job **`masque-gates`**.
 
 ## 8) Next iteration tasks (single-thread, code-first)
 
-1. **Подтвердить границу `130000000` / `140000000` на Linux CI или WSL** без `MASQUE_STAND_SLOW_DOCKER`; узкий sweep при необходимости; после последних изменений bridge/server — заново зафиксировать `max_pass` / артефакт JSON.
+1. **Подтвердить границу `130000000` / `140000000` на Linux CI или WSL** без `MASQUE_STAND_SLOW_DOCKER`; узкий sweep при необходимости; зафиксировать `max_pass` / `runtime/*.json`.
 2. **`connect_udp` на потолке:** `udp`, `20 MiB`, высокие `--udp-send-bps`; сравнить с CONNECT-IP — общий ли предел QUIC DATAGRAM.
-3. **Следующий слой копирования на wire:** `wire.DatagramFrame.Append` (`append(b, f.Data...)`) копирует в plaintext пакета перед Seal; решать только по профилю/стенду и очередям HTTP/3/QUIC.
-4. **`hiddify-app`:** закоммитить указатель **`hiddify-core`** (`d2757c462bd59…` после push submodule при необходимости).
+3. **Следующий слой копирования на wire:** `wire.DatagramFrame.Append` (`append(b, f.Data...)`) в plaintext до Seal; трогать только при сигнале со стенда/профиля.
+4. **`hiddify-app`:** обновить указатель submodule **`hiddify-core`** на **`75e525a682e334e9927f8983d9e8bc8451321640`** (или новее после push) и закоммитить монорепо.
