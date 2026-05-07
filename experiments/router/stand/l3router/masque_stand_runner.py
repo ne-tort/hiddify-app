@@ -1611,6 +1611,9 @@ def _zero_observability_snapshot():
         "quic_datagram_rcv_queue_drop_total": 0,
         "quic_datagram_rcv_queue_pop_total": 0,
         "quic_datagram_rcv_queue_pop_path_total": {},
+        # QUIC packet-packer DATAGRAM oversize silent drops on TX (frame > remaining packet budget AND no co-packed ACK);
+        # see quic.DatagramPackerOversizeDropTotal in patched quic-go packet_packer.go.
+        "quic_datagram_packer_oversize_drop_total": 0,
     }
 
 

@@ -139,7 +139,7 @@
 **Typed sink boundary stop reason:** при `receiver_settled=false`, `late_growth_bytes=0` и `udp_snmp.InErrors=0` раннер помечает `stop_reason=sink_writer_boundary_no_udp_errors` (граница sink file-writer/flush vs packet-plane без ослабления hash/ratio).
 **`writer_idle_vs_blocked` (summary):** derived-сигнал в `writer_summary` (`idle_no_progress` / `blocked_after_write` / `writer_progressing` / `external_file_growth`) классифицирует состояние sink writer по дельтам `size/mtime/proc_write_bytes`; используется только для triage и не меняет PASS/FAIL контракт.
 
-**Quic stack (наблюдаемость):** при расследовании залипания отправки смотреть **`quic_datagram_send_write_path_total`**: расхождение **`write_attempt` vs `write_ok`** вместе с **`send_loop_enter`** подсказывает, застряла ли упаковка/отправка относительно **`sendmsg_ok`**.
+**Quic stack (наблюдаемость):** при расследовании залипания отправки смотреть **`quic_datagram_send_write_path_total`**: расхождение **`write_attempt` vs `write_ok`** вместе с **`send_loop_enter`** подсказывает, застряла ли упаковка/отправка относительно **`sendmsg_ok`**. **Пакер 1-RTT (`packet_packer.composeNextPacket`):** если очередной DATAGRAM не влезает в оставшийся payload текущего QUIC-пакета и в пакете ещё нет ACK, upstream **молча снимает** кадр с TX-очереди — это необратимая потерь на unreliable-пути; процессный счётчик **`quic_datagram_packer_oversize_drop_total`** (`quic.DatagramPackerOversizeDropTotal`) и строка в **`CONNECT_IP_OBS`** позволяют отличить этот bucket от H3/stream-queue/rcv-drop.
 
 **Классы ошибок / observability:** **policy \| capability \| transport \| dial \| lifecycle**; ключи счётчиков CONNECT-IP и perf JSON — **`IDEAL-MASQUE-ARCHITECTURE.md`**, глава 7, и **`hiddify-core/docs/masque-perf-gates.md`**.
 
@@ -218,18 +218,16 @@ parity с unit gate CI: добавить `./common/masque/... ./include/...`; ra
 
 - **Дата:** 2026-05-07
 - **Старт итерации / текущий фокус:**
- - Объективная находка по hot path UDP-моста CONNECT-IP: на каждом `WriteTo` брались `pmtuState.mu.Lock` (×2: `currentPayloadCeiling` + `maybeRecoverPayloadCeiling`) и `connDeadlines.mu.RLock` (`writeTimeoutExceeded`). Ровно тот же набор синхронизаций — на каждом `ReadFrom`. На сервере (`protocol/masque.connectIPNetPacketConn.connDeadlines`) — то же самое.
- - Рефактор `transport/masque/transport.go` + `protocol/masque/endpoint_server.go`: `connectIPPMTUState.{currentPayload,minPayload,maxPayload,successSinceDecrease,lastMinus64UnixMilli}` переведены на `atomic.Int64`; `connDeadlines.{read,write}` — на `atomic.Int64` (UnixNano, `0=unset`). Hot-read/inc — без mutex; mutex остаётся только для согласованных PTB-decrease/recovery-increase транзитов и для одного `setDeadline` пары.
- - Поведение PMTU/PTB и таймаутов не меняется (точка обновления `currentPayload` оборачивается тем же mutex, что и до правки). Unit (`./protocol/masque/...`, `./transport/masque/...`) и `-race` (Windows, `CGO_ENABLED=1`) — PASS.
-- Контрактные Python-тесты: `python -m unittest test_masque_runtime_contract_validator test_masque_runtime_ci_gate_asserts test_masque_stand_runner_smoke_contract` — **89 PASS**.
-- **`hiddify-core` `HEAD`:** **`840b04064208da67ee915c4255b8bbc739f787db`**.
-- **Лестница:** `max_pass=130000000`; `140000000@chunk=1000` всё ещё mixed-state (n=15 наблюдений, loss_pct ∈ [0.07, 0.66]); причина — статистический drop в QUIC datagram-канале на коротком burst-окне (`send_elapsed≈0.27s`), а не дрейф hot-path.
-- **Boundary repro после lock-free правки:** `tcp_ip @140M chunk=1000` — **FAIL** (`loss_bytes=80000`, `sink_udp_datagram_gap=80`, `sink_udp_in_datagrams_delta=0`, `writer_idle_vs_blocked=idle_no_progress`); распределение совпадает с до-рефакторной полосой разброса.
+ - **QUIC DATAGRAM queue fairness (новое):** в `replace/quic-go-patched/datagram_queue.go` добавлен `Rotate()`; в `packet_packer.composeNextPacket` при ветке «DATAGRAM не влезает + ACK отсутствует» head кадр теперь сначала ротируется (если в очереди есть другие кадры), и packer пытается отправить следующий кадр в этом же цикле. При одиночном oversized head поведение drop сохранено (инкремент `DatagramPackerOversizeDropTotal` + `releaseOutgoingDatagramPayload` + `Pop`) во избежание вечного no-progress.
+ - **Тест покрытия packer:** `replace/quic-go-patched/packet_packer_test.go` добавлен `TestPackLargeDatagramFrameRotatesQueueHead` (регрессия на HOL-блокировку очереди DATAGRAM).
+ - Контрактные прогоны: `go test -C replace/quic-go-patched -count=1 -run "TestPackDatagramFrames|TestPackLargeDatagramFrame|TestPackLargeDatagramFrameRotatesQueueHead" .` — PASS; `go test -count=1 -short -tags with_masque ./transport/masque/...` — PASS.
+- **`hiddify-core` `HEAD`:** **`840b04064208da67ee915c4255b8bbc739f787db`** (локальные правки в submodule до коммита — пересчитать `git -C hiddify-core rev-parse HEAD` после фиксации).
+- **Лестница:** `max_pass=130000000`; рабочая гипотеза обновлена — к уже наблюдаемому `oversize_drop_total` добавлен второй фактор: HOL head в send-queue мог блокировать маленькие DATAGRAM позади oversized head при кратковременной усадке payload, теперь этот фактор снят ротацией.
+- **Boundary repro (последний зафиксированный артефакт):** `tcp_ip @140M chunk=1000` — **FAIL** (`loss_bytes=80000`, `sink_udp_datagram_gap=80`); Docker-реплей после правки packer в этой итерации не выполнялся.
 - **Источник истины по шагам CI:** **`hiddify-core/.github/workflows/ci.yml`**, job **`masque-gates`**.
 
 ## 8) Next iteration tasks (single-thread, code-first)
 
-1. **Дополнительный hot-path аудит:** `connectIPUDPPacketConn.WriteTo` → `c.writeMu` нужен только для аренды `c.writeBuffer` между потенциально несколькими горутинами; в реальном пути TUN→outbound одна горутина на сессию — оценить, можно ли заменить мьютекс на `sync.Pool[[]byte]` без регрессии (или хотя бы убрать блокировку `defer Unlock` на ранних `return` после type-assertion).
-2. **Кэш `headerTemplate`:** в `connectIPUDPPacketConn.WriteTo` `newIPv4UDPHeaderTemplate(...)` пересчитывается на каждый датаграмм, хотя для одной 5-tuple `dst4`/`dstPort`/`src4` обычно стабильны — добавить дешёвый кэш с версионным флагом по последнему `addr.(*net.UDPAddr)`.
-3. **Boundary decision gate (после п.1–2):** подтвердить `140000000@chunk=1000` минимум `3` повторами; зафиксировать обновлённое распределение `loss_pct` для сравнения с pre-refactor полосой `[0.07, 0.66]`.
-4. **Анти-bypass negative control:** прогон `route_on_tun0=false` с проверкой `stop_reason=route_guard_target_not_on_tun0`, `error_class=policy`, `tun0_dev_bytes.activity=false`.
+1. **Стенд-корреляция после queue-rotation:** `MASQUE_STAND_SLOW_DOCKER=1`, `MASQUE_TCP_IP_SOCKET_BUF_BYTES=134217728`, `MASQUE_STAND_UDP_CHUNK=1000`, `tcp_ip @140M` — минимум **3** прогона; сверить динамику `sink_udp_datagram_gap` до/после правки и корреляцию с `quic_datagram_packer_oversize_drop_total` при нулевых `http3_stream_datagram_queue_drop_total` / `quic_datagram_rcv_queue_drop_total`.
+2. **QUIC модульный replay:** прогон `go test -C replace/quic-go-patched -count=1 ./...` (минимум пакет `packet_packer` + `connection`) для отлова побочных эффектов ротации send-queue.
+3. **Анти-bypass negative control:** прогон `route_on_tun0=false` с проверкой `stop_reason=route_guard_target_not_on_tun0`, `error_class=policy`, `tun0_dev_bytes.activity=false`.
