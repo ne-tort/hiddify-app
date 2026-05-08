@@ -61,10 +61,10 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `8432b981bdfff36b02871a3693c41f01d71a5852`
-- **Стендовый артефакт:** не обновлялся (`degrade_matrix` по-прежнему требует WSL2 + Docker или ≥3 якоря на linux-бинарнике по чеклисту §8).
-- **Код:** в `replace/quic-go-patched`: **`datagramQueue.TryReceive` + `Conn.TryReceiveDatagram`**, в `http3/conn.receiveDatagrams` после блокирующего `ReceiveDatagram` идёт **внутренний drain** уже буферизованных QUIC DATAGRAM в ту же goroutine без лишних ожиданий на канале приёмной очереди — меньше задержки/джиттера между QUIC rcv-queue и постановкой в per-stream очередь (CONNECT-IP/CONNECT-UDP при burst).
-- **Локально:** `go test -count=1 github.com/quic-go/quic-go github.com/quic-go/quic-go/http3`; `go test -count=1 ./transport/masque/... ./protocol/masque/...`.
+- **`hiddify-core` HEAD:** `6129f004` (кольцо приёмной QUIC `datagramQueue` вместо слайса с «вечным» cap после burst)
+- **Стендовый артефакт:** не обновлялся — следующий шаг: `degrade_matrix` из чеклиста §8 на WSL2+Docker или ≥3 якоря на linux-бинарнике.
+- **Код:** `replace/quic-go-patched/datagram_queue.go` — **`rcvRing` фиксированной ёмкости `maxDatagramRcvQueueLen`**, ленивое выделение при первом RX-кадре; dequeue обнуляет слот для GC. Снижает риск деградации аллокатора/памяти и фантомных backpressure после пиков PPS на стыке QUIC → HTTP/3 `receiveDatagrams`.
+- **Локально:** `go test -count=1 -short .` в `hiddify-sing-box/replace/quic-go-patched`; `go test -count=1 ./transport/masque/... ./protocol/masque/...` из `hiddify-sing-box`.
 
 ## 8) Next Iteration Tasks (single-thread)
 
