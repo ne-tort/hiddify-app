@@ -61,13 +61,10 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `a6d6334fdee9ca77b973e6f5bf24f37edacdb757`
-- **Стендовый артефакт:** `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` **не обновлялся** в этом цикле (нужна полная **`degrade_matrix`** или ≥3 якорных прогона на зафиксированном linux-бинарнике).
-- **Код:**
-  - `replace/quic-go-patched/http3/state_tracking_stream.go`: после постановки датаграммы в кольцевую очередь **`signalHasDatagram` вызывается уже без удержания `mx`**, короче критическая секция на ingress CONNECT-UDP/CONNECT-IP.
-  - `third_party/masque-go/conn.go`: **`WriteTo`** использует `sync.Pool` для сборки `[context-id][payload]` (HTTP/3 дальше **синхронно** копирует в свой pooled QUIC-буфер), меньше аллокаций на высокой скорости CONNECT-UDP при типичном MTU-подобном размере; при недостаточном `cap` — прежний `make`-fallback.
-- **Локально:** `go test -count=1 ./transport/masque/... ./protocol/masque/...`; `third_party/masque-go` — `go test ./...`; `replace/quic-go-patched` — `go test -count=1 ./http3/...`.
-- **WSL:** успешная перекрёстная сборка `GOOS=linux GOARCH=amd64` `sing-box` с `-tags with_masque`, артефакт `/tmp/sing-box-test-amd64` (~70 MB).
+- **`hiddify-core` HEAD:** `8432b981bdfff36b02871a3693c41f01d71a5852`
+- **Стендовый артефакт:** не обновлялся (`degrade_matrix` по-прежнему требует WSL2 + Docker или ≥3 якоря на linux-бинарнике по чеклисту §8).
+- **Код:** в `replace/quic-go-patched`: **`datagramQueue.TryReceive` + `Conn.TryReceiveDatagram`**, в `http3/conn.receiveDatagrams` после блокирующего `ReceiveDatagram` идёт **внутренний drain** уже буферизованных QUIC DATAGRAM в ту же goroutine без лишних ожиданий на канале приёмной очереди — меньше задержки/джиттера между QUIC rcv-queue и постановкой в per-stream очередь (CONNECT-IP/CONNECT-UDP при burst).
+- **Локально:** `go test -count=1 github.com/quic-go/quic-go github.com/quic-go/quic-go/http3`; `go test -count=1 ./transport/masque/... ./protocol/masque/...`.
 
 ## 8) Next Iteration Tasks (single-thread)
 
