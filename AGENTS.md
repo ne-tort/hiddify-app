@@ -61,15 +61,15 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `c51e62bf593ba8a62b20a98df738474ae4f730f0` — **`MasqueHTTPServerQUICConfig()`**: серверный `http3.Server.QUICConfig` приведён к тем же базовым параметрам packet‑plane клиента (**`EnableDatagrams` + `InitialPacketSize`=1350 + idle/keepalive** через существующий `masquePacketPlaneQUICConfig`). Раньше на сервере задавались только часть полей, без `InitialPacketSize`. Дополнительно: **`ReadFrom`/`ReadPacket`** CONNECT‑IP (клиент `connectIPUDPPacketConn`, сервер `connectIPNetPacketConn`) проверяют **read deadline** внутри циклов parse‑drop, чтобы не блокироваться без `DeadlineExceeded`.
-- **Стенд (Docker Desktop Win):** Пересборка `artifacts/sing-box-linux-amd64` + полный **`degrade_matrix`** с `MASQUE_DEGRADE_TCP_IP_RATES=100m,120m,130m,140m,150m` и согласованными UDP BPS выполнены **два прогона** на разных сборках текущего цикла. Артефакт: `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json`. **Наблюдение:** `last_pass` / `first_fail` по CONNECT‑IP **не стабильны** между прогонами при нулевых `delta_*` (пример первого прогона: последний чистый PASS **140m** при FAIL **120m/130m**; после правки серверного QUIC: **120m** последний PASS при **130m** first_fail и малых потерях на **130–140m**). CONNECT‑UDP ветка матрицы на этих прогонах — **все точки PASS** (хеш без дрейфа). Для воспроизводимости границ AGENTS‑политика остаётся: **каноничный замер из WSL2 + Docker**.
+- **`hiddify-core` HEAD:** `f78b8248ede99608c009742e474ef4390c795468` — **connect-ip-go** (`third_party/connect-ip-go`): на hot path приёма/передачи IP‑датаграмм политика маршрутов/адресов читается из **неизменяемого снимка `connRouteView`** (`atomic.Pointer`), публикуемого под `sync.Mutex` только при `AssignAddresses`, `AdvertiseRoute` и приёме address‑assign capsule, вместо **`RWMutex.RLock` на каждый пакет**. Исправление **`ReadPacket`**: при буфере короче полезной нагрузки возвращается **ошибка**, а не молчаливая усечённая запись.
+- **Стенд:** в этом цикле **не перезапускался**; предыдущее наблюдение по флапу `last_pass` CONNECT‑IP (`AGENTS`/runtime JSON) остаётся в силе до нового прогона на **фиксированном** `sing-box-linux-amd64` после `f78b8248ede99608c009742e474ef4390c795468`.
 - **Сводка рисков:** `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md`
-- **Код (эта итерация):** `hiddify-sing-box/transport/masque/transport.go` (`MasqueHTTPServerQUICConfig`, дедлайн в `ReadFrom`), `protocol/masque/endpoint_server.go` (то же для серверного CONNECT‑IP).
-- **Локальная верификация:** `go test -count=1 ./transport/masque/... ./protocol/masque/...` — PASS (после сброса `GOOS`/`GOARCH` с кросс‑сборки).
+- **Код (эта итерация):** `hiddify-sing-box/third_party/connect-ip-go/conn.go`
+- **Локальная верификация:** `go test -count=1 ./transport/masque/... ./protocol/masque/...` — PASS. Пакет `connect-ip-go` локально: интеграционные тесты **падают по таймауту/flake на Windows** (`TestTTLs` и др. — до правок уже воспроизводилось).
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Повторить **`degrade_matrix`** (та же лестница или «якорь» 130m/140m) в **WSL2** и/или усреднить **≥3 прогона** на одном артефакте, затем скорректировать baseline §1 раздела `AGENT-MASQUE-DEGRADATION-GAPS.md` только если картина счётчиков + peer‑split стабильна при нулевых `delta_quic_*` / `delta_http3_*` — иначе triage **`sink_writer_boundary`** (цепочка router → UDP sink), не затушёвывая малую потерю как PASS.
+1. Собрать `sing-box-linux-amd64`, прогнать **`degrade_matrix`** (полная лестница или якорь 130m/140m) в **WSL2 + Docker** или **≥3** прогона на одном бинарнике; обновить `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` и baseline §1 `AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованных peer-split и счётчиках.
 
 ## 9) Where Heavy Details Live
 
