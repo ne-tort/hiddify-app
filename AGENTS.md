@@ -61,15 +61,17 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `f78b8248ede99608c009742e474ef4390c795468` — **connect-ip-go** (`third_party/connect-ip-go`): на hot path приёма/передачи IP‑датаграмм политика маршрутов/адресов читается из **неизменяемого снимка `connRouteView`** (`atomic.Pointer`), публикуемого под `sync.Mutex` только при `AssignAddresses`, `AdvertiseRoute` и приёме address‑assign capsule, вместо **`RWMutex.RLock` на каждый пакет**. Исправление **`ReadPacket`**: при буфере короче полезной нагрузки возвращается **ошибка**, а не молчаливая усечённая запись.
-- **Стенд:** в этом цикле **не перезапускался**; предыдущее наблюдение по флапу `last_pass` CONNECT‑IP (`AGENTS`/runtime JSON) остаётся в силе до нового прогона на **фиксированном** `sing-box-linux-amd64` после `f78b8248ede99608c009742e474ef4390c795468`.
-- **Сводка рисков:** `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md`
-- **Код (эта итерация):** `hiddify-sing-box/third_party/connect-ip-go/conn.go`
-- **Локальная верификация:** `go test -count=1 ./transport/masque/... ./protocol/masque/...` — PASS. Пакет `connect-ip-go` локально: интеграционные тесты **падают по таймауту/flake на Windows** (`TestTTLs` и др. — до правок уже воспроизводилось).
+- **`hiddify-core` HEAD:** `a6d6334fdee9ca77b973e6f5bf24f37edacdb757`
+- **Стендовый артефакт:** `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` **не обновлялся** в этом цикле (нужна полная **`degrade_matrix`** или ≥3 якорных прогона на зафиксированном linux-бинарнике).
+- **Код:**
+  - `replace/quic-go-patched/http3/state_tracking_stream.go`: после постановки датаграммы в кольцевую очередь **`signalHasDatagram` вызывается уже без удержания `mx`**, короче критическая секция на ingress CONNECT-UDP/CONNECT-IP.
+  - `third_party/masque-go/conn.go`: **`WriteTo`** использует `sync.Pool` для сборки `[context-id][payload]` (HTTP/3 дальше **синхронно** копирует в свой pooled QUIC-буфер), меньше аллокаций на высокой скорости CONNECT-UDP при типичном MTU-подобном размере; при недостаточном `cap` — прежний `make`-fallback.
+- **Локально:** `go test -count=1 ./transport/masque/... ./protocol/masque/...`; `third_party/masque-go` — `go test ./...`; `replace/quic-go-patched` — `go test -count=1 ./http3/...`.
+- **WSL:** успешная перекрёстная сборка `GOOS=linux GOARCH=amd64` `sing-box` с `-tags with_masque`, артефакт `/tmp/sing-box-test-amd64` (~70 MB).
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Собрать `sing-box-linux-amd64`, прогнать **`degrade_matrix`** (полная лестница или якорь 130m/140m) в **WSL2 + Docker** или **≥3** прогона на одном бинарнике; обновить `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` и baseline §1 `AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованных peer-split и счётчиках.
+1. Поднять compose `experiments/router/stand/l3router/docker-compose.masque-e2e.yml`, прогнать **`degrade_matrix`** (полная лестница или якорь 130m/140m) в **WSL2 + Docker** или **≥3** прогона на одном `sing-box-linux-amd64`; обновить `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` §1 только при согласованном peer-split и счётчиках.
 
 ## 9) Where Heavy Details Live
 
