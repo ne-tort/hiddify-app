@@ -61,10 +61,10 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `6ea81bfa` — **`TryReceiveDatagram`** на HTTP/3 `state_trackingStream` + экспорт через `Stream`/`RequestStream`. **CONNECT-IP** (`connect-ip-go`): после каждого успешного `ReadPacket` батчится **до 512** кадров через `TryReceiveDatagram` в локальный prefetch (клон срезов), чтобы быстрее освобождать per-stream кольцо. **CONNECT-UDP** (`masque-go` `proxiedConn.ReadFrom`): тот же приём (`proxiedConnPrefetchMax=512`).
-- **Стендовый артефакт:** `degrade_matrix` на этом SHA не гонялся; каноничный прогон — WSL2 + Docker; пересобрать `artifacts/sing-box-linux-amd64` и образ e2e перед матрицей.
-- **Код:** `replace/quic-go-patched/http3/state_tracking_stream.go`, `stream.go`; `third_party/connect-ip-go/conn.go`; `third_party/masque-go/conn.go`.
-- **Локально:** `go test -count=1 -short ./transport/masque/... ./protocol/masque/...` (модуль sing-box) — PASS; `go test -count=1 -short ./http3/...` (модуль `replace/quic-go-patched`) — PASS; `masque-go` tests — PASS. `connect-ip-go` пакетные тесты без `proxy_test` — PASS (интеграционные `TestTTLs`/`TestClosing` на Win флапали и ранее).
+- **`hiddify-core` HEAD:** `f24d9f73` — prefetch после `TryReceiveDatagram` переведён на **фиксированное кольцо** (512 слотов) в `connect-ip-go` и `masque-go`: dequeue **O(1)** вместо сдвига слайса на каждый `ReadPacket`/`ReadFrom`; убран лишний **`append`‑клон** в CONNECT‑UDP prefetch (буфер уже выдан из HTTP/3 ring).
+- **Стендовый артефакт:** `degrade_matrix` на `f24d9f73` не гонялся; каноничный прогон — WSL2 + Docker (см. §8).
+- **Код:** `third_party/connect-ip-go/conn.go`; `third_party/masque-go/conn.go`.
+- **Локально:** `./transport/masque/...`, `./protocol/masque/...` — PASS; `third_party/masque-go` — PASS; `connect-ip-go` с `-skip 'TestTTLs|TestClosing'` — PASS (интеграции на Win по-прежнему флапают).
 
 ## 8) Next Iteration Tasks (single-thread)
 
