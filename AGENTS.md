@@ -61,14 +61,14 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `1d0bf50f` — `TryReceiveDatagram` больше не вызывается с «дырявым» окном между unlock/lock: декод + постановка в кольцо под **одним** `prefetchMu`, чтобы не терять уже снятый кадр при конкуренции/граничных гонках; на **silent drop** (неизвестный `context_id`, policy-drop в CONNECT‑IP, неподдерживаемый context в CONNECT‑UDP) после потребления кадра вызывается `extendPrefetchFromTry()`, чтобы раньше освобождать per-stream HTTP/3 backlog.
-- **Стендовый артефакт:** полный `degrade_matrix` на этом HEAD не перегонялся; канон — WSL2 + Docker (см. задачу в следующем блоке).
-- **Код:** `hiddify-sing-box/third_party/connect-ip-go/conn.go`; `hiddify-sing-box/third_party/masque-go/conn.go`.
-- **Локально:** `transport/masque`, `protocol/masque`; модули `third_party/connect-ip-go`, `third_party/masque-go` — PASS (`connect-ip-go` с `-skip 'TestTTLs|TestClosing'`).
+- **`hiddify-core` HEAD:** `7d281185` — `extendPrefetchFromTry` в **`third_party/masque-go`** и **`third_party/connect-ip-go`**: весь try-drain HTTP/3 под **одним** `prefetchMu` (нет пары lock/unlock на каждый снятый кадр), меньше накладных расходов на горячем пути при высоком PPS.
+- **Стендовый артефакт:** `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` перезаписан прогоном `degrade_matrix` с **`MASQUE_DEGRADE_TCP_IP_RATES=130m,140m,150m`**, **`MASQUE_DEGRADE_UDP_BPS=16250000,17500000,18750000`**, образ **`sing-box-masque-e2e:local`** (бинарь из `artifacts/sing-box-linux-amd64`, раннер собирает с **`-tags with_masque`**). Окружение: **Docker Desktop (Windows, linux/amd64)**. Итог лестницы в том прогоне: **130m PASS (loss 0)**, **140m/150m FAIL** (`sink_writer_boundary_no_udp_errors`, малый `loss_pct`), **UDP** на всех трёх BPS — **PASS**, peer-split, дельты QUIC/HTTP3 drop — **0**. Отдельный короткий прогон только **130m+140m** на том же дне дал **оба TCP PASS** — зафиксирована **дисперсия границы ~140m**; для «жёсткого» baseline по чеклисту деградации лучше **≥3 повтора** или канон **WSL2+Docker**.
+- **Код:** `hiddify-sing-box/third_party/connect-ip-go/conn.go`, `third_party/masque-go/conn.go`.
+- **Локально:** `go test ./transport/masque/... ./protocol/masque/...`; `third_party/masque-go`, `third_party/connect-ip-go` (с `-skip 'TestTTLs|TestClosing'`) — PASS.
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Собрать **`experiments/router/stand/l3router/artifacts/sing-box-linux-amd64`** из **`hiddify-core` `1d0bf50f`**, образ `sing-box-masque-e2e:local`, затем `degrade_matrix` (лестница **130m/140m** и peer-split); обновить **`runtime/connect_ip_udp_degrade_matrix.json`** и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованных счётчиках.
+1. Уточнить границу **140 Mb/s** (CONNECT-IP): **≥3** повтора `degrade_matrix` на одном и том же бинаре **или** каноничный WSL2; при стабильном FAIL — triage **`sink_writer_boundary_no_udp_errors`** (sink / writer path), не ослабляя гейты.
 
 ## 9) Where Heavy Details Live
 
