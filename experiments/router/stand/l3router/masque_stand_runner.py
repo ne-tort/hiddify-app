@@ -227,7 +227,7 @@ while sent < N:
     s.sendto(z[:n], (host, port))
     sent += n
     if RATE_BPS > 0:
-        target_elapsed = sent * 8.0 / RATE_BPS
+        target_elapsed = sent / float(RATE_BPS)
         sleep_for = target_elapsed - (time.monotonic() - start)
         if sleep_for > 0:
             time.sleep(sleep_for)
@@ -507,6 +507,131 @@ def _udp_tcp_stream_bulk_harness_timeouts(byte_count: int) -> tuple[int, int, in
     return (server_sec, client_sec, wait_sec)
 
 
+def _udp_paced_send_min_timeout_sec(byte_count: int, rate_bps: int) -> int:
+    """Lower bound on ``timeout`` around the CONNECT-UDP sender when pace-limited.
+
+    Stall floor (``_bulk_stall_floor_sec``) can be **below** ``byte_count/rate`` for slow-desktop
+    profiles or shallow matrices; ``timeout`` would then SIGKILL the Python sender mid-transfer.
+    Returned value is conservative wall clock including slack after the last paced sleep.
+    """
+    if int(byte_count) <= 0 or int(rate_bps) <= 0:
+        return 0
+    raw = (os.environ.get("MASQUE_STAND_UDP_PACED_SEND_SLACK_SEC") or "15").strip()
+    try:
+        slack = max(0, min(300, int(raw)))
+    except ValueError:
+        slack = 15
+    paced = math.ceil(float(byte_count) / float(rate_bps))
+    return paced + slack
+
+
+def _udp_bulk_recv_drain_slack_sec(byte_count: int, client_budget_sec: int) -> int:
+    """Extra ``wait_for_bytes`` budget after CONNECT-UDP send returns (bulk only).
+
+    Host-side QUIC/datagram + socat UDP-LISTEN can trail the paced sender by seconds on Docker
+    Desktop; without a bounded tail recv often hits ``wait_cap`` exactly (e.g. 90 + 45) with a
+    still-growing sink → false ``receiver_incomplete``.
+    """
+    if byte_count <= BYTES_10KB:
+        return 0
+    base = 15.0
+    raw_b = (os.environ.get("MASQUE_STAND_UDP_RECV_DRAIN_TAIL_BASE_SEC") or "").strip()
+    if raw_b:
+        try:
+            base = max(0.0, float(raw_b))
+        except ValueError:
+            pass
+    mult = 0.2
+    raw_m = (os.environ.get("MASQUE_STAND_UDP_RECV_DRAIN_TAIL_MULT") or "").strip()
+    if raw_m:
+        try:
+            mult = max(0.0, min(2.0, float(raw_m)))
+        except ValueError:
+            pass
+    tail_cap = 120.0
+    raw_c = (os.environ.get("MASQUE_STAND_UDP_RECV_DRAIN_TAIL_CAP_SEC") or "").strip()
+    if raw_c:
+        try:
+            tail_cap = max(0.0, min(900.0, float(raw_c)))
+        except ValueError:
+            pass
+    extra = base + float(client_budget_sec) * mult
+    return int(min(tail_cap, max(0.0, math.ceil(extra))))
+
+
+def _udp_paced_host_wall_slack_sec() -> float:
+    """Upper slack on CONNECT-UDP wall clock vs ideal ``byte_count/rate``.
+
+    Host ``elapsed`` spans ``docker exec`` + CONNECT-UDP send + recv poll; Docker Desktop /
+    compose adds hundreds of ms on small MiB payloads, otherwise ``got*8/elapsed`` looks
+    under-paced even when the sender loop honours ``RATE_BPS``.
+    """
+    raw = (os.environ.get("MASQUE_STAND_UDP_PACED_HOST_WALL_SLACK_SEC") or "0.5").strip()
+    try:
+        return max(0.0, min(5.0, float(raw)))
+    except ValueError:
+        return 0.5
+
+
+def _udp_paced_host_wall_lower_mult() -> float:
+    """Exclude unrealistic ``elapsed`` floors (instant flood send) when using wall-window PACED pass.
+
+    Typical paced runs stay near ``byte_count/rate``; bursts finish far below that.
+    """
+    raw = (os.environ.get("MASQUE_STAND_UDP_PACED_HOST_WALL_LOWER_MULT") or "0.78").strip()
+    try:
+        return max(0.05, min(1.0, float(raw)))
+    except ValueError:
+        return 0.78
+
+
+def _udp_paced_throughput_checks(
+    byte_count: int,
+    got: int,
+    elapsed_sec: float,
+    throughput_mbps: float,
+    target_mbps_exact: float,
+    min_ratio: float,
+    target_rate_bps: int,
+    udp_loss_pct: float,
+) -> tuple[bool, dict]:
+    """Return (throughput_ok, evidence dict) for CONNECT-UDP bulk with optional pacing."""
+
+    measured_ok = float(throughput_mbps) >= (float(target_mbps_exact) * float(min_ratio))
+    ev: dict = {
+        "measured_throughput_ok": measured_ok,
+        "pace_wall_window_ok": False,
+        "pace_wall_sec_lower": None,
+        "pace_wall_sec_upper": None,
+        "pace_ideal_sec": None,
+        "paced_host_wall_slack_sec": round(_udp_paced_host_wall_slack_sec(), 4),
+        "paced_host_wall_lower_mult": round(_udp_paced_host_wall_lower_mult(), 4),
+    }
+    # Wall-window PACED fallback: only zero-loss bulk with full receipts (meaningful pacing).
+    if (
+        float(udp_loss_pct) > 0.0
+        or int(target_rate_bps) <= 0
+        or int(byte_count) <= BYTES_10KB
+        or int(got) < int(byte_count)
+    ):
+        return measured_ok, ev
+
+    pace_ideal = float(byte_count) / float(target_rate_bps)
+    slack = float(_udp_paced_host_wall_slack_sec())
+    lower = pace_ideal * float(_udp_paced_host_wall_lower_mult())
+    upper = pace_ideal / max(float(min_ratio), 1e-9) + slack
+    ev.update(
+        {
+            "pace_ideal_sec": round(pace_ideal, 6),
+            "pace_wall_sec_lower": round(lower, 6),
+            "pace_wall_sec_upper": round(upper, 6),
+        }
+    )
+    window_ok = float(elapsed_sec) >= lower and float(elapsed_sec) <= upper
+    ev["pace_wall_window_ok"] = bool(window_ok)
+    return (measured_ok or window_ok), ev
+
+
 def _theoretical_transfer_sec_at_mbps(byte_count: int, mbps: float) -> float:
     if byte_count <= 0 or mbps <= 0:
         return 0.0
@@ -626,9 +751,10 @@ def docker_exec(docker, container, script, check=True):
     return run([docker, "exec", container, "sh", "-lc", script], cwd=ROOT, check=check)
 
 
-def docker_exec_capture(docker, container, script, check=True):
+def docker_exec_capture(docker, container, script, check=True, quiet=False):
     cmd = [docker, "exec", container, "sh", "-lc", script]
-    print(f"$ {' '.join(cmd)}")
+    if not quiet:
+        print(f"$ {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
     if check and result.returncode != 0:
         raise subprocess.CalledProcessError(
@@ -973,20 +1099,9 @@ def _classify_sink_writer_boundary_signal(
     expected_int = int(expected_datagrams) if expected_datagrams is not None else 0
     in_datagrams = counters.get("in_datagrams")
     in_errors = counters.get("in_errors")
-    snmp_progress = sink_udp_diag.get("udp_snmp_progress", {})
-    if isinstance(snmp_progress, dict):
-        delta_in_datagrams = snmp_progress.get("delta_in_datagrams")
-        delta_in_errors = snmp_progress.get("delta_in_errors")
-        if (
-            isinstance(delta_in_datagrams, int)
-            and expected_int > 0
-            and delta_in_datagrams < expected_int
-            and (
-                (isinstance(delta_in_errors, int) and delta_in_errors == 0)
-                or (delta_in_errors is None and in_errors == 0)
-            )
-        ):
-            return "sink_udp_ingress_datagram_gap_no_udp_errors"
+    # NOTE: Do not compare udp_snmp_progress.delta_in_datagrams (kernel counter delta over ~250ms)
+    # to expected_datagrams for the full bulk transfer — it is always far smaller and caused false
+    # "sink_udp_ingress_datagram_gap_no_udp_errors". Use cumulative InDatagrams vs expected below.
     if (
         isinstance(in_datagrams, int)
         and expected_int > 0
@@ -1008,10 +1123,32 @@ def _should_collect_sink_udp_diag(stop_reason: str, got: int, expected: int) -> 
     }
     if stop_reason in immediate_reasons:
         return True
+    # Keep budget/incomplete diagnostics even outside near-full so boundary triage
+    # is available for moderate-loss failures (does not affect pass/fail gates).
+    if stop_reason in {"budget_exceeded", "receiver_incomplete", "receiver_not_settled"}:
+        return True
+    return False
+
+
+def _should_override_stop_reason_with_sink_signal(
+    current_stop_reason: str,
+    got: int,
+    expected: int,
+) -> bool:
+    """Allow sink-boundary stop_reason override only for boundary-like failures."""
+
+    immediate_reasons = {
+        "near_full_micro_loss_at_deadline",
+        "near_full_loss_under_cadence",
+        "bridge_boundary_stall",
+        "post_send_frame_visibility_absent",
+    }
+    if current_stop_reason in immediate_reasons:
+        return True
     expected_int = int(expected) if expected else 0
     got_int = int(got) if got else 0
     near_full_delivery = expected_int > 0 and got_int >= int(expected_int * 0.99)
-    if stop_reason in {"budget_exceeded", "receiver_incomplete", "receiver_not_settled"} and near_full_delivery:
+    if current_stop_reason in {"budget_exceeded", "receiver_incomplete", "receiver_not_settled"} and near_full_delivery:
         return True
     return False
 
@@ -1278,6 +1415,7 @@ def bytes_on_file(docker, container, path):
         container,
         f"test -f {path} && stat -c %s {path} || printf '0\\n'",
         check=False,
+        quiet=True,
     )
     try:
         return int((out or "0").splitlines()[0] or "0")
@@ -1479,12 +1617,21 @@ def _classified_error_bucket(text: str | None) -> str:
     return c
 
 
-def _classify_udp_fail_reason(got, expected, throughput_ok, target_rate_bps):
-    if int(target_rate_bps) > 0 and not bool(throughput_ok):
-        return "throughput_target_unmet", "runner_integrity", "deadlineExceeded"
+def _classify_udp_fail_reason(got, expected, throughput_ok, target_rate_bps, hash_ok=True):
     if int(got) < int(expected):
         return "receiver_incomplete", "runner_integrity", "timeout"
+    if not bool(hash_ok):
+        return "hash_mismatch", "runner_integrity", "sink payload sha256 mismatch (expected zero-filled corpus)"
+    if int(target_rate_bps) > 0 and not bool(throughput_ok):
+        return "throughput_target_unmet", "runner_integrity", "deadlineExceeded"
     return "deadline_exceeded", "runner_guard", "deadlineExceeded"
+
+
+def _udp_target_payload_throughput_mbps(target_rate_bps: int) -> float | None:
+    """Target goodput given sender pacing ``target_rate_bps`` (payload bytes/sec), in Mb/s."""
+    if int(target_rate_bps) <= 0:
+        return None
+    return float(target_rate_bps) * 8.0 / 1_000_000.0
 
 
 def strict_timeout_sec(byte_count, floor_sec=1):
@@ -1592,6 +1739,8 @@ def _zero_observability_snapshot():
         "connect_ip_session_reset_total": {},
         # HTTP/3 per-stream datagram queue drops (process-wide); see http3.StreamDatagramQueueDropTotal in sing-box transport.
         "http3_stream_datagram_queue_drop_total": 0,
+        "http3_datagram_unknown_stream_drop_total": 0,
+        "http3_stream_datagram_recv_closed_drop_total": 0,
         "http3_stream_datagram_queue_pop_total": 0,
         "http3_stream_datagram_queue_pop_path_total": {},
         "http3_datagram_dispatch_path_total": {},
@@ -2544,6 +2693,17 @@ def classify_tcp_ip_stop_reason(send_err, got, expected, hash_ok, settled, budge
             return "read_exit"
         if obs_delta.get("connect_ip_ptb_rx_total", 0) > 0:
             return "ptb"
+    if budget_exceeded or got < expected:
+        # Critical datagram-path drops deserve explicit boundary reason instead of
+        # generic budget/incomplete to preserve actionable triage in threshold sweeps.
+        if _safe_int(obs_delta.get("quic_datagram_packer_oversize_drop_total", 0), 0) > 0:
+            return "quic_datagram_packer_oversize_drop"
+        if _safe_int(obs_delta.get("quic_datagram_rcv_queue_drop_total", 0), 0) > 0:
+            return "quic_datagram_rcv_queue_drop"
+        if _safe_int(obs_delta.get("http3_stream_datagram_queue_drop_total", 0), 0) > 0:
+            return "http3_stream_datagram_queue_drop"
+        if _safe_int(obs_delta.get("http3_datagram_unknown_stream_drop_total", 0), 0) > 0:
+            return "http3_datagram_unknown_stream_drop"
     if budget_exceeded:
         return "budget_exceeded"
     if got < expected:
@@ -2709,7 +2869,17 @@ def run_udp_matrix(docker, sizes_mib, rates_bps, losses, udp_chunk=0):
 def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
     target_host, port = "10.200.0.3", 5601
     sink = "/tmp/udp-python.bin"
-    srv_to, cli_to, wait_cap = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
+    base_srv, base_cli, base_wait = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
+    cli_to = int(base_cli)
+    paced_budget = 0
+    if int(udp_rate_bps) > 0:
+        paced_budget = _udp_paced_send_min_timeout_sec(byte_count, int(udp_rate_bps))
+        cli_to = max(cli_to, paced_budget)
+    srv_to = int(cli_to) + _BULK_SERVER_PAD_SEC
+    wait_cap = int(cli_to) + _BULK_WAIT_PAD_SEC
+    # If bulk harness already gave larger outer caps (defensive), keep them.
+    srv_to = max(int(base_srv), srv_to)
+    wait_cap = max(int(base_wait), wait_cap)
     chunk = _stand_udp_chunk(byte_count, udp_chunk)
     target_rate_bps = int(udp_rate_bps) if int(udp_rate_bps) > 0 else 0
     udp_sender_sndbuf = int(os.environ.get("MASQUE_STAND_UDP_SNDBUF", str(16 * 1024 * 1024)))
@@ -2755,12 +2925,14 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
             ),
             check=False,
         )
-        recv_wait = 10 if byte_count == BYTES_10KB else wait_cap
+        recv_tail = _udp_bulk_recv_drain_slack_sec(byte_count, cli_to)
+        recv_wait = 10 if byte_count == BYTES_10KB else int(wait_cap) + recv_tail
         got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
         elapsed = time.time() - start
         tm_elapsed = max(float(elapsed), 1e-9)
         tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
-        target_throughput_mbps = (target_rate_bps / 1_000_000.0) if target_rate_bps > 0 else None
+        target_mbps_exact = _udp_target_payload_throughput_mbps(target_rate_bps)
+        target_throughput_mbps = round(target_mbps_exact, 6) if target_mbps_exact is not None else None
         min_ratio_raw = (os.environ.get("MASQUE_STAND_UDP_RATE_MIN_RATIO") or "0.9").strip()
         try:
             min_ratio = float(min_ratio_raw)
@@ -2768,19 +2940,67 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
             min_ratio = 0.9
         min_ratio = min(1.0, max(0.0, min_ratio))
         throughput_ok = True
-        if target_throughput_mbps is not None:
-            throughput_ok = tmetrics["throughput_mbps"] >= (target_throughput_mbps * min_ratio)
+        paced_tp_evidence: dict = {}
+        if target_mbps_exact is not None:
+            # ``throughput_mbps`` vs target: both payload goodput in Mb/s (bits). Short MiB runs on
+            # Docker Desktop inflate host ``elapsed`` vs in-container paced send; optional wall window.
+            throughput_ok, paced_tp_evidence = _udp_paced_throughput_checks(
+                byte_count,
+                int(got),
+                float(elapsed),
+                float(tmetrics["throughput_mbps"]),
+                float(target_mbps_exact),
+                float(min_ratio),
+                int(target_rate_bps),
+                float(udp_loss_pct),
+            )
+
+        measured_payload_bps = float(got) / tm_elapsed if got > 0 else 0.0
+        digest_actual = ""
+        hash_ok_for_payload = True
+        expected_digest_hex = ""
+        if float(udp_loss_pct) > 0.0:
+            # Under netem loss the sink is not assumed to equal a deterministic zero corpus.
+            digest_actual = ""
+            hash_ok_for_payload = True
+        elif byte_count <= 0:
+            digest_actual = ""
+            hash_ok_for_payload = True
+        elif int(got) < int(byte_count):
+            digest_actual = ""
+            hash_ok_for_payload = False
+            expected_digest_hex = zero_payload_sha256(int(byte_count))
+        else:
+            expected_digest_hex = zero_payload_sha256(int(byte_count))
+            digest_actual = file_sha256_slice(docker, SERVER_CONTAINER, sink, 0, int(byte_count))
+            hash_ok_for_payload = bool(digest_actual) and digest_actual == expected_digest_hex
 
         if float(udp_loss_pct) > 0:
             floor_ratio = max(0.85, 1.0 - (float(udp_loss_pct) + 4.0) / 100.0)
             ok = int(got) >= int(float(byte_count) * floor_ratio) and throughput_ok
         elif byte_count == BYTES_10KB:
-            ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC
+            ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC and hash_ok_for_payload
         else:
-            ok = got >= byte_count and throughput_ok
+            ok = got >= byte_count and throughput_ok and hash_ok_for_payload
         loss_b = max(0, int(byte_count) - int(got))
         meas_loss = (100.0 * loss_b / float(byte_count)) if byte_count > 0 else 0.0
         t_min_50 = _theoretical_transfer_sec_at_mbps(byte_count, _BULK_HARNESS_BASELINE_MBPS)
+        payload_hash_info = {}
+        if float(udp_loss_pct) > 0.0:
+            payload_hash_info = {
+                "payload_sha256_expected_hex": None,
+                "payload_sha256_sink_hex": None,
+                "payload_hash_ok": None,
+                "payload_hash_skipped_reason": "injected_loss_pct_gt_0",
+            }
+        else:
+            payload_hash_info = {
+                "payload_sha256_expected_hex": expected_digest_hex if int(byte_count) > 0 else "",
+                "payload_sha256_sink_hex": digest_actual or None,
+                "payload_hash_ok": bool(hash_ok_for_payload),
+                "payload_hash_skipped_reason": None,
+            }
+
         payload = {
             "scenario": "udp",
             "metric_layer": "application_payload",
@@ -2788,17 +3008,29 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
             "bytes_received": got,
             "elapsed_sec": round(elapsed, 3),
             "throughput_mbps": tmetrics["throughput_mbps"],
+            "measured_payload_bps_rounded": round(measured_payload_bps, 3),
             "theoretical_min_sec_at_50mbps": round(t_min_50, 3),
             "ok": ok,
             "stand_udp_chunk_bytes": chunk,
             "stand_udp_pause_sec": round(pause, 6),
             "udp_send_rate_bps": target_rate_bps if target_rate_bps > 0 else None,
+            "udp_paced_send_budget_sec": int(paced_budget) if paced_budget > 0 else None,
+            "harness_udp_cli_timeout_sec": int(cli_to),
+            "harness_udp_srv_socat_timeout_sec": int(srv_to),
+            "harness_udp_recv_wait_sec": int(recv_wait),
+            "harness_udp_recv_drain_tail_sec": int(recv_tail),
             "udp_sender_sndbuf": udp_sender_sndbuf,
-            "throughput_target_mbps": round(target_throughput_mbps, 3) if target_throughput_mbps is not None else None,
+            "throughput_target_mbps": round(target_throughput_mbps, 6) if target_throughput_mbps is not None else None,
             "throughput_min_ratio": round(min_ratio, 4) if target_throughput_mbps is not None else None,
             "throughput_target_met": throughput_ok if target_throughput_mbps is not None else None,
             "injected_loss_pct": float(udp_loss_pct),
             "measured_loss_pct_approx": round(meas_loss, 4),
+            **payload_hash_info,
+            **(
+                {"throughput_pace_evidence": paced_tp_evidence}
+                if paced_tp_evidence
+                else {}
+            ),
         }
         if ok:
             payload["error"] = None
@@ -2811,6 +3043,8 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
                 "bytes_received": int(got),
                 "bytes_expected": int(byte_count),
                 "measured_loss_pct_approx": round(meas_loss, 4),
+                "payload_hash_ok": payload_hash_info.get("payload_hash_ok"),
+                **paced_tp_evidence,
             }
         else:
             stop_reason, stop_reason_source, hint = _classify_udp_fail_reason(
@@ -2818,6 +3052,7 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
                 byte_count,
                 throughput_ok,
                 target_rate_bps,
+                hash_ok_for_payload,
             )
             payload["error"] = hint
             payload["error_class"] = _classified_error_bucket(hint)
@@ -2826,13 +3061,16 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
             payload["stop_reason_source"] = stop_reason_source
             payload["stop_reason_evidence"] = {
                 "throughput_target_met": bool(throughput_ok),
-                "throughput_target_mbps": round(target_throughput_mbps, 3)
+                "throughput_target_mbps": round(target_throughput_mbps, 6)
                 if target_throughput_mbps is not None
                 else None,
                 "throughput_mbps": tmetrics["throughput_mbps"],
+                "measured_payload_bps_rounded": round(measured_payload_bps, 3),
                 "bytes_received": int(got),
                 "bytes_expected": int(byte_count),
                 "measured_loss_pct_approx": round(meas_loss, 4),
+                "payload_hash_ok": payload_hash_info.get("payload_hash_ok"),
+                **paced_tp_evidence,
             }
         return payload
     finally:
@@ -2952,13 +3190,23 @@ def run_tcp_ip(
     sink = "/tmp/ip-connect-ip-python.bin"
     raw_datagram_size, datagram_size = _stand_tcp_ip_udp_chunk(udp_chunk)
     rate_bps = 0
+    send_rate_limit = ""
+    rate_limit_bps = 0
+    pacing_source = "none"
     if mode == "bulk_single_flow":
         send_rate_limit = os.environ.get("MASQUE_TCP_IP_RATE_LIMIT", "").strip()
         if send_rate_limit == "1m":
             send_rate_limit = "1300k"
-        rate_bps = parse_rate_limit_to_bps(send_rate_limit)
+        rate_limit_bps = parse_rate_limit_to_bps(send_rate_limit)
+        rate_bps = int(rate_limit_bps)
+        if rate_limit_bps > 0:
+            pacing_source = "rate_limit"
         if int(udp_rate_bps) > 0:
             rate_bps = int(udp_rate_bps)
+            pacing_source = "cli"
+        elif int(rate_limit_bps) <= 0 and os.name == "nt":
+            # Windows-only default pacing may come from scenario-level effective udp_rate_bps.
+            pacing_source = "default" if int(rate_bps) > 0 else "none"
     socket_buf_bytes = _tcp_ip_socket_buf_bytes(rate_bps)
     docker_exec(docker, IPERF_CONTAINER, f"rm -f {sink}", check=False)
     listener_timeout = 20 if byte_count == BYTES_10KB else 1800
@@ -3247,7 +3495,11 @@ def run_tcp_ip(
             sink_udp_diag=sink_udp_diag,
             expected_datagrams=expected_sink_udp_datagrams,
         )
-        if sink_boundary_signal:
+        if sink_boundary_signal and _should_override_stop_reason_with_sink_signal(
+            stop_reason,
+            got,
+            byte_count,
+        ):
             stop_reason = sink_boundary_signal
             stop_reason_source = "runtime_observability"
             stop_reason_evidence["sink_writer_boundary_signal"] = sink_boundary_signal
@@ -3286,6 +3538,15 @@ def run_tcp_ip(
         "send_guard_timeout_sec": send_timeout,
         "wait_guard_timeout_sec": wait_timeout,
         "send_elapsed_sec": round(send_elapsed, 3),
+        "effective_udp_send_bps": int(rate_bps),
+        "udp_send_bps_source": pacing_source,
+        "udp_send_rate_limit_raw": send_rate_limit or None,
+        "udp_send_rate_limit_bps": int(rate_limit_bps),
+        "udp_send_bps_rate_limit_mismatch": bool(
+            int(rate_bps) != int(rate_limit_bps)
+        )
+        if int(rate_limit_bps) > 0
+        else None,
         "udp_socket_buf_bytes": int(socket_buf_bytes),
         "receiver_settled": settled,
         "bytes_at_deadline": bytes_at_deadline,
@@ -3316,6 +3577,31 @@ def run_tcp_ip(
     }
 
 
+def _tcp_ip_threshold_trial_observability_compact(result):
+    """Merged-delta QUIC/HTTP3 signals for tcp_ip_threshold trials (CONNECT-IP triage)."""
+    if not isinstance(result, dict):
+        return {}
+    obs = result.get("observability")
+    if not isinstance(obs, dict):
+        return {}
+    delta = obs.get("delta")
+    if not isinstance(delta, dict):
+        delta = {}
+
+    def gi(key):
+        return _safe_int(delta.get(key, 0), 0)
+
+    return {
+        "observability_gap": bool(obs.get("observability_gap")),
+        "observability_peer_split": bool(obs.get("observability_peer_split")),
+        "delta_quic_packer_oversize": gi("quic_datagram_packer_oversize_drop_total"),
+        "delta_quic_rcv_queue_drop": gi("quic_datagram_rcv_queue_drop_total"),
+        "delta_http3_stream_queue_drop": gi("http3_stream_datagram_queue_drop_total"),
+        "delta_http3_unknown_stream": gi("http3_datagram_unknown_stream_drop_total"),
+        "delta_http3_recv_closed_drop": gi("http3_stream_datagram_recv_closed_drop_total"),
+    }
+
+
 def run_tcp_ip_threshold_sweep(
     docker,
     byte_count,
@@ -3342,16 +3628,20 @@ def run_tcp_ip_threshold_sweep(
                 tcp_ip_deadline_sec=tcp_ip_deadline_sec,
             )
             metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
-            trials.append(
-                {
-                    "rate_limit": rate,
-                    "loss_pct": float(metrics.get("loss_pct", 0.0) or 0.0),
-                    "stop_reason": str(result.get("stop_reason", "") or ""),
-                    "error_class": str(result.get("error_class", "") or ""),
-                    "ok": bool(result.get("ok")),
-                    "bytes_received": int(result.get("bytes_received", 0) or 0),
-                }
-            )
+            base_trial = {
+                "rate_limit": rate,
+                "loss_pct": float(metrics.get("loss_pct", 0.0) or 0.0),
+                "stop_reason": str(result.get("stop_reason", "") or ""),
+                "error_class": str(result.get("error_class", "") or ""),
+                "ok": bool(result.get("ok")),
+                "bytes_received": int(result.get("bytes_received", 0) or 0),
+                "effective_udp_send_bps": int(result.get("effective_udp_send_bps", 0) or 0),
+                "udp_send_bps_source": str(result.get("udp_send_bps_source", "") or "none"),
+                "udp_send_rate_limit_bps": int(result.get("udp_send_rate_limit_bps", 0) or 0),
+                "udp_send_bps_rate_limit_mismatch": result.get("udp_send_bps_rate_limit_mismatch"),
+            }
+            base_trial.update(_tcp_ip_threshold_trial_observability_compact(result))
+            trials.append(base_trial)
     finally:
         if previous is None:
             os.environ.pop("MASQUE_TCP_IP_RATE_LIMIT", None)

@@ -294,6 +294,30 @@ class TestConnectIPPostSendRemoteVisibilityCorrelation(unittest.TestCase):
             failures,
         )
 
+    def test_green_with_extra_pacing_observability_fields(self):
+        delta = _base_tcp_ip_observability_delta()
+        delta["connect_ip_effective_udp_send_bps"] = 4_000_000
+        delta["connect_ip_effective_udp_send_source"] = "default"
+        summary = {
+            "ok": True,
+            "results": [
+                {
+                    "scenario": "tcp_ip",
+                    "stop_reason": "post_send_frame_visibility_absent",
+                    "connect_ip_udp_bridge_contract": "ipv4_only",
+                    "connect_ip_udp_bridge_ipv6_supported": False,
+                    "observability": {"delta": delta},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            (runtime_dir / "masque_python_runner_summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            failures: list[str] = []
+            checks = _check_smoke_summary(runtime_dir, failures)
+        row = checks["connect_ip_post_send_remote_visibility_correlation"]
+        self.assertTrue(row["ok"], msg=f"unexpected failures: {failures}")
+
 
 class TestSinkWriterBoundaryContract(unittest.TestCase):
     def _run_summary_check(self, row: dict):

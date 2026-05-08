@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -143,7 +144,12 @@ class TestSmokeContractArtifacts(unittest.TestCase):
         )
         self.assertEqual(signal, "sink_udp_ingress_datagram_gap_no_udp_errors")
 
-    def test_classify_sink_udp_gap_prefers_snmp_progress_delta_for_current_run(self):
+    def test_classify_sink_gap_uses_cumulative_in_datagrams_not_delta_vs_total_expected(self):
+        """Cumulative InDatagrams must be compared to expected count, not snmp delta over ~250ms.
+
+        Comparing delta_in_datagrams (short window) to full-run expected_datagrams was a false
+        positive (delta is always << total); ingress gap uses cumulative counters only.
+        """
         signal = runner._classify_sink_writer_boundary_signal(
             settled=False,
             late_growth_bytes=0,
@@ -153,13 +159,13 @@ class TestSmokeContractArtifacts(unittest.TestCase):
                     "Udp: 999999 0 0 0 0 0"
                 ),
                 "udp_snmp_progress": {
-                    "delta_in_datagrams": 20956,
+                    "delta_in_datagrams": 50,
                     "delta_in_errors": 0,
                 },
             },
             expected_datagrams=20972,
         )
-        self.assertEqual(signal, "sink_udp_ingress_datagram_gap_no_udp_errors")
+        self.assertEqual(signal, "sink_writer_boundary_no_udp_errors")
 
     def test_classify_sink_writer_boundary_signal_no_udp_errors(self):
         signal = runner._classify_sink_writer_boundary_signal(
@@ -240,10 +246,35 @@ class TestSmokeContractArtifacts(unittest.TestCase):
         )
 
     def test_should_collect_sink_udp_diag_skips_non_near_full_budget_exceeded(self):
-        self.assertFalse(
+        self.assertTrue(
             runner._should_collect_sink_udp_diag(
                 stop_reason="budget_exceeded",
                 got=10000000,
+                expected=20971520,
+            )
+        )
+
+    def test_should_collect_sink_udp_diag_for_non_near_full_receiver_incomplete(self):
+        self.assertTrue(
+            runner._should_collect_sink_udp_diag(
+                stop_reason="receiver_incomplete",
+                got=10000000,
+                expected=20971520,
+            )
+        )
+
+    def test_should_override_sink_signal_only_for_near_full_budget(self):
+        self.assertFalse(
+            runner._should_override_stop_reason_with_sink_signal(
+                current_stop_reason="budget_exceeded",
+                got=10000000,
+                expected=20971520,
+            )
+        )
+        self.assertTrue(
+            runner._should_override_stop_reason_with_sink_signal(
+                current_stop_reason="budget_exceeded",
+                got=20960000,
                 expected=20971520,
             )
         )
@@ -654,6 +685,81 @@ class TestSmokeContractArtifacts(unittest.TestCase):
         )
         self.assertEqual(reason, "near_full_loss_under_cadence")
 
+    def test_classify_tcp_ip_stop_reason_packer_oversize_typed_on_fail(self):
+        obs = {
+            "source": "runtime_snapshot_log_marker",
+            "delta": {
+                "quic_datagram_packer_oversize_drop_total": 3,
+            },
+        }
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err=None,
+            got=1000,
+            expected=2000,
+            hash_ok=False,
+            settled=True,
+            budget_exceeded=True,
+            obs=obs,
+        )
+        self.assertEqual(reason, "quic_datagram_packer_oversize_drop")
+
+    def test_classify_tcp_ip_stop_reason_rcv_queue_typed_on_fail(self):
+        obs = {
+            "source": "runtime_snapshot_log_marker",
+            "delta": {
+                "quic_datagram_rcv_queue_drop_total": 2,
+            },
+        }
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err=None,
+            got=1000,
+            expected=2000,
+            hash_ok=False,
+            settled=True,
+            budget_exceeded=True,
+            obs=obs,
+        )
+        self.assertEqual(reason, "quic_datagram_rcv_queue_drop")
+
+    def test_classify_tcp_ip_stop_reason_http3_stream_queue_typed_on_fail(self):
+        obs = {
+            "source": "runtime_snapshot_log_marker",
+            "delta": {
+                "http3_stream_datagram_queue_drop_total": 1,
+            },
+        }
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err=None,
+            got=1000,
+            expected=2000,
+            hash_ok=False,
+            settled=True,
+            budget_exceeded=True,
+            obs=obs,
+        )
+        self.assertEqual(reason, "http3_stream_datagram_queue_drop")
+
+    def test_classify_tcp_ip_stop_reason_drop_priority_prefers_packer_oversize(self):
+        obs = {
+            "source": "runtime_snapshot_log_marker",
+            "delta": {
+                "quic_datagram_packer_oversize_drop_total": 1,
+                "quic_datagram_rcv_queue_drop_total": 3,
+                "http3_stream_datagram_queue_drop_total": 7,
+                "http3_datagram_unknown_stream_drop_total": 9,
+            },
+        }
+        reason = runner.classify_tcp_ip_stop_reason(
+            send_err=None,
+            got=1000,
+            expected=2000,
+            hash_ok=False,
+            settled=True,
+            budget_exceeded=True,
+            obs=obs,
+        )
+        self.assertEqual(reason, "quic_datagram_packer_oversize_drop")
+
     def test_connect_ip_cadence_sparse_signal_marks_full_delivery_with_thin_obs(self):
         obs = {
             "observability_peer_split": True,
@@ -721,6 +827,126 @@ class TestSmokeContractArtifacts(unittest.TestCase):
     def test_parse_csv_udp_bps_default_and_trim(self):
         self.assertEqual(runner._parse_csv_udp_bps_rates(""), [30_000_000, 50_000_000, 70_000_000])
         self.assertEqual(runner._parse_csv_udp_bps_rates("100, 200"), [100, 200])
+
+
+class TestTcpIpPacingObservability(unittest.TestCase):
+    def test_effective_udp_send_bps_windows_default_applies_only_tcp_ip(self):
+        with mock.patch.object(runner.os, "name", "nt"), mock.patch.object(
+            runner,
+            "_win_host_tcp_ip_default_udp_send_bps",
+            return_value=4_000_000,
+        ):
+            self.assertEqual(
+                runner._effective_udp_send_bps_for_stand_scenario("tcp_ip", 0, "bulk_single_flow"),
+                4_000_000,
+            )
+            self.assertEqual(
+                runner._effective_udp_send_bps_for_stand_scenario("tcp_ip_threshold", 0, "bulk_single_flow"),
+                0,
+            )
+
+    def test_tcp_ip_threshold_trial_carries_effective_pacing_fields(self):
+        fake = {
+            "ok": True,
+            "bytes_received": 1024,
+            "stop_reason": "none",
+            "error_class": "none",
+            "metrics": {"loss_pct": 0.0},
+            "observability": {"observability_gap": False, "observability_peer_split": True, "delta": {}},
+            "effective_udp_send_bps": 12_345_678,
+            "udp_send_bps_source": "rate_limit",
+            "udp_send_rate_limit_bps": 12_345_678,
+            "udp_send_bps_rate_limit_mismatch": False,
+        }
+        with mock.patch.object(runner, "run_tcp_ip", return_value=fake):
+            out = runner.run_tcp_ip_threshold_sweep(
+                docker="docker",
+                byte_count=1024,
+                mode="bulk_single_flow",
+                rate_limits=["120m"],
+            )
+        trial = out["trials"][0]
+        self.assertEqual(trial["effective_udp_send_bps"], 12_345_678)
+        self.assertEqual(trial["udp_send_bps_source"], "rate_limit")
+        self.assertEqual(trial["udp_send_rate_limit_bps"], 12_345_678)
+        self.assertFalse(trial["udp_send_bps_rate_limit_mismatch"])
+
+
+class TestUdpRunnerIntegrity(unittest.TestCase):
+    def test_udp_target_payload_throughput_mbps_bytes_per_sec_times_eight(self):
+        self.assertIsNone(runner._udp_target_payload_throughput_mbps(0))
+        self.assertAlmostEqual(runner._udp_target_payload_throughput_mbps(100_000_000), 800.0)
+
+    def test_udp_tun_send_script_paces_payload_bytes_per_second(self):
+        self.assertIn(
+            "target_elapsed = sent / float(RATE_BPS)",
+            runner._UDP_TUN_DATAGRAM_SEND_PY,
+        )
+        self.assertNotIn("sent * 8.0 / RATE_BPS", runner._UDP_TUN_DATAGRAM_SEND_PY)
+
+    def test_classify_udp_fail_reason_hash_before_throughput(self):
+        missing, _, _ = runner._classify_udp_fail_reason(99, 100, True, 1_000_000, True)
+        self.assertEqual(missing, "receiver_incomplete")
+        bad_hash, _, _ = runner._classify_udp_fail_reason(100, 100, False, 1_000_000, False)
+        self.assertEqual(bad_hash, "hash_mismatch")
+        slow, _, _ = runner._classify_udp_fail_reason(100, 100, False, 1_000_000, True)
+        self.assertEqual(slow, "throughput_target_unmet")
+
+    def test_udp_paced_send_min_timeout_above_bulk_floor_when_rate_tiny(self):
+        """Paced transfers can exceed the bulk stall floor; ``timeout`` must not clip the sender."""
+        bc = 10 * 1024 * 1024
+        # ~1 MiB/s payload → ~10.49 s nominal; keep sanity bound.
+        need = runner._udp_paced_send_min_timeout_sec(bc, 1_048_576)
+        self.assertGreaterEqual(need, 25)
+        self.assertLess(need, 120)
+
+        # Slow desktop floor can be < byte_count/rate; budget must extend past the stall floor.
+        need_slow = runner._udp_paced_send_min_timeout_sec(bc, 125_000)
+        self.assertGreater(need_slow, runner._bulk_stall_floor_sec())
+        self.assertEqual(need_slow, math.ceil(bc / 125_000.0) + 15)
+
+
+    def test_udp_recv_drain_slack_bounded_and_positive_for_bulk(self):
+        slack = runner._udp_bulk_recv_drain_slack_sec(20 * 1024 * 1024, 90)
+        self.assertGreater(slack, 0)
+        self.assertLessEqual(slack, 120)
+
+        self.assertEqual(runner._udp_bulk_recv_drain_slack_sec(runner.BYTES_10KB, 90), 0)
+
+    def test_udp_paced_throughput_window_accepts_docker_host_overhead(self):
+        """Host wall clock can exceed in-container pace on small bulk; window supplements Mbps check."""
+        bc = 10 * 1024 * 1024
+        rate = 12_500_000
+        target_mbps = 100.0
+        ok, ev = runner._udp_paced_throughput_checks(
+            bc,
+            bc,
+            1.031,
+            81.326,
+            target_mbps,
+            0.9,
+            rate,
+            0.0,
+        )
+        self.assertTrue(ok)
+        self.assertFalse(ev["measured_throughput_ok"])
+        self.assertTrue(ev["pace_wall_window_ok"])
+
+    def test_udp_paced_throughput_rejects_slow_wall(self):
+        bc = 10 * 1024 * 1024
+        rate = 12_500_000
+        ok, ev = runner._udp_paced_throughput_checks(
+            bc,
+            bc,
+            4.0,
+            20.0,
+            100.0,
+            0.9,
+            rate,
+            0.0,
+        )
+        self.assertFalse(ok)
+        self.assertFalse(ev["pace_wall_window_ok"])
 
 
 class TestStandBulkHarness(unittest.TestCase):

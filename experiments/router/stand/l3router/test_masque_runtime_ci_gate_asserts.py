@@ -43,6 +43,17 @@ class TestConnectIPPostSendRemoteVisibilityCorrelationAssert(unittest.TestCase):
         )
         self.assertEqual(failures, [])
 
+    def test_green_when_row_has_extra_observability_fields(self):
+        checks = _checks_with_row(ok=True, active=True, stop_reason="post_send_frame_visibility_absent")
+        checks["summary"]["connect_ip_post_send_remote_visibility_correlation"].update(
+            {
+                "effective_udp_send_bps": 4_000_000,
+                "udp_send_bps_source": "default",
+            }
+        )
+        failures = _assert_runtime_contract_connect_ip_post_send_remote_visibility_correlation(checks)
+        self.assertEqual(failures, [])
+
     def test_mandatory_checks_include_remote_visibility_row(self):
         self.assertIn(
             ("summary", "connect_ip_post_send_remote_visibility_correlation.ok", True),

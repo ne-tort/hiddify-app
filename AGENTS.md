@@ -2,232 +2,91 @@
 
 ## 1) Mission
 
-Цель: довести `masque` endpoint в `hiddify-core/hiddify-sing-box` до production-качества и RFC-сходимости (`connect_stream`, `connect_udp`, `connect_ip`) по измеримым артефактам CI/стенда (`masque-gates`, `experiments/router/stand/l3router`).
-Основной фокус: объективно повышать скорость на Docker-стенде **без потерь/дрейфа хеша/регрессий** до реальной границы тракта; искать и устранять проблемы в hot path и соседних слоях MASQUE endpoint, делать его более прозрачным.
+Довести `masque` endpoint в `hiddify-core/hiddify-sing-box` до production-качества и RFC-сходимости (`connect_stream`, `connect_udp`, `connect_ip`) по артефактам CI и Docker-стенда.
 
-**Windows:** каноничный запуск стенда — через **Docker Desktop (WSL2)**; стенд и артефакты те же, что в CI. Нет прогона — не «запрет инфраструктуры», а незапущенный демон или пропуск шага.
+Текущий приоритет: объективно повышать скорость без потерь/hash drift и без регрессий контрактов. Искать и фиксить bottleneck в hot path только по подтверждённой наблюдаемости.
 
-
-Важно: вместо постоянного поддержания документации в "актуальном виде", приоритет следует отдавать реальным действиям с кодом.
+**Windows policy:** каноничный e2e-запуск стенда — из **WSL** с backend **Docker Desktop (WSL2)**.
 
 ## 2) Non-negotiables
 
-- Цикл: сигнал → код → тест/стенд → фиксация артефакта → следующий шаг.
-- Fail (`loss`, `timeout`, `budget_exceeded`, hash drift, `throughput_target_unmet`) — разбирать по boundary слоя, без fake-green.
+- Цикл: сигнал -> код -> тест/стенд -> артефакт -> следующий шаг.
+- Fail (`loss`, `timeout`, `budget_exceeded`, `throughput_target_unmet`, hash drift) не маскировать; triage по boundary слоя.
 - Не ослаблять пороги/таймауты/валидации ради PASS.
-- Для Docker e2e MASQUE единственно верный путь проверки — compose-стенд + `masque_stand_runner.py`/`masque_runtime_*` по порядку из `masque-gates`; альтернативные «облегчённые» проверки считать вспомогательными и недостаточными для выводов о прод-качестве.
-- Источник истины при расхождении: **код → `hiddify-core/.github/workflows/ci.yml` (job `masque-gates`) → `IDEAL-MASQUE-ARCHITECTURE.md` → `docs/masque/*` → этот файл** (`AGENTS.md` — дорожная карта и операторские якоря, не дубликат RFC).
+- Для Docker e2e единственный валидный путь: compose-стенд + `masque_stand_runner.py`/`masque_runtime_*` в порядке `masque-gates`.
 - `masque_or_direct` только с `fallback_policy=direct_explicit`.
-- Рефакторинг допустим агрессивно при сложной диагностике, если не ломает контракты/RFC и подтверждается тестами/стендом.
-- Оптимизация hot path обязательна, когда узкое место очевидно и подтверждается наблюдаемостью (CPU/очереди/дропы/таймауты); «оптимизации на веру» запрещены.
-- Submodule: правки ядра — коммит в `hiddify-core`; в родителе `hiddify-app` — обновление **SHA** submodule.
+- Оптимизации hot path только по метрикам/логам/контрактам, не "на веру".
+- Правки ядра коммитить в `hiddify-core`; в `hiddify-app` фиксировать новый SHA сабмодуля.
 
-## 3) Read First (mandatory)
+## 3) Source Of Truth
 
-**Пути:** `IDEAL-MASQUE-ARCHITECTURE.md` и `docs/masque/*` — в **корне `hiddify-app`**; пути вида `hiddify-core/docs/...` — внутри submodule.
+При расхождениях приоритет:
+1. Код
+2. `hiddify-core/.github/workflows/ci.yml` (job `masque-gates`)
+3. `IDEAL-MASQUE-ARCHITECTURE.md`
+4. `docs/masque/*`
+5. Этот файл
 
-Перед первой правкой итерации:
+## 4) Read First (links)
 
-1. `hiddify-core/.github/workflows/ci.yml` → job **`masque-gates`** (в Setup Go сейчас `go-version: ^1.25.6`).
-2. `IDEAL-MASQUE-ARCHITECTURE.md` — режимы, MTU/TUN/datagram ceiling, носители CONNECT-UDP / stream / CONNECT-IP (глава 4), packet-plane (глава 5).
+Обязательный минимум перед итерацией:
+
+1. `hiddify-core/.github/workflows/ci.yml` (`masque-gates`)
+2. `IDEAL-MASQUE-ARCHITECTURE.md`
 3. `docs/masque/AGENT-RFC-CI-CONTRACTS.md`
-4. `docs/masque/AGENT-LAYER-SOURCE-OF-TRUTH.md` — **полная карта слоёв и расширенный triage** (peer-split, счётчики, порядок job).
+4. `docs/masque/AGENT-LAYER-SOURCE-OF-TRUTH.md`
 5. `docs/masque/AGENT-TEST-AND-STAND-RUNBOOK.md`
 6. `docs/masque/AGENT-CI-REPLAY-CHEATSHEET.md`
-7. Пороги и имена артефактов: `hiddify-core/docs/masque-perf-gates.md`; lifecycle CONNECT-IP: `hiddify-core/docs/masque-connect-ip-staged-closure.md` (**TCP через netstack при `transport_mode=connect_ip`**, не `tcp_transport=connect_ip`).
-8. Опционально: `docs/masque/AGENT-HANDOFF-TEMPLATE.md`
+7. `hiddify-core/docs/masque-perf-gates.md`
+8. `hiddify-core/docs/masque-connect-ip-staged-closure.md`
+9. `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (риски потерь, стенд-факты, пробелы observability)
 
-## 4) Working protocol (mandatory)
+## 5) Working Protocol
 
-1. Взять сигнал: `experiments/router/stand/l3router/runtime/*.json`, `go test`, лог CI.
-2. Boundary + гипотеза (см. раздел 6 ниже и `AGENT-LAYER-SOURCE-OF-TRUTH`).
-3. Править **один** целевой слой за итерацию.
-4. Прогон: релевантные `go test` + при необходимости стенд/validator (порядок как в `masque-gates`).
-5. Обновить разделы **7** (текущий ход) и **8** (следующие шаги) этого файла; в §7 поле **`hiddify-core` `HEAD`** — вывод **`git -C hiddify-core rev-parse HEAD`** из корня монорепо **`hiddify-app`** (или **`git rev-parse HEAD`** из каталога submodule).
-6. **Автономный цикл:** не блокировать работу запросами к оператору; при отсутствии внешнего сигнала брать задачу из **§8** или чеклист **§3** / быстрый `go test` из **§6**; итерацию закрыть перезаписью **§7–§8** без журнала правок в этом файле.
+0. Перед стартом итерации обязательно опереться на **последний** записанный результат Docker-стенда (`experiments/router/stand/l3router/runtime/*.json`, в т.ч. `masque_python_runner_summary.json`) как отправную точку и на **незавершённые** пункты чеклиста (§8).
+1. Взять сигнал из runtime/CI/`go test` и выбрать задачу из известных проблем ядра в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (приоритет: `[IN PROGRESS]` -> следующий критичный риск).
+2. Сформулировать boundary + гипотезу (детальный triage в `AGENT-LAYER-SOURCE-OF-TRUTH.md`).
+3. Править один целевой слой за итерацию (фокус: `hiddify-core/hiddify-sing-box`, не раннер, кроме observability-минимума).
+4. Прогнать релевантные тесты + стенд в CI-порядке.
+5. Обновить §7 и §8 этого файла и статус в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (`[DONE]`/`[IN PROGRESS]`/`[TODO]`) с коротким фактом по артефакту.
+6. Если в известных проблемах и §8 нет активных задач: выполнить целевой анализ кода ядра на потери/таймауты, записать новые гипотезы в отдельный файл `docs/masque/AGENT-MASQUE-CORE-ISSUES.md`, добавить их в §8 и попытаться закрыть первую критичную в той же итерации.
 
-## 5) Definition of Done
+## 6) Definition of Done
 
 - Нет регрессий mode/fallback/lifecycle/scoped-контрактов.
-- Unit/race/integration по затронутым пакетам — PASS.
-- Стенд/validator — PASS для целевой матрицы.
-- Изменение поведения/RFC отражено в коде и тестах там, где нужно.
-
-## 6) Architecture addendum (кратко)
-
-**RFC (номера):** MASQUE **9298**, HTTP Datagrams **9297**, CONNECT-IP **9484**. Норматив реализации — **IDEAL-MASQUE-ARCHITECTURE.md** + код.
-
-**Быстрый поиск по коду (границы):** клиент QUIC/H3, `coreSession`, фабрики сессий — **`transport/masque/transport.go`**; HTTP/3 CONNECT/stream/UDP/CONNECT-IP на **сервере** — **`protocol/masque/endpoint_server.go`**; распаковка/валидация опций после JSON — **`option/masque.go`** и **`protocol/masque/endpoint.go`** (`validateMasqueOptions`, lifecycle outbound).
-
-**Навигация `protocol/masque`:** outbound, lifecycle клиента и `validateMasqueOptions` — **`endpoint.go`** / **`endpoint_warp_masque.go`**; входящий HTTP/3 (CONNECT/stream/UDP/CONNECT-IP) — **`endpoint_server.go`**; регистрация типов endpoint — **`register.go`**; WARP/control surface по сравнению с generic **`masque`** — **`warp_control_adapter.go`**.
-
-**Новые/изменённые поля JSON конфига MASQUE:** править симметрично **`option/masque.go`** (структуры, теги, defaults) и **`protocol/masque/endpoint.go`** (`validateMasqueOptions`, lifecycle, отказ «не поддерживается»); иначе дрейф между распаковкой и рантаймом без компиляторной ошибки.
-
-**Корень sing-box:** `hiddify-core/hiddify-sing-box/` (сборка/тесты только отсюда; `go.mod` — модуль `github.com/sagernet/sing-box`). Patched QUIC: `replace/quic-go-patched/`. **Монорепо `hiddify-app`:** если нет **`hiddify-core/hiddify-sing-box/go.mod`**, выполнить **`git submodule update --init hiddify-core`** — иначе **`go test`**, сборка артефакта и compose-стенд не запускаются. **Относительный путь к стенду/артефактам:** из **`hiddify-sing-box`** каталог экспериментов — **`../../experiments/router/stand/l3router/...`** (ровно два **`..`** до корня **`hiddify-app`**; три **`../`** выходят за монорепо и ломают скрипты на Windows/Mac). То же правило для ручного **`sing-box check -c`**: cwd **`hiddify-sing-box`**, до конфигов — **`../../experiments/...`**; при ошибке «config not found» сначала пересчитать **`..`**, затем при необходимости использовать абсолютный путь внутри **`hiddify-app/experiments/...`**.
-
-**`sing-box check`:** читает конфиг и строит инстанс через **`box.New`** — отрабатывают распаковка **`option`** и создание endpoint (в т.ч. **`validateMasqueOptions`**), без **`run`** и без Docker; нужен бинарь, собранный с **`with_masque`**, иначе типы MASQUE не зарегистрированы. **Нативный бинарь достаточен:** `check` не требует Linux-артефакта; **`GOOS=linux`** нужен для compose/Docker и паритета с CI-сборкой, а не для валидации JSON. **Полный wiring после `check`:** реализация **`box.New`** — **`hiddify-core/hiddify-sing-box/box.go`** (пакет **`box`**): создание **`endpoints[]`**, inbound/outbound/service и **`route.NewRouter`**; при «`check` OK, трафика нет» смотреть **`route`/теги/outbound**, а не только MASQUE-валидацию. Тип **`adapter.Endpoint`** (в т.ч. MASQUE как endpoint-outbound): **`adapter/endpoint.go`** — **`Lifecycle`** + **`Outbound`** + `Type()`/`Tag()`; **`Outbound`** — **`adapter/outbound.go`** (в т.ч. **`N.Dialer`**, **`Network()`**, **`IsReady()`**). Вход в dataplane MASQUE с маршрута: **`DialContext`** / **`ListenPacket`** в **`protocol/masque/endpoint.go`** → **`common/masque` (`Runtime`)** → **`transport/masque`**.
-
-**Жизненный цикл wiring:** конфиг распаковывается в `option` (`endpoints[]` через `option/endpoint.go` + **`EndpointOptionsRegistry`** из сборки с `include` и тегом **`with_masque`**). Endpoint создаётся фабрикой из **`protocol/masque/register.go`**; общий контур sing-box вызывает **`adapter.Endpoint`** — `Network()`, `Start(adapter.StartStage)`, `Close()`. Отдельного inbound-типа `masque` нет: трафик — через **`endpoints[]` + `route` по tag** (`route.rules[].outbound`, `route.final` в том же пространстве имён tag, что и `endpoints[].tag`). В **`box.New`** (`hiddify-core/hiddify-sing-box/box.go`) после DNS-router сначала создаются **все** `endpoints[]`, затем inbounds и outbounds; при создании endpoint с непустым `tag` в контекст подмешивается **`adapter.InboundContext{Outbound: tag}`** — для фабрик/логирования это тот же идентификатор, что в правилах маршрута. Потребитель dataplane — правила **`route`/DNS/route rules** без подразумеваемого «обхода» MASQUE; подозрение на обход закрывается негативными шагами **`masque-gates`** (**`masque_runtime_ci_gate_asserts.py`**), см. ниже про parity validator.
-
-**Регистрация типов:** `include/masque.go` (+ `with_masque`) → `masque.RegisterEndpoint` / `RegisterWarpMasqueEndpoint`; без тега — `include/masque_stub.go` (MASQUE endpoint types не линкуются — локальные прогоны без **`-tags with_masque`** не паритетны **`masque-gates`**). Фабрики: **`NewEndpoint`** (`endpoint.go`), **`NewWarpEndpoint`** (`endpoint_warp_masque.go`). Опции: **`option/masque.go`**; generic **`masque`** vs **`warp_masque`** — см. `warp_control_adapter.go`, ADR `hiddify-core/docs/masque-warp-architecture.md`. **JSON `endpoints[].type`:** литералы **`masque`** / **`warp_masque`** (константы **`C.TypeMasque`** / **`C.TypeWarpMasque`**, **`constant/proxy.go`**; привязка к опциям — **`protocol/masque/register.go`**).
-
-**Точка связки типа конфига с опциями и конструктором:** **`protocol/masque/register.go`** — **`endpoint.Register[option.MasqueEndpointOptions](registry, C.TypeMasque, NewEndpoint)`** и симметрично **`[option.WarpMasqueEndpointOptions]`** / **`C.TypeWarpMasque`** / **`NewWarpEndpoint`**; при смене строки типа или Go-структуры опций без синхронного обновления здесь возможен рассинхрон до рантайма (частично ловится **`sing-box check`** через распаковку **`endpoints[]`**).
-
-**`tcp_stream` / `connect_udp` vs CONNECT-IP:** отдельные ветки в **`transport/masque/transport.go`** и relay/stream в **`endpoint_server.go`** (H3 CONNECT / UDP datagram); не смешивать с **`connectIPNetPacketConn`**. Матрица носителей — **IDEAL**, глава 4 (таблица три семантики). **Guards в `coreSession`:** **`ListenPacket`** переводит в CONNECT-IP (`openIPSessionLocked` / IP plane) только при **`transport_mode=connect_ip`** (нормализация строки на границе transport); при **`auto`/`connect_udp`** — CONNECT-UDP и **`template_udp`**, без IP plane. **`DialContext`:** релейный TCP — **`tcp_transport=connect_stream`** → **`dialTCPStream`**; **`tcp_transport=connect_ip`** на клиенте отсекается в **`endpoint.go`**, до core не доходит. **CONNECT-UDP (клиент):** слишком большой **`WriteTo`** нарезается через **`masqueUDPDatagramSplitConn`** до **`masqueUDPWriteMax`** (связь с **`datagramCeiling`**) — см. **IDEAL** §1 контракт MTU/payload.
-
-**`fallback_policy` / TCP mode vs выбор носителя:** в **`coreSession`** поля **`fallback_policy`** и **`MasqueTCPMode` сами по себе не переключают** CONNECT-UDP ↔ CONNECT-IP; это задаётся **`transport_mode`**, валидацией и слоем выше (**route/outbound**, consumer). Связки **`masque_or_direct`**, chain и изоляция **`warp_masque`** — **`hiddify-core/docs/masque-warp-architecture.md`**, **IDEAL** глава 1.
-
-**Вертикаль клиента (CONNECT-IP):** `protocol/masque/endpoint.go` (валидация `validateMasqueOptions`, lifecycle) → `common/masque/runtime.go` (`Runtime`/ретраи, без router) → `transport/masque/transport.go` (**`coreSession`**: QUIC/H3, `ListenPacket` / `DialContext` / `OpenIPSession`, ветки CONNECT-UDP vs `connect_ip`) → `third_party/connect-ip-go` + `third_party/masque-go` (RFC bootstrap CONNECT/stream/UDP). **TCP в TUN-only:** netstack **`transport/masque/netstack_adapter.go`** при **`transport_mode=connect_ip`**; клиент **`tcp_transport=connect_ip`** запрещён.
-
-**Вертикаль сервера CONNECT-IP (packet-only):** `protocol/masque/endpoint_server.go` — HTTP/3 CONNECT-IP после **`Proxy`**: **`AssignAddresses`** → **`AdvertiseRoute`** (контекст с коротким таймаутом в коде), затем **`connectIPNetPacketConn`** → **`routePacketConnectionExBypassTunnelWrapper`** (**`Router.RoutePacketConnectionEx`**; без TCP-bridge для CONNECT-IP на сервере). На sink из packet plane — **UDP payload**, отдельно от stream **`handleTCPConnectRequest`**. **`connectIPNetPacketConn.ReadPacket`** (`*buf.Buffer`): после **`parseIPDestinationAndPayload`** срез полезной нагрузки — через **`Advance`/`Truncate`** (без **`copy`/memmove** всего UDP payload на каждый пакет). Клиентский dataplane шёл через **`connectIPPacketSession`** в **`transport/masque`** (инкремент **`connectIPCounters`** + **`maybeEmitConnectIPActiveSnapshot`**); серверный **`connectIPNetPacketConn`** исторически вызывал только **`connectip.Conn`** и давал **нулевой** **`delta_server`** при живом трафике — зеркалирование: **`ObserveConnectIPServerReadError`**, **`ObserveConnectIPServerReadSuccess`**, **`ObserveConnectIPServerWriteIteration`** (transport, вызываются из **`endpoint_server.go`**). В **`CONNECT_IP_OBS`** поле **`connect_ip_server_parse_drop_total`** отражает молчащие отбросы при **`parseIPDestinationAndPayload`** (см. **`connectIPServerParseDropTotal`**, init-регистрация в **`protocol/masque/connect_ip_obs_register.go`**; тело **`RegisterConnectIPServerParseDropSupplier`** и вставка ключа в **`ConnectIPObservabilitySnapshot`** — **`transport/masque/transport.go`**). Без линковки **`protocol/masque`** поле в клиентском процессе может отсутствовать — нормально для peer-split-триажа.
-
-**Фабрики transport:** только **`CoreClientFactory`** / **`DirectClientFactory`** (`transport/masque/transport.go`) — без legacy alias.
-
-**Граница `common/masque`:** не тянет **router** sing-box — только runtime/factory abstraction; см. **`IDEAL-MASQUE-ARCHITECTURE.md`**, глава 3 (снижает циклы зависимостей).
-
-**Runtime API (диагностика):** помимо **`IsReady()`** — **`LifecycleState()`** / **`LastError()`**; при **`Connecting`/`Degraded`/`Reconnecting`** ошибки старта не «глотаются»: dial/listen отдают контекст через **`errors.Join`** — для triage «runtime is not ready» сначала **`LastError()`** (канон — **IDEAL**, глава 3).
-
-**Runtime bootstrap (`common/masque/runtime.go`):** до **3** попыток **`NewSession`** с коротким backoff; при старте новой сессии согласованно сбрасываются старая сессия и **`ipPlane`** (**`transport_mode=connect_ip`**). Граф состояний: **`Init`→`Connecting`→`Ready`/`Degraded`/`Reconnecting`→`Closed`**.
-
-**Владение CONNECT-IP / reuse:** закрытие обёртки **`connectIPPacketSession`** не разрывает общий **`connectip.Conn`** — только teardown **`coreSession`**; повторные **`OpenIPSession`** переиспользуют один **`Conn`** (**`openIPSessionLocked`**). Иначе гонки с netstack-пакетной плоскостью (см. **IDEAL**, глава 3).
-
-**Лаб-env потолка датаграммы:** **`HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX`** (**1280..65535**) — поднять верхний кламп эффективного **`datagramCeiling`** в **`CoreClientFactory.NewSession`** выше прод-дефолта (**1500** path); без переменной поведение прода не меняется (**IDEAL**, глава 1).
-
-**MTU / путь QUIC (triage bulk, три уровня):** **`tun_mtu`** — локальный MTU интерфейса ОС (**IDEAL**, глава 1); **`masque_datagram_ceiling`** / **`datagramCeiling`** — потолок полной IP-датаграммы в CONNECT-IP; **`quic_initial_packet_size`** и Path MTU в **`quic-go`** (`newMasqueQUICConfig`) — отдельный контур (**IDEAL**, главы 1 и 5). Смешение уровней при отладке даёт ложные loss / PTB / hash drift.
-
-**CONNECT-IP на wire (HTTP Datagram):** **Context ID = 0** — полная IP-датаграмма; капсулы (`ADDRESS_ASSIGN`, `ROUTE_ADVERTISEMENT`, …) и проверки назначенных префиксов/маршрутов — в **`third_party/connect-ip-go`** и ветках **`connectIP*`** transport/protocol. Рассинхрон капсул с фактическими префиксами на приёме даёт отброс или fail-fast по политике, а не «тихую» потерю bulk (**IDEAL**, глава 4).
-
-**UDP-мост vs сырой IP (CONNECT-IP):** два пути на одной **`IPPacketSession`** — **`connectIPUDPPacketConn`** (IPv4 UDP-оболочка, фрагментация по PMTU) и сырой IP через **`netstack_adapter`**; в продукте UDP-мост **IPv4-only** (IPv6 bridge не в PASS-контуре CI, IDEAL §5). На серверном sink после **`connectIPNetPacketConn`** в маршрут уходит **UDP payload**, не сырой IP — иначе дрейф bulk/hash.
-
-**TTL/Hop Limit (CONNECT-IP, connect-ip-go):** один декремент в **`composeDatagram`** на одну попытку записи; повторная отправка **того же** буфера снова уменьшит TTL/Hop Limit — типичный паттерн выше **`Conn`** (например **`netstack_adapter.writePacketWithRetry`**) — **копия буфера на каждую попытку**.
-
-**ICMP / PTB на сервере:** ретрансляция ICMP feedback в **`connectIPNetPacketConn.writeOutgoingWithICMPRelay`** (`endpoint_server.go`) ограничена **`connectIPMaxICMPRelay`** (**8**) — при подозрении на PTB-loop сверять этот контур вместе с **`connect_ip_ptb_*`**.
-
-**Семантика `connect_ip_engine_effective_udp_payload` (клиент, снимок OBS):** это **максимальный размер UDP payload** внутри **IPv4+UDP датаграммы**, которую собирает **`connectIPUDPPacketConn`** (`transport/masque/transport.go`, **`newConnectIPUDPPacketConn`**), верхняя граница **`datagramCeiling − 28`** (IPv4 20 + UDP 8); при минимальном **`datagramCeiling` 1280** получается **1252** — не путать с чистым размером кадра HTTP/3 DATAGRAM на wire (там добавляются оболочки CONNECT-IP/QUIC).
-
-**UDP-мост `WriteTo` (bridge egress):** периодически вызывать только **`yieldFn`** (по умолчанию **`runtime.Gosched`**), без **wall-clock `Sleep`**, завязанного на нулевой **`engine_ingress`/`bridge_read_exit`**. Односторонний **`tcp_ip` bulk** легально не даёт ingress на клиентском bridge — искусственный backoff по этим счётчикам не коррелирует с перегрузкой QUIC и на грубом таймере ОС режет goodput. **OBS `maybeEmitConnectIPActiveSnapshot`** на мостовом egress — только из **`connectIPPacketSession.WritePacket`**; второй вызов из **`connectIPUDPPacketConn.WriteTo`** давал лишний **`time.Now`/CAS на каждую датаграмму.
-
-**Локальный источник UDP-мост / netstack:** синтетический IPv4/IPv6 до прихода **`ADDRESS_ASSIGN`** должен совпадать с тем, что сервер реально назначает peer (в **`protocol/masque/endpoint_server.go`** по умолчанию **198.18.0.1/32**, **fd00::1/128**). Иначе входящие IP-датаграммы отбрасываются в **`third_party/connect-ip-go`** (`handleIncomingProxiedPacket`, dst ∉ assigned). Ожидание **`LocalPrefixes`** при создании моста/netstack не должно цепляться за уже отменённый **`ctx`** вызывающего **`ListenPacket`** — иначе префикс не подтягивается и остаётся fallback.
-
-**HTTP/3 DATAGRAM → stream:** в **`replace/quic-go-patched/http3/conn.go`** `receiveDatagrams` кладёт payload в очередь только если **`streams[streamID]`** найден; иначе счётчик **`stream_not_found`** (`http3_datagram_dispatch_path_total`) и **тихий drop** — типичный сигнал рассинхрона quarter-stream-id и зарегистрированного **`TrackStream`** CONNECT-IP потока.
-
-**HTTP/3 per-stream DATAGRAM backlog:** очередь в **`replace/quic-go-patched/http3/state_tracking_stream.go`** (`streamDatagramQueueLen`, сейчас **1024** кадра на поток — буфер между QUIC-приёмом и drain `ReceiveDatagram` на CONNECT-IP). При заполнении `enqueueDatagram` **молча дропает** → **`http3_stream_datagram_queue_drop_total`**; QUIC приём буферизует до **`maxDatagramRcvQueueLen`** (**`replace/quic-go-patched/datagram_queue.go`**). **Триаж:** при **`drop_total`** > **0** и bulk-loss — главный подозреваемый; при **`drop_total`** = **0** не списывать stall на этот слой (**см.`delta_client`/`merged`**). На реальном прогоне Windows Docker (**`MASQUE_STAND_SLOW_DOCKER=1`**, **20 MiB**, **`--udp-send-bps 140000000`**) при **`http3_stream_datagram_queue_drop_total: 0`** и **`near_full_loss_under_cadence`** потери нужно искать **ниже/вне** per-stream backlog (маршрут до sink, `socat`, хост-диспечеризация, merged **`delta`** без QUIC на сервере — сверять peer-split **`delta_server`**).
-
-**Приём CONNECT-IP bulk на медленном Docker:** при **`MASQUE_STAND_SLOW_DOCKER=1`** и **`--udp-send-bps ≥ 100000000`** раннер поднимает потолки receive-phase slack и near-full доп. ожидания (**`/_tcp_ip_receive_phase_tail_cap_sec`** / **`_tcp_ip_near_full_extra_cap_sec`** в **`masque_stand_runner.py`**) — только хвост по времени, **ratio/hash** без ослабления; в CI без этих env поведение прежнее.
-
-**Исходящий HTTP/3 DATAGRAM (патч QUIC):** капсула собирается в буфер из **`AcquireHTTP3DatagramBuffer`**, в очередь ставится **`(*Conn).EnqueuePooledHTTPDatagram`** — без второго `make+copy` внутри старого **`SendDatagram`**. У **`wire.DatagramFrame`** поле **`OutgoingPayloadRelease`**: пул освобождается после сериализации в packer, при discard «не влезло в пакет» и при drain send-queue в **`CloseWithError`**. Внешний **`SendDatagram([]byte)`** по-прежнему копирует данные в пул и шарит тот же контур.
-
-**OBS peer-split (`delta_client` / `delta_server`):** merged/`observability_delta` частично суммирует процессы; **`connect_ip_receive_datagram_*`**, **`http3_datagram_dispatch_path_total`** и QUIC ingress на **клиенте** vs **сервере** различать явно (**`observability_peer_split`** в JSON раннера). Для uni-directional bulk на sink не путать серверный **`enqueue_ok`** с клиентским приёмом.
-
-**Резерв OBS `connect_ip_bypass_listenpacket_total`:** поле в снимке CONNECT-IP для bypass/`ListenPacket`; инкремента может не быть, пока bypass-путь не включён — нулевое значение **не** доказывает «нет обхода» без сверки с кодом (**IDEAL**, глава 7).
-
-**Счётчики UDP-моста (не смешивать смысл):** в **`transport/masque/transport.go`**, тип **`connectIPUDPPacketConn`**: **`connect_ip_engine_classified_total`** инкрементируется после успешного **`WritePacket`** в **`WriteTo`**, параллельно с **`connect_ip_bridge_write_ok_*`** — это не входящий **`ReadFrom`/ingress**. Рост **`connect_ip_engine_ingress_total`** только после успешного разбора пакета в **`ReadFrom`** (после **`session.ReadPacket`**). Если **`connect_ip_bridge_readpacket_enter_total` ≥ 1**, а **`connect_ip_bridge_readpacket_return_total`** = 0 до снимка — вызов залип внутри `session.ReadPacket`. Для triage write-path дополнительно держать в snapshot `connect_ip_bridge_udp_tx_attempt_total` / `connect_ip_bridge_build_total` / `connect_ip_bridge_write_enter_total` / `connect_ip_bridge_write_chunk_total` / `connect_ip_bridge_write_err_reason_total`.
-
-**Cadence эмита CONNECT-IP OBS:** `maybeEmitConnectIPActiveSnapshot` троттлит по `lastActiveEmitUnixMilli` (окно ~1s). Для коротких bulk-window (`send_elapsed` < 1s) write-path может дать только один delta-снимок, даже при полном объёме доставки; это диагностический артефакт эмита, а не автоматическое доказательство single-packet dataplane.
-
-**`bridge_boundary_stall` (раннер):** **`masque_stand_runner.py`**, классификация при источнике **`runtime_snapshot_log_marker`**, неполном **`bytes_received`**: попытки UDP-моста, **`connect_ip_packet_rx_total`** = 0 и **`connect_ip_engine_ingress_total`** = 0 при подтверждённом tx; узкий случай **`post_send_frame_visibility_absent`** отделяется по нулевому **`contains_datagram_frame`**/`pre_ingress` на merged delta при ненулевом **`sendmsg_ok`**.
-
-**Route/iface guard в раннере (`tcp_ip`):** кроме `route_probe`/`route_on_tun0`, фиксировать `tun0_dev_bytes` (`before/after/delta/activity`) из `/proc/net/dev` внутри `masque-client-core`; ненулевой `tx_bytes` при пустом `delta_server` — сигнал рассинхрона observability peer-split, а не автоматическое доказательство bypass.
-
-**Стенд `MASQUE_UDP_RATE_BPS` / `--udp-send-bps`:** в `_TCP_IP_SEND_UDP_PACED` пауза считается как **`sent / RATE_BPS`** — фактически **байт/с** (наследованное имя). Сценарий **`tcp_ip` `bulk_single_flow`** пробрасывает **`--udp-send-bps`** в этот env; **`timeout`** вокруг отправителя расширяется до **`ceil(byte_count/rate)+slack`**, иначе пейсинг бессмысленен при малом **`strict_budget`**. Без пейса на Windows Desktop клиент успевает сгенерировать **~250–850** QUIC DATAGRAM, тогда как с пейсом — тысячи; при этом **`quic_datagram_ingress` `enqueue_ok`** на merged delta может оставаться **~1** — смотреть **`delta_server`** и доставку на sink. Если после основного окна до **`phase_deadline`** на приёмнике **`got ≥ 99.5%`** ожидаемого объёма, раннер делает **ограниченный** доп. `wait_for_bytes` (константы **`BULK_TCP_IP_NEAR_FULL_RECV_*`** в **`masque_stand_runner.py`**) — только время на drain хвоста, критерии **байты + SHA256** не ослабляются.
-
-**Буферы socket в `tcp_ip` stand (socat/sender):** для **`MASQUE_STAND_SLOW_DOCKER=1`** и **`--udp-send-bps ≥ 100000000`** раннер поднимает UDP `rcvbuf` sink и `SO_SNDBUF` sender до **64 MiB** (override: **`MASQUE_TCP_IP_SOCKET_BUF_BYTES`** с clamp **256 KiB..128 MiB**); `near_full` доп. ожидание жёстко ограничено остатком до **`phase_deadline`** (без ухода за бюджет фазы).
-
-**Sink boundary triage (`tcp_ip`):** при near-full timeout смотреть `sink_udp_diag` не только по `ss/netstat`, но и по `udp_snmp` (`/proc/net/snmp`, поля `InErrors/RcvbufErrors`) + `sink_file_stat` (`wc -c /tmp/ip-connect-ip-python.bin`), чтобы отделить packet-plane drops от file-writer/flush проблем внутри sink-контейнера.
-**UDP SNMP progress (lab triage):** в `sink_udp_diag` фиксировать `udp_snmp_sample_1/sample_2` и дельты (`delta_in_datagrams`, `delta_in_errors`, `delta_rcvbuf_errors`), чтобы отделять «счётчик не растёт после send» от накопленного абсолютного значения `InDatagrams`.
-**Кумулятивность `Udp.InDatagrams`:** для классификации текущего прогона предпочитать `udp_snmp_progress.delta_in_datagrams`; абсолютный `InDatagrams` может включать трафик прошлых запусков и маскировать недобор текущего `expected_datagrams`.
-**Typed sink boundary stop reason:** при `receiver_settled=false`, `late_growth_bytes=0` и `udp_snmp.InErrors=0` раннер помечает `stop_reason=sink_writer_boundary_no_udp_errors` (граница sink file-writer/flush vs packet-plane без ослабления hash/ratio).
-**`writer_idle_vs_blocked` (summary):** derived-сигнал в `writer_summary` (`idle_no_progress` / `blocked_after_write` / `writer_progressing` / `external_file_growth`) классифицирует состояние sink writer по дельтам `size/mtime/proc_write_bytes`; используется только для triage и не меняет PASS/FAIL контракт.
-
-**Quic stack (наблюдаемость):** при расследовании залипания отправки смотреть **`quic_datagram_send_write_path_total`**: расхождение **`write_attempt` vs `write_ok`** вместе с **`send_loop_enter`** подсказывает, застряла ли упаковка/отправка относительно **`sendmsg_ok`**. **Пакер 1-RTT (`packet_packer.composeNextPacket`):** если очередной DATAGRAM не влезает в оставшийся payload текущего QUIC-пакета и в пакете ещё нет ACK, upstream **молча снимает** кадр с TX-очереди — это необратимая потерь на unreliable-пути; процессный счётчик **`quic_datagram_packer_oversize_drop_total`** (`quic.DatagramPackerOversizeDropTotal`) и строка в **`CONNECT_IP_OBS`** позволяют отличить этот bucket от H3/stream-queue/rcv-drop.
-
-**Классы ошибок / observability:** **policy \| capability \| transport \| dial \| lifecycle**; ключи счётчиков CONNECT-IP и perf JSON — **`IDEAL-MASQUE-ARCHITECTURE.md`**, глава 7, и **`hiddify-core/docs/masque-perf-gates.md`**.
-
-**Стенд / артефакты:** Compose `experiments/router/stand/l3router/docker-compose.masque-e2e.yml`; раннер **`masque_stand_runner.py`** из каталога **`experiments/router/stand/l3router`** (от корня `hiddify-app`); **исходники JSON, монтируемые в контейнеры:** **`experiments/router/stand/l3router/configs/`** (`masque-server.json`, `masque-client-connect-ip.json` и варианты — согласовать с **`validateMasqueOptions`**, это не произвольный «внешний» профиль). **Канон для аудита MASQUE в этом каталоге:** только файлы вида **`masque-*.json`**; прочие (`hiddify-minexp/`, `client.reality-*.json`, …) — смежные l3router-профили, не смешивать с проверкой полей эндпоинта и compose-матрицей без отдельной задачи. После прогона — **`docker compose -f docker-compose.masque-e2e.yml down -v`** как в CI; образ **`sing-box-masque-e2e:local`** подхватывает **`artifacts/sing-box-linux-amd64`**. Если слой Dockerfile с `COPY` закэширован, а бинарь менялся — пересборка с **`SINGBOX_ARTIFACT_STAMP`** (compose `build.args`) или **`--no-cache`**. Gates: `masque_runtime_ci_gate_asserts.py`, итог `masque_runtime_contract_validator.py`. Сборка бинаря как в CI: cwd **`hiddify-core/hiddify-sing-box`**, `GOOS=linux GOARCH=amd64`, `CGO_ENABLED=0`, **`-tags with_masque`**, вывод **`../../experiments/router/stand/l3router/artifacts/sing-box-linux-amd64`** (**`../../`** из sing-box-поддиректории попадает в корень монорепо **`hiddify-app`**). Точка входа: `./cmd/sing-box`. **Правило скоростной матрицы:** следующий прогон строить как **`max_pass` + `next_boundary`** (первый уровень выше текущего `max_pass`, где ранее был `fail`) и фиксировать оба значения в runtime-артефакте.
-
-**Стенд, Python без Compose:** после правок **`masque_stand_runner.py`** / **`masque_runtime_contract_validator.py`** / **`masque_runtime_ci_gate_asserts.py`** — cwd **`experiments/router/stand/l3router`**, быстрый контрактный прогон: **`python -m unittest test_masque_runtime_contract_validator test_masque_runtime_ci_gate_asserts test_masque_stand_runner_smoke_contract`** (соседние модули на **`sys.path`**; не замена e2e).
-
-**Пути и `ci.yml`:** в **`hiddify-core/.github/workflows/ci.yml`** job **`masque-gates`** задаёт **`cd hiddify-sing-box`** и **`../../experiments/...`** от корня **одного** репозитория `hiddify-core`; в монорепо **`hiddify-app`** те же команды выполняются с cwd **`hiddify-core/hiddify-sing-box`** и **`experiments/router/stand/l3router`** (эквивалентная геометрия путей).
-
-**Топология compose e2e (якорь):** **`masque-server-core`** — listener **`:8443`**, **10.200.0.3** на сети **`masque-backend`** (плюс **`masque-public`**); **`masque-client-core`** — **`masque-public`**; **`iperf-server`** (sink/load) — **10.200.0.2** на **`masque-backend`**. Дефолтные конфиги в volume: **`configs/masque-server.json`**, **`configs/masque-client-connect-ip.json`**.
-
-**Имена job в CI (не путать):** блокирующий PR/push пайплайн **`masque-gates`** (`hiddify-core/.github/workflows/ci.yml`); загрузка артефактов ран-тайма с него исторически называется **`masque-gates-runtime`** (ключ `upload-artifact`). Ночной perf-матрикс **`--stress`/`iperf`/`--assert-nightly-perf-thresholds`** живёт в отдельном job **`masque-nightly-perf`** (ветка **`schedule`**), не в **`masque-gates`**.
-
-**Локальный `masque_runtime_contract_validator` (`--assert-schema`, `--assert-*`):** строки **`anti_bypass`/parity с summary** зависят от артефактов после шага **`masque_runtime_ci_gate_asserts.py --run-anti-bypass-negative-control ...`** (порядок как в **`masque-gates`**). После только **`masque_stand_runner.py --scenario all`** без negatives — ожидаемый FAILED parity до прогона anti-bypass.
-
-**In-process HTTP/3 CONNECT proxy в тестах** (`transport/masque/transport_test.go`, **`startInProcessTCPConnectProxy`**): один **`t.Cleanup`** — **`http3.Server.Close()`** → **`WaitGroup.Wait()`** на выходе **`Serve(PacketConn)`** → **`UDPConn.Close()`**. Два независимых cleanup (закрытие UDP до завершения `Serve`) давали гонку с **`-race`** на Windows (**`0xc0000005`**, не data race); паритет с Linux CI не отменяет корректный порядок shutdown в harness.
-
-**Порядок `masque-gates`:** только по **`ci.yml`**; **точная** последовательность шагов — по полю **`name:`** у **`steps`** в job **`masque-gates`** (в логах GitHub Actions заголовки шагов совпадают с этими именами). Кратко для навигации: unit/race → fast regression → fast integration → non-auth → lifecycle → build linux artifact → smoke → strict `tcp_ip` (объёмы) → `tcp_ip_scoped` → anti-bypass negatives → contract validator + typed asserts. Локальный быстрый срез (не замена CI):  
-`go test -count=1 -short -tags with_masque ./protocol/masque/... ./transport/masque/...`  
-parity с unit gate CI: добавить `./common/masque/... ./include/...`; race/integration — см. workflow.
-
-**Локальный полный replay `masque-gates` (вне GitHub Actions):** повторять шаги job в порядке **`name:`** из **`hiddify-core/.github/workflows/ci.yml`**; шаг **CONNECT-STREAM non-auth matrix** запускается из **`hiddify-sing-box`** с путём **`../../experiments/router/stand/l3router/masque_runtime_ci_gate_asserts.py`**. Шаг **fast integration** включает **`go test -C third_party/connect-ip-go ...`** — у **`go test`** флаг **`-C`** должен быть **первым** среди аргументов **`go test`** (иначе ошибка «`-C flag must be first`»). **`go test -race`** для паритета с Ubuntu — по возможности на Linux/WSL; на Windows см. осторожности в §6.
-
-**Triage-сводка (без расшифровки каждого счётчика):** merged **`observability_delta`** может быть **max** по процессам; для forward DATAGRAM **client→server** смотреть **`delta_server`** (`post_decrypt`, `ingress`), для исходящего клиента — **`delta_client`** (`sendmsg_ok`, очередь send). Разрыв **`sendmsg_ok` ≫ server `short_unpack_ok`** при нулевых `quic_packet_receive_drop_*`: сверять **`transport_read_packet_total`** на сервере vs send; затем wire/pcap до `:8443` vs хост Docker. Классы стоп-причин раннера (`bridge_boundary_stall`, `post_send_frame_visibility_absent`, …) — в Python-раннере/validator; детальные сигнатуры starvation, http3/quic queues, frame-mix, **co-pack DATAGRAM с ACK-only** (`packet_packer`) — **`AGENT-LAYER-SOURCE-OF-TRUTH.md`** и связанные runbooks.
-
-**Локально Windows:** `go test -race` — **`CGO_ENABLED=1`**; после cross-build Linux сбросить **`GOOS`/`GOARCH`**. PowerShell: цепочки через **`;`**, не `&&`. WSL bash: использовать **`docker`**, не `docker.exe`. Для **`go test -C <dir>`** (как в **`masque-gates`** для **`third_party/connect-ip-go`**): следующий после **`go test`** аргумент — **`-C`**, затем путь директории, затем остальное (**`-count`**, **`-run`**, пакеты); вызовы вида **`go test -count=1 -C …`** в одной строке **невалидны** («`-C flag must be first`» — флаг не считается первым). Пример: **`go test -C third_party/connect-ip-go -count=1 -run '…' .`**. Harness in-process HTTP/3 proxy в **`transport_test`** после фикса сериализации shutdown проходит **`-race`** на Windows; иной **access violation** — смотреть двойное закрытие **`PacketConn`** / фоновые горутины quic. Комбинация **`-race -short`** с подмешиванием TLS/QUIC на этом хосте иногда даёт **`0xc0000005`** в **`crypto/tls`** — для паритета с **job `masque-gates`** использовать **`-race`** без **`-short`** на затронутых пакетах.
-
-**Python-раннер, host `go test`:** сценарий **`tcp_ip_scoped`** (и смежные harness) вызывает **`go test`** с **`cwd=hiddify-core/hiddify-sing-box`**; родительские **`GOOS`/`GOARCH`** (типично после **`GOOS=linux go build`** на Windows/Mac) давали ELF `*.test` и ошибку **`%1 is not a valid Win32 application`**. Обход: **`_env_for_host_go_test()`** в **`masque_stand_runner.py`** перед harness сбрасывает **`GOOS`/`GOARCH`**; оператор может вручную **`Remove-Item Env:GOOS, Env:GOARCH`** перед раннером.
-
-**CONNECT-IP / netstack MTU:** MTU виртуальной NIC netstack (**`connectIPTCPNetstackFactory`**) выравнивается с **`datagramCeiling`** — это отдельный контур от **`tun_mtu`** и от QUIC Path MTU; см. **IDEAL** главу 5.
-
-**Lifecycle CONNECT-IP (staged closure):** в стабильных успешных прогонах типичный **`ErrTCPStackInit`** не является нормой; чеклист и текст — **`hiddify-core/docs/masque-connect-ip-staged-closure.md`** + **IDEAL** глава 8 (**канон против устаревшего «`tcp_transport=connect_ip` enabled»** там же).
-
-**Валидация конфигурации (якоря, не дубль IDEAL):** для TCP в проде **`tcp_transport=auto` запрещён** (нужен явный режим, обычно **`connect_stream`**); **`quic_experimental`** допускается только при **`MASQUE_EXPERIMENTAL_QUIC=1`**. Цепочка: **`hop_policy=chain`** требует **`hops[]`** с уникальными **`tag`** и согласованный граф через **`CM.BuildChain`** (`common/masque`) — полное правило в **`IDEAL-MASQUE-ARCHITECTURE.md`** §1–3 и **`protocol/masque/endpoint.go`**. Скрытые миграции с legacy **`warp`** или неформализованными старыми путями конфига запрещены (**IDEAL**, глава 1).
-
-**Конфиг / отказ записи CONNECT-IP:** поля **`udp_timeout`**, **`workers`** не поддерживаются — ошибка валидации в **`endpoint.go`** (**IDEAL**, глава 1). Запись IP-пакета с **`len > datagramCeiling`** режется до QUIC как **`ceiling_reject`** / событие **`packet_write_fail_ceiling`** (**`connectIPPacketSession.WritePacket`**); не смешивать с дропами HTTP/3 backlog и циклом PTB (**IDEAL**, главы 1 и 4).
-
-**Third-party RFC-слои (где искать wire):** **`third_party/masque-go`** — bootstrap CONNECT/stream/UDP (MASQUE/H3); **`third_party/connect-ip-go`** — IP-датаграммы и TTL/PTB на **`Conn`**. Из **`hiddify-sing-box`** для tuple/IPv6: **`go test -C third_party/connect-ip-go -run TestPacketTupleRejectsAmbiguousIPv6ExtensionChain .`** (как в **`masque-gates`**).
-
-**Hot path packet-builder (CONNECT-IP UDP bridge):** в `transport/masque/transport.go` для IPv4 на **`WriteTo`**: DST из **`UDPAddr`** через **`IP.To4()`** + литерал **`[4]byte`** (не **`netip.AddrFromSlice`**); на **`ReadFrom`/parse**: src IPv4 из фиксированных байт заголовка — **`netip.AddrFrom4`**; сборка кадра — **`As4()` + inplace-буфер**, без **`netip.Addr.AsSlice()`** в горячем цикле.
-
-## 7) Current autonomous cycle (overwrite each iteration)
-
-- **Матрица скорости (обязательно обновлять в каждой итерации):**
-  1. **Отправная точка (current baseline):** `20 MiB`, `tcp_ip`, `bulk_single_flow`, `--udp-send-bps` (байт/с).
-  2. **Устойчивая PASS-точка:** `130000000` (`2/2 PASS` ранее, без потерь и с hash OK).
-  3. **Boundary @140M, strict повторы (история FAIL):**
-     - FAIL #1: `MASQUE_STAND_SLOW_DOCKER=1`, `MASQUE_TCP_IP_SOCKET_BUF_BYTES=134217728`, `python masque_stand_runner.py --scenario tcp_ip --megabytes 20 --tcp-ip-mode bulk_single_flow --udp-send-bps 140000000` → `bytes_received=20834396`, `loss_bytes=137124`, `loss_pct=0.6539`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.178`, `stop_reason=budget_exceeded`, `ok=false`.
-     - FAIL #2: те же env/команда → `bytes_received=20957456`, `loss_bytes=14064`, `loss_pct=0.0671`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.214`, `stop_reason=sink_writer_boundary_no_udp_errors`, `ok=false`.
-     - FAIL #3: те же env/команда → `bytes_received=20941048`, `loss_bytes=30472`, `loss_pct=0.1453`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.194`, `stop_reason=sink_writer_boundary_no_udp_errors`, `ok=false`.
-  4. **Контроль после правки классификатора (1 повтор @140M):**
-     - FAIL: те же env/команда → `bytes_received=20937532`, `loss_bytes=33988`, `loss_pct=0.1621`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.086`, `stop_reason=sink_writer_boundary_no_udp_errors`, `stop_reason_source=runtime_observability`, `ok=false`.
-  5. **Контроль после добавления `writer_samples` (1 повтор @140M):**
-     - FAIL: те же env/команда → `bytes_received=20881276`, `loss_bytes=90244`, `loss_pct=0.4303`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.101`, `stop_reason=sink_writer_boundary_no_udp_errors`, `stop_reason_source=runtime_observability`, `ok=false`.
-  6. **Контроль после добавления `writer_summary` + derived полей (1 повтор @140M):**
-     - FAIL: те же env/команда → `bytes_received=20956284`, `loss_bytes=15236`, `loss_pct=0.0727`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.217`, `stop_reason=sink_writer_boundary_no_udp_errors`, `stop_reason_source=runtime_observability`, `delta_client_sendmsg_ok=0`, `delta_server_packet_rx=1`, `sink_writer_progress_bytes=0`, `ok=false`.
-  7. **Эксперимент `MASQUE_STAND_UDP_CHUNK=1200` @140M (1 повтор):**
-     - FAIL: `MASQUE_STAND_SLOW_DOCKER=1`, `MASQUE_TCP_IP_SOCKET_BUF_BYTES=134217728`, `MASQUE_STAND_UDP_CHUNK=1200`, та же команда `tcp_ip` → `bytes_received=20951596`, `loss_bytes=19924`, `loss_pct=0.0950`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.141`, `stop_reason=sink_writer_boundary_no_udp_errors`, `delta_server_packet_rx=1`, `sink_writer_progress_bytes=0`, `ok=false`.
-  8. **Эксперимент `MASQUE_STAND_UDP_CHUNK=1000` @140M (1 повтор):**
-     - PASS: `MASQUE_STAND_SLOW_DOCKER=1`, `MASQUE_TCP_IP_SOCKET_BUF_BYTES=134217728`, `MASQUE_STAND_UDP_CHUNK=1000`, та же команда `tcp_ip` → `bytes_received=20971520`, `loss_bytes=0`, `loss_pct=0.0000`, `hash_ok=true`, `receiver_settled=true`, `late_growth_bytes=0`, `budget_margin_sec=357.935`, `stop_reason=none`, `datagram_size_effective=1172`, `ok=true`.
-  9. **Replay `MASQUE_STAND_UDP_CHUNK=1000` @140M (2-й повтор):**
-     - FAIL: те же env/команда → `bytes_received=20903544`, `loss_bytes=67976`, `loss_pct=0.3241`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.202`, `stop_reason=sink_writer_boundary_no_udp_errors`, `datagram_size_effective=1172`, `sink_writer_progress_bytes=0`, `ok=false`.
-  10. **Replay `MASQUE_STAND_UDP_CHUNK=1000` @140M (3-й повтор, новый):**
-     - FAIL: те же env/команда → `bytes_received=20876588`, `loss_bytes=94932`, `loss_pct=0.4527`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.105`, `stop_reason=sink_writer_boundary_no_udp_errors`, `delta_server_packet_rx=1`, `sink_writer_progress_bytes=0`, `writer_idle_vs_blocked=idle_no_progress`, `ok=false`.
-  11. **Replay `MASQUE_STAND_UDP_CHUNK=1000` @140M (4-й повтор, новый):**
-     - FAIL: те же env/команда → `bytes_received=20921124`, `loss_bytes=50396`, `loss_pct=0.2403`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.221`, `stop_reason=sink_writer_boundary_no_udp_errors`, `delta_server_packet_rx=1`, `sink_writer_progress_bytes=0`, `writer_idle_vs_blocked=idle_no_progress`, `ok=false`.
-  12. **После фикса runner chunk/probe: валидный `MASQUE_STAND_UDP_CHUNK=1000` @140M (1 повтор):**
-     - FAIL: те же env/команда → `bytes_received=20955520`, `loss_bytes=16000`, `loss_pct=0.0763`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.133`, `stop_reason=sink_writer_boundary_no_udp_errors`, `datagram_size_effective=1000`, `sink_udp_expected_datagrams=20972`, `sink_udp_snmp.InDatagrams=20956`, `ok=false`.
-  13. **После typed `sink_udp_ingress_datagram_gap_no_udp_errors`: валидный `MASQUE_STAND_UDP_CHUNK=1000` @140M (2-й повтор):**
-     - FAIL: те же env/команда → `bytes_received=20961520`, `loss_bytes=10000`, `loss_pct=0.0477`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.217`, `stop_reason=sink_udp_ingress_datagram_gap_no_udp_errors`, `datagram_size_effective=1000`, `sink_udp_expected_datagrams=20972`, `sink_udp_snmp.InDatagrams=20962`, `sink_udp_datagram_gap=10`, `ok=false`.
- 14. **Boundary replay после фикса delta-priority (`MASQUE_STAND_UDP_CHUNK=1000` @140M, новый):**
- - FAIL: `MASQUE_STAND_SLOW_DOCKER=1`, `MASQUE_TCP_IP_SOCKET_BUF_BYTES=134217728`, `MASQUE_STAND_UDP_CHUNK=1000`, `python masque_stand_runner.py --scenario tcp_ip --megabytes 20 --tcp-ip-mode bulk_single_flow --udp-send-bps 140000000` → `bytes_received=20894520`, `loss_bytes=77000`, `loss_pct=0.3672`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.210`, `stop_reason=sink_udp_ingress_datagram_gap_no_udp_errors`, `datagram_size_effective=1000`, `sink_udp_expected_datagrams=20972`, `sink_udp_snmp.InDatagrams=20895`, `sink_udp_in_datagrams_delta=0`, `sink_udp_datagram_gap=77`, `writer_idle_vs_blocked=idle_no_progress`, `ok=false`.
- 15. **Boundary @140M chunk=1000 после lock-free hot-path рефактора (1 повтор):**
- - FAIL: `MASQUE_STAND_SLOW_DOCKER=1`, `MASQUE_TCP_IP_SOCKET_BUF_BYTES=134217728`, `MASQUE_STAND_UDP_CHUNK=1000`, та же команда → `bytes_received=20891520`, `loss_bytes=80000`, `loss_pct=0.3815`, `hash_ok=false`, `receiver_settled=false`, `late_growth_bytes=0`, `budget_margin_sec=-0.210`, `stop_reason=sink_udp_ingress_datagram_gap_no_udp_errors`, `datagram_size_effective=1000`, `sink_udp_expected_datagrams=20972`, `sink_udp_snmp.InDatagrams=20892`, `sink_udp_in_datagrams_delta=0`, `sink_udp_datagram_gap=80`, `writer_idle_vs_blocked=idle_no_progress`, `ok=false`. Размер потерь в той же полосе разброса (`14k..94k` байт) — изменения hot-path не регрессировали.
- Формат записи — только числовой и воспроизводимый по runtime-артефактам (`experiments/router/stand/l3router/runtime/*.json`).
-
-- **Дата:** 2026-05-07
-- **Старт итерации / текущий фокус:**
- - **QUIC DATAGRAM queue fairness (новое):** в `replace/quic-go-patched/datagram_queue.go` добавлен `Rotate()`; в `packet_packer.composeNextPacket` при ветке «DATAGRAM не влезает + ACK отсутствует» head кадр теперь сначала ротируется (если в очереди есть другие кадры), и packer пытается отправить следующий кадр в этом же цикле. При одиночном oversized head поведение drop сохранено (инкремент `DatagramPackerOversizeDropTotal` + `releaseOutgoingDatagramPayload` + `Pop`) во избежание вечного no-progress.
- - **Тест покрытия packer:** `replace/quic-go-patched/packet_packer_test.go` добавлен `TestPackLargeDatagramFrameRotatesQueueHead` (регрессия на HOL-блокировку очереди DATAGRAM).
- - Контрактные прогоны: `go test -C replace/quic-go-patched -count=1 -run "TestPackDatagramFrames|TestPackLargeDatagramFrame|TestPackLargeDatagramFrameRotatesQueueHead" .` — PASS; `go test -count=1 -short -tags with_masque ./transport/masque/...` — PASS.
-- **`hiddify-core` `HEAD`:** **`840b04064208da67ee915c4255b8bbc739f787db`** (локальные правки в submodule до коммита — пересчитать `git -C hiddify-core rev-parse HEAD` после фиксации).
-- **Лестница:** `max_pass=130000000`; рабочая гипотеза обновлена — к уже наблюдаемому `oversize_drop_total` добавлен второй фактор: HOL head в send-queue мог блокировать маленькие DATAGRAM позади oversized head при кратковременной усадке payload, теперь этот фактор снят ротацией.
-- **Boundary repro (последний зафиксированный артефакт):** `tcp_ip @140M chunk=1000` — **FAIL** (`loss_bytes=80000`, `sink_udp_datagram_gap=80`); Docker-реплей после правки packer в этой итерации не выполнялся.
-- **Источник истины по шагам CI:** **`hiddify-core/.github/workflows/ci.yml`**, job **`masque-gates`**.
-
-## 8) Next iteration tasks (single-thread, code-first)
-
-1. **Стенд-корреляция после queue-rotation:** `MASQUE_STAND_SLOW_DOCKER=1`, `MASQUE_TCP_IP_SOCKET_BUF_BYTES=134217728`, `MASQUE_STAND_UDP_CHUNK=1000`, `tcp_ip @140M` — минимум **3** прогона; сверить динамику `sink_udp_datagram_gap` до/после правки и корреляцию с `quic_datagram_packer_oversize_drop_total` при нулевых `http3_stream_datagram_queue_drop_total` / `quic_datagram_rcv_queue_drop_total`.
-2. **QUIC модульный replay:** прогон `go test -C replace/quic-go-patched -count=1 ./...` (минимум пакет `packet_packer` + `connection`) для отлова побочных эффектов ротации send-queue.
-3. **Анти-bypass negative control:** прогон `route_on_tun0=false` с проверкой `stop_reason=route_guard_target_not_on_tun0`, `error_class=policy`, `tun0_dev_bytes.activity=false`.
+- PASS у релевантных unit/race/integration.
+- PASS у целевой стендовой матрицы.
+- Изменения поведения отражены в коде + тестах.
+
+## 7) Current Autonomous Cycle (overwrite each iteration)
+
+- **Дата:** 2026-05-08
+- **`hiddify-core` HEAD:** `f17ac6f4c842adbe7de6b248c8e623e99d5f7ac7`
+- **Стенд (Docker + `masque_stand_runner`, `degrade_matrix`):**
+  - **10 MiB, лестница `100–150 mbit/s` (шаги 100/120/130/140/150):** CONNECT-IP — **PASS до 130 mbit/s** (`loss_pct=0`), **первый FAIL на 140 mbit/s** (~`0.056%` loss, `sink_udp_ingress_datagram_gap_no_udp_errors`), на **150 mbit/s** — ~`1.04%` loss + `budget_exceeded`. Артефакт: `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json`.
+  - **Большой объём:** **150 MiB** на **120 mbit/s** — небольшие потери (~**0.064%**); на **100 mbit/s** — **без потерь** (тот же тип прогона, отдельный запуск).
+- **Сводка рисков и пробелов (код + стенд + апстрим):** `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md`
+- **Текущая гипотеза:** деградация на границе **QUIC/HTTP3 DATAGRAM** (очереди/packer/PMTU) **и** **ingress sink vs runner budget**; triage только с peer-split и счётчиками `http3_*` / `quic_datagram_*` / PTU payload.
+
+## 8) Next Iteration Tasks (single-thread)
+
+1. Сначала закрывать незавершённые задачи из `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (минимум один пункт за итерацию).
+2. Матрица строго по правилу **`max_pass + next_boundary`**.
+3. Для каждого fail фиксировать stop reason + ключевые counters + loss/hash в runtime JSON.
+4. После правок hot path: тот же прогон матрицы и сравнение `max_pass/first_fail`.
+5. Отдельное правило интерпретации: зона `120–140 mbit/s` может давать fail/pass флаппинг, поэтому сама по себе не считается доказательством прогресса/регресса.
+6. Основной индикатор прогресса: устойчивый результат на `160 mbit/s+` (допускается проверять только его для экономии времени), при обязательном контроле корреляции потерь и stop-reason/counters, чтобы не пропустить реальный регресс.
+7. Если незавершённых задач нет: добавить минимум 1 новую проблему ядра в `docs/masque/AGENT-MASQUE-CORE-ISSUES.md`, продублировать её в §8 и начать исправление.
+8. Поддерживать §7 в компактном, числовом и воспроизводимом формате.
+
+## 9) Where Heavy Details Live
+
+Чтобы не раздувать `AGENTS.md`, подробности держать в профильных файлах:
+
+- Архитектура и wire semantics: `IDEAL-MASQUE-ARCHITECTURE.md`
+- Layer/boundary triage и observability-карты: `docs/masque/AGENT-LAYER-SOURCE-OF-TRUTH.md`
+- Команды и порядок локального replay: `docs/masque/AGENT-TEST-AND-STAND-RUNBOOK.md`, `docs/masque/AGENT-CI-REPLAY-CHEATSHEET.md`
+- RFC/CI контракты: `docs/masque/AGENT-RFC-CI-CONTRACTS.md`
+- История прогонов и числовые факты: `experiments/router/stand/l3router/runtime/*.json`
+- Риски деградации MASQUE / CONNECT-IP (чеклист): `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md`
+- Отдельный backlog новых проблем ядра (если текущий чеклист пуст): `docs/masque/AGENT-MASQUE-CORE-ISSUES.md`
