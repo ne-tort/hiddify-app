@@ -61,14 +61,14 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `288a1aad` — на горячем пути CONNECT-IP OBS: **`maybeEmitConnectIPActiveSnapshot`** больше не делает **`connectIPActiveObsSampleCounter.Add(1)` на каждом DATAGRAM до первого успешного `CAS(0→now)`**; после старта сессии логика 1 Гц и сэмплинг **1/128** без изменений.
-- **Стендовый артефакт:** `degrade_matrix` не получен — в WSL `docker compose ... up --build`: **нет pull образа `sing-box-masque-e2e`**, fallback **«compose build requires buildx 0.17 or later»**; восстановление baseline блокируется инфрой (buildx/login/локальный build образа вне патча ядра). Ошибочно сгенерированные `runtime/connect_ip_udp_degrade_matrix.json` / `masque_python_runner_summary.json` удалены, чтобы не подменять измерения.
-- **Код:** `hiddify-sing-box/transport/masque/transport.go` — только OBS cold path.
-- **Локально:** `go test -count=1 -short ./transport/masque/... ./protocol/masque/...` из `hiddify-sing-box` — PASS.
+- **`hiddify-core` HEAD:** `70910300` — **`maybeEmitConnectIPActiveSnapshot`**: убран отдельный атомарный счётчик сэмплирования; маска **1/128** и лимит **~1 Гц** применяются к **уже увеличенным** `packetRxTotal` / `packetTxTotal` (на один `Add(1)` меньше на каждый RX/TX кадр CONNECT-IP после первого `periodic_active`).
+- **Стендовый артефакт:** `degrade_matrix` не перегонялся на бинарнике с этим SHA. На Windows **Docker Desktop buildx 0.33**, `docker compose -f experiments/router/stand/l3router/docker-compose.masque-e2e.yml build` — **PASS**; образ использует **`artifacts/sing-box-linux-amd64` из стенда** (нужна пересборка артефакта из текущего ядра, чтобы матрица отражала патч).
+- **Код:** `hiddify-sing-box/transport/masque/transport.go` — hot path CONNECT-IP OBS.
+- **Локально:** `go test -count=1 -short ./transport/masque/... ./protocol/masque/...` — PASS.
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Разблокировать стенд: **Docker Buildx ≥0.17** (или локальная сборка сервисов compose без недоступного registry), затем снова `degrade_matrix` (лестница или якорь **130m/140m**) на бинарнике/образе с актуальным **`hiddify-core`**; обновлять `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованном peer-split и счётчиках.
+1. Собрать **`experiments/router/stand/l3router/artifacts/sing-box-linux-amd64`** из **`hiddify-core`** с актуальным HEAD (или взять CI-артефакт), пересобрать `sing-box-masque-e2e:local`, затем `degrade_matrix` (лестница **130m/140m** или якорь); обновлять `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованном peer-split и счётчиках.
 
 ## 9) Where Heavy Details Live
 
