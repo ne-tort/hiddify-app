@@ -61,14 +61,14 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `70910300` — **`maybeEmitConnectIPActiveSnapshot`**: убран отдельный атомарный счётчик сэмплирования; маска **1/128** и лимит **~1 Гц** применяются к **уже увеличенным** `packetRxTotal` / `packetTxTotal` (на один `Add(1)` меньше на каждый RX/TX кадр CONNECT-IP после первого `periodic_active`).
-- **Стендовый артефакт:** `degrade_matrix` не перегонялся на бинарнике с этим SHA. На Windows **Docker Desktop buildx 0.33**, `docker compose -f experiments/router/stand/l3router/docker-compose.masque-e2e.yml build` — **PASS**; образ использует **`artifacts/sing-box-linux-amd64` из стенда** (нужна пересборка артефакта из текущего ядра, чтобы матрица отражала патч).
-- **Код:** `hiddify-sing-box/transport/masque/transport.go` — hot path CONNECT-IP OBS.
-- **Локально:** `go test -count=1 -short ./transport/masque/... ./protocol/masque/...` — PASS.
+- **`hiddify-core` HEAD:** `6ea81bfa` — **`TryReceiveDatagram`** на HTTP/3 `state_trackingStream` + экспорт через `Stream`/`RequestStream`. **CONNECT-IP** (`connect-ip-go`): после каждого успешного `ReadPacket` батчится **до 512** кадров через `TryReceiveDatagram` в локальный prefetch (клон срезов), чтобы быстрее освобождать per-stream кольцо. **CONNECT-UDP** (`masque-go` `proxiedConn.ReadFrom`): тот же приём (`proxiedConnPrefetchMax=512`).
+- **Стендовый артефакт:** `degrade_matrix` на этом SHA не гонялся; каноничный прогон — WSL2 + Docker; пересобрать `artifacts/sing-box-linux-amd64` и образ e2e перед матрицей.
+- **Код:** `replace/quic-go-patched/http3/state_tracking_stream.go`, `stream.go`; `third_party/connect-ip-go/conn.go`; `third_party/masque-go/conn.go`.
+- **Локально:** `go test -count=1 -short ./transport/masque/... ./protocol/masque/...` (модуль sing-box) — PASS; `go test -count=1 -short ./http3/...` (модуль `replace/quic-go-patched`) — PASS; `masque-go` tests — PASS. `connect-ip-go` пакетные тесты без `proxy_test` — PASS (интеграционные `TestTTLs`/`TestClosing` на Win флапали и ранее).
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Собрать **`experiments/router/stand/l3router/artifacts/sing-box-linux-amd64`** из **`hiddify-core`** с актуальным HEAD (или взять CI-артефакт), пересобрать `sing-box-masque-e2e:local`, затем `degrade_matrix` (лестница **130m/140m** или якорь); обновлять `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованном peer-split и счётчиках.
+1. Собрать **`experiments/router/stand/l3router/artifacts/sing-box-linux-amd64`** из **`hiddify-core` `6ea81bfa`**, пересобрать `sing-box-masque-e2e:local`, затем `degrade_matrix` (**130m/140m**); обновить `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованном peer-split и счётчиках.
 
 ## 9) Where Heavy Details Live
 
