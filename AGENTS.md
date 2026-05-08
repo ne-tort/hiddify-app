@@ -61,14 +61,14 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `5fefb01e` — HTTP/3 per-stream DATAGRAM ring: дефолт **16384** слотов (`defaultStreamDatagramQueueLen`); **`recvClosed` atomic** + быстрый отсев `enqueueDatagram` после `closeReceive` без захвата mutex очереди.
-- **Стендовый артефакт:** не обновлялся — нет полного `degrade_matrix` в этой итерации (см. §8).
-- **Код:** `replace/quic-go-patched/http3/state_tracking_stream.go` — больше headroom между QUIC → HTTP/3 приёмом и `ReceiveDatagram` приложения; меньше лишней контенции на закрытом stream.
-- **Локально:** `go test -count=1 -short ./http3/...` из `hiddify-sing-box/replace/quic-go-patched`; `go test -count=1 ./transport/masque/... ./protocol/masque/...` из `hiddify-sing-box`.
+- **`hiddify-core` HEAD:** `288a1aad` — на горячем пути CONNECT-IP OBS: **`maybeEmitConnectIPActiveSnapshot`** больше не делает **`connectIPActiveObsSampleCounter.Add(1)` на каждом DATAGRAM до первого успешного `CAS(0→now)`**; после старта сессии логика 1 Гц и сэмплинг **1/128** без изменений.
+- **Стендовый артефакт:** `degrade_matrix` не получен — в WSL `docker compose ... up --build`: **нет pull образа `sing-box-masque-e2e`**, fallback **«compose build requires buildx 0.17 or later»**; восстановление baseline блокируется инфрой (buildx/login/локальный build образа вне патча ядра). Ошибочно сгенерированные `runtime/connect_ip_udp_degrade_matrix.json` / `masque_python_runner_summary.json` удалены, чтобы не подменять измерения.
+- **Код:** `hiddify-sing-box/transport/masque/transport.go` — только OBS cold path.
+- **Локально:** `go test -count=1 -short ./transport/masque/... ./protocol/masque/...` из `hiddify-sing-box` — PASS.
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Поднять compose `experiments/router/stand/l3router/docker-compose.masque-e2e.yml`, прогнать **`degrade_matrix`** (полная лестница или якорь 130m/140m) в **WSL2 + Docker** или **≥3** прогона на одном `sing-box-linux-amd64` с образом, собранным с **`hiddify-core` `5fefb01e`**; обновить `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (§0/§1) только при согласованном peer-split и счётчиках.
+1. Разблокировать стенд: **Docker Buildx ≥0.17** (или локальная сборка сервисов compose без недоступного registry), затем снова `degrade_matrix` (лестница или якорь **130m/140m**) на бинарнике/образе с актуальным **`hiddify-core`**; обновлять `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованном peer-split и счётчиках.
 
 ## 9) Where Heavy Details Live
 
