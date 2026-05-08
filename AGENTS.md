@@ -61,14 +61,14 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `f24d9f73` — prefetch после `TryReceiveDatagram` переведён на **фиксированное кольцо** (512 слотов) в `connect-ip-go` и `masque-go`: dequeue **O(1)** вместо сдвига слайса на каждый `ReadPacket`/`ReadFrom`; убран лишний **`append`‑клон** в CONNECT‑UDP prefetch (буфер уже выдан из HTTP/3 ring).
-- **Стендовый артефакт:** `degrade_matrix` на `f24d9f73` не гонялся; каноничный прогон — WSL2 + Docker (см. §8).
-- **Код:** `third_party/connect-ip-go/conn.go`; `third_party/masque-go/conn.go`.
-- **Локально:** `./transport/masque/...`, `./protocol/masque/...` — PASS; `third_party/masque-go` — PASS; `connect-ip-go` с `-skip 'TestTTLs|TestClosing'` — PASS (интеграции на Win по-прежнему флапают).
+- **`hiddify-core` HEAD:** `1d0bf50f` — `TryReceiveDatagram` больше не вызывается с «дырявым» окном между unlock/lock: декод + постановка в кольцо под **одним** `prefetchMu`, чтобы не терять уже снятый кадр при конкуренции/граничных гонках; на **silent drop** (неизвестный `context_id`, policy-drop в CONNECT‑IP, неподдерживаемый context в CONNECT‑UDP) после потребления кадра вызывается `extendPrefetchFromTry()`, чтобы раньше освобождать per-stream HTTP/3 backlog.
+- **Стендовый артефакт:** полный `degrade_matrix` на этом HEAD не перегонялся; канон — WSL2 + Docker (см. задачу в следующем блоке).
+- **Код:** `hiddify-sing-box/third_party/connect-ip-go/conn.go`; `hiddify-sing-box/third_party/masque-go/conn.go`.
+- **Локально:** `transport/masque`, `protocol/masque`; модули `third_party/connect-ip-go`, `third_party/masque-go` — PASS (`connect-ip-go` с `-skip 'TestTTLs|TestClosing'`).
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Собрать **`experiments/router/stand/l3router/artifacts/sing-box-linux-amd64`** из **`hiddify-core` `6ea81bfa`**, пересобрать `sing-box-masque-e2e:local`, затем `degrade_matrix` (**130m/140m**); обновить `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованном peer-split и счётчиках.
+1. Собрать **`experiments/router/stand/l3router/artifacts/sing-box-linux-amd64`** из **`hiddify-core` `1d0bf50f`**, образ `sing-box-masque-e2e:local`, затем `degrade_matrix` (лестница **130m/140m** и peer-split); обновить **`runtime/connect_ip_udp_degrade_matrix.json`** и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` только при согласованных счётчиках.
 
 ## 9) Where Heavy Details Live
 
