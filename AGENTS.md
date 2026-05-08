@@ -61,16 +61,16 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `2508f5a0ee9dd0ca2bb8ca9a2399e341ce1d6483`
-- **Стенд (Docker + `docker-compose.masque-e2e.yml` + `masque_stand_runner`):** прогон `degrade_matrix` в этой сессии **не получился**: `docker compose up` после локального `go build` упирается в **pull denied** для образа `sing-box-masque-e2e` и в сообщение **compose build requires buildx 0.17+** (WSL/Docker Desktop). Базовая матрица по-прежнему в `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json`: CONNECT-IP **last_pass=130m**, **first_fail=140m** (sink gap); нужен успешный compose, чтобы замерить эффект от `8192`.
+- **`hiddify-core` HEAD:** `1cf5a685867cfe8086fdb0d8f509da6597c1729e`
+- **Стенд (Docker + `docker-compose.masque-e2e.yml` + `masque_stand_runner`):** `docker compose -f experiments/router/stand/l3router/docker-compose.masque-e2e.yml build masque-server-core` на **Docker Desktop Win** проходит (`sing-box-masque-e2e:local` из `./artifacts/sing-box-linux-amd64`). Полный `compose up` + `degrade_matrix` в этой сессии не запускался (нужна среда с TUN/socat‑цепочкой как в runbook). Базовая матрица: `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json`, CONNECT‑IP **last_pass=130m**, **first_fail=140m** (sink gap).
 - **Сводка рисков:** `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md`
-- **Гипотеза (эта итерация):** при границе CONNECT-IP стенда счётчики QUIC/packer часто остаются нулевыми, а симптом — **sink/datagram gap**; это согласуется с ограниченной очередью **HTTP/3 per-stream DATAGRAM** между `receiveDatagrams` и приложением до `ReceiveDatagram`. Увеличение дефолтного backlog снижает риск `http3_stream_datagram_queue_drop_total` без смягчения гейтов.
-- **Код (эта итерация):** `hiddify-sing-box/replace/quic-go-patched/http3/state_tracking_stream.go` — `defaultStreamDatagramQueueLen` **4096 → 8192** (`HIDDIFY_HTTP3_STREAM_DATAGRAM_QUEUE_LEN` по-прежнему задаёт свой размер в `[128,65536]`).
-- **Локальная верификация:** `go test -race ./transport/masque/... ./protocol/masque/...` (sing-box) — PASS; `go test -race ./http3/...` в `replace/quic-go-patched` — PASS.
+- **Гипотеза / факт по коду:** для **TCP через gVisor** поверх CONNECT‑IP дорогим оказался **egress** из netstack: `writePacketWithRetry` делал `bytes.Clone` + `make` + `copy` на **каждый** outbound IP‑кадр, хотя `connect-ip-go.Conn.WritePacket` уже копирует payload во внутренний compose‑буфер и уменьшает TTL **только там** (`third_party/connect-ip-go/conn.go` `composeDatagram`). Лишнее клонирование снято — меньше CPU/GC‑давления под высоким rate.
+- **Код (эта итерация):** `hiddify-sing-box/transport/masque/netstack_adapter.go` — `writePacketWithRetry`: прямой `session.WritePacket(outbound)` без предварительного clone/retry-буфера.
+- **Локальная верификация:** `go test -count=1 ./transport/masque/... ./protocol/masque/...` (sing-box) — PASS на Windows AMD64 (`-race` в этой среде упал во встроенном quic/http3 stack trace; без race — ок).
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Восстановить локальный compose-стенд (частный registry / buildx 0.17+ или сборка образов из репозитория), затем **`--scenario degrade_matrix`** с `MASQUE_DEGRADE_TCP_IP_RATES`/`MASQUE_DEGRADE_UDP_BPS` как в `connect_ip_udp_degrade_matrix.json`, зафиксировать новый JSON и дельты (`quic_datagram_packer_oversize_drop_total`, `http3_stream_datagram_queue_drop_total`, `http3_datagram_unknown_stream_drop_total`, `connect_ip_packet_write_fail_reason_total["mtu"]`) относительно baseline в §7.
+1. Поднять compose‑стенд по runbook (`docker-compose.masque-e2e.yml` + healthcheck), затем **`--scenario degrade_matrix`** и зафиксировать JSON + дельты счётчиков (`quic_datagram_packer_oversize_drop_total`, `http3_stream_datagram_queue_drop_total`, `http3_datagram_unknown_stream_drop_total`, `connect_ip_packet_write_fail_reason_total`) к baseline в `connect_ip_udp_degrade_matrix.json`.
 
 ## 9) Where Heavy Details Live
 
