@@ -61,14 +61,14 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `6129f004` (кольцо приёмной QUIC `datagramQueue` вместо слайса с «вечным» cap после burst)
-- **Стендовый артефакт:** не обновлялся — следующий шаг: `degrade_matrix` из чеклиста §8 на WSL2+Docker или ≥3 якоря на linux-бинарнике.
-- **Код:** `replace/quic-go-patched/datagram_queue.go` — **`rcvRing` фиксированной ёмкости `maxDatagramRcvQueueLen`**, ленивое выделение при первом RX-кадре; dequeue обнуляет слот для GC. Снижает риск деградации аллокатора/памяти и фантомных backpressure после пиков PPS на стыке QUIC → HTTP/3 `receiveDatagrams`.
-- **Локально:** `go test -count=1 -short .` в `hiddify-sing-box/replace/quic-go-patched`; `go test -count=1 ./transport/masque/... ./protocol/masque/...` из `hiddify-sing-box`.
+- **`hiddify-core` HEAD:** `5fefb01e` — HTTP/3 per-stream DATAGRAM ring: дефолт **16384** слотов (`defaultStreamDatagramQueueLen`); **`recvClosed` atomic** + быстрый отсев `enqueueDatagram` после `closeReceive` без захвата mutex очереди.
+- **Стендовый артефакт:** не обновлялся — нет полного `degrade_matrix` в этой итерации (см. §8).
+- **Код:** `replace/quic-go-patched/http3/state_tracking_stream.go` — больше headroom между QUIC → HTTP/3 приёмом и `ReceiveDatagram` приложения; меньше лишней контенции на закрытом stream.
+- **Локально:** `go test -count=1 -short ./http3/...` из `hiddify-sing-box/replace/quic-go-patched`; `go test -count=1 ./transport/masque/... ./protocol/masque/...` из `hiddify-sing-box`.
 
 ## 8) Next Iteration Tasks (single-thread)
 
-1. Поднять compose `experiments/router/stand/l3router/docker-compose.masque-e2e.yml`, прогнать **`degrade_matrix`** (полная лестница или якорь 130m/140m) в **WSL2 + Docker** или **≥3** прогона на одном `sing-box-linux-amd64`; обновить `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` §1 только при согласованном peer-split и счётчиках.
+1. Поднять compose `experiments/router/stand/l3router/docker-compose.masque-e2e.yml`, прогнать **`degrade_matrix`** (полная лестница или якорь 130m/140m) в **WSL2 + Docker** или **≥3** прогона на одном `sing-box-linux-amd64` с образом, собранным с **`hiddify-core` `5fefb01e`**; обновить `runtime/connect_ip_udp_degrade_matrix.json` и baseline в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (§0/§1) только при согласованном peer-split и счётчиках.
 
 ## 9) Where Heavy Details Live
 
