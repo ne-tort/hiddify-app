@@ -61,22 +61,17 @@
 ## 7) Current Autonomous Cycle (overwrite each iteration)
 
 - **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `3272491438bd9c979b0aaa102e99fa61bcb1f8b7`
-- **Стенд (Docker + `docker-compose.masque-e2e.yml` + `masque_stand_runner`):** последний зафиксированный артефакт лестницы **без нового прогона** в этой сессии: `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` — CONNECT-IP PASS до **130** mbit/s, первый FAIL **140** mbit/s (`sink_udp_ingress_datagram_gap_no_udp_errors`), **150** mbit/s — `budget_exceeded`; **150 MiB @ 120 mbit/s** — ~`0.064%` loss. Нужен повтор `degrade_matrix` после коммита ниже (compose не поднимался здесь).
+- **`hiddify-core` HEAD:** `ac740346f61e566b7925a80a62b2148990e2380c`
+- **Стенд (Docker + `docker-compose.masque-e2e.yml` + `masque_stand_runner`):** baseline без нового прогона в этой сессии: `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` — CONNECT-IP PASS до **130** mbit/s, первый FAIL **140** mbit/s (`sink_udp_ingress_datagram_gap_no_udp_errors`), **150** mbit/s — `budget_exceeded`; **150 MiB @ 120 mbit/s** — ~`0.064%` loss. После `ac74034` нужен новый **`degrade_matrix`** (compose здесь не поднимался).
 - **Сводка рисков:** `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md`
-- **Гипотеза:** снятие лишних write-lock на read-hot path (карта HTTP/3 stream + policy connect-ip) и прогресс DATAGRAM в packer при ACK-pressure уменьшают задержку drain и риск sink-gap при той же семантике датаграмм.
-- **Код (эта итерация):**
-  - `hiddify-sing-box/replace/quic-go-patched/http3/conn.go` — `streamMx` = **`RWMutex`**, **`receiveDatagrams` / `hasActiveStreams`** используют **`RLock`**.
-  - `hiddify-sing-box/third_party/connect-ip-go/conn.go` — **`handleIncomingProxiedPacket`**, **`validateOutgoingProxiedPacket`** — снимок маршрутов под **`RLock`**.
-  - `hiddify-sing-box/replace/quic-go-patched/packet_packer.go` (+ `packet_packer_test.go`) — если DATAGRAM не влезает из‑за ACK в том же пакете, ACK переносится на следующий проход, DATAGRAM уходит (тест обновлён).
-- **Локальная верификация:** `go test ./http3/...` и `go test -run TestPackLargeDatagramFrame .` в `replace/quic-go-patched` — PASS; `go test -race ./transport/masque/... ./protocol/masque/...` в `hiddify-sing-box` — PASS.
-- **Примечание:** `go test ./...` в изолированном модуле `third_party/connect-ip-go` на Windows дал flaky `TestTTLs`/`TestClosing` (сеть/таймауты); повтор имеет смысл в Linux/WSL.
+- **Гипотеза (эта итерация):** на успешном RX/TX CONNECT-IP `maybeEmitConnectIPActiveSnapshot` вызывал `time.Now` + CAS **на каждую датаграмму** (клиент + server observe-hooks); OBS и так ≤1 Hz — сэмплирование ~**1 из 128** вызовов после первого successful epoch снижает лишнюю работу CPU на bulk path без изменения счётчиков качества канала.
+- **Код (эта итерация):** `hiddify-sing-box/transport/masque/transport.go` — счётчик + маска в `maybeEmitConnectIPActiveSnapshot` (коммит выше).
+- **Локальная верификация:** `go test -race ./transport/masque/... ./protocol/masque/...` (`hiddify-sing-box`, WSL) — PASS.
 
 ## 8) Next Iteration Tasks (single-thread)
 
 1. WSL: поднять `docker-compose.masque-e2e.yml`, **`--scenario degrade_matrix`**, записать новый JSON и дельты счётчиков (`quic_datagram_packer_oversize_drop_total`, `http3_stream_datagram_queue_drop_total`, `http3_datagram_unknown_stream_drop_total`, `connect_ip_packet_write_fail_reason_total["mtu"]`) к baseline §7.
-2. **CONNECT-IP:** лестница `tcp_ip_threshold` с явным `--udp-send-bps` (без дефолта Windows 4 MB/s) — сравнить границу до/после `32724914`.
-3. После свежего runtime: сжать дублирующие `[IN PROGRESS]` в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` §0 одной строкой-фактом.
+2. **CONNECT-IP:** лестница `tcp_ip_threshold` с явным `--udp-send-bps 25000000` (без дефолта Windows 4 MB/s) — сравнить `last_pass/first_fail` с базой `connect_ip_udp_degrade_matrix.json` после свежего ядра.
 
 ## 9) Where Heavy Details Live
 
