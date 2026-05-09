@@ -878,11 +878,12 @@ class TestUdpRunnerIntegrity(unittest.TestCase):
         self.assertAlmostEqual(runner._udp_target_payload_throughput_mbps(100_000_000), 800.0)
 
     def test_udp_tun_send_script_paces_payload_bytes_per_second(self):
+        script = runner.UDP_TUN_SENDER_HOST_PATH.read_text(encoding="utf-8")
         self.assertIn(
             "target_elapsed = sent / float(RATE_BPS)",
-            runner._UDP_TUN_DATAGRAM_SEND_PY,
+            script,
         )
-        self.assertNotIn("sent * 8.0 / RATE_BPS", runner._UDP_TUN_DATAGRAM_SEND_PY)
+        self.assertNotIn("sent * 8.0 / RATE_BPS", script)
 
     def test_classify_udp_fail_reason_hash_before_throughput(self):
         missing, _, _ = runner._classify_udp_fail_reason(99, 100, True, 1_000_000, True)
@@ -1094,6 +1095,67 @@ class TestTcpIpSmokeDeadlineThroughputGate(unittest.TestCase):
             byte_count=runner.BYTES_10KB * 2,
         )
         self.assertTrue(ok)
+
+
+class TestTcpIpCoreSinkDeliveryEvaluation(unittest.TestCase):
+    def _base_obs(self):
+        return {
+            "source": "runtime_snapshot_log_marker",
+            "runtime_marker_seen": True,
+            "observability_gap": False,
+            "observability_peer_split": True,
+            "delta": {
+                "connect_ip_engine_drop_total": 0,
+                "connect_ip_bridge_write_err_total": 0,
+                "connect_ip_proxied_packet_drop_reason_total": {},
+                "quic_datagram_packer_oversize_drop_total": 0,
+                "quic_datagram_rcv_queue_drop_total": 0,
+                "http3_stream_datagram_queue_drop_total": 0,
+                "http3_datagram_unknown_stream_drop_total": 0,
+                "http3_stream_datagram_recv_closed_drop_total": 0,
+            },
+            "delta_client": {"connect_ip_bridge_write_ok_total": 800},
+            "delta_server": {"connect_ip_packet_rx_total": 800},
+        }
+
+    def test_unknown_when_peer_counters_not_split(self):
+        obs = self._base_obs()
+        obs["observability_peer_split"] = False
+        ev = runner._tcp_ip_core_sink_delivery_evaluation(
+            obs,
+            byte_count=512 * 1024,
+            datagram_size_effective=1400,
+            runtime_health_ok=True,
+            integrity_ok=True,
+        )
+        self.assertIsNone(ev["core_delivery_ok"])
+        self.assertEqual(ev["core_delivery_reason"], "peer_counters_not_split")
+
+    def test_tunnel_mismatch_sets_fail(self):
+        obs = self._base_obs()
+        obs["delta_client"]["connect_ip_bridge_write_ok_total"] = 900
+        obs["delta_server"]["connect_ip_packet_rx_total"] = 100
+        ev = runner._tcp_ip_core_sink_delivery_evaluation(
+            obs,
+            byte_count=512 * 1024,
+            datagram_size_effective=1400,
+            runtime_health_ok=True,
+            integrity_ok=False,
+        )
+        self.assertFalse(ev["core_delivery_ok"])
+        self.assertEqual(ev["core_delivery_reason"], "tunnel_client_server_mismatch")
+        self.assertFalse(ev["sink_delivery_ok"])
+
+    def test_conserved_tunnel_no_plane_drops_is_true(self):
+        ev = runner._tcp_ip_core_sink_delivery_evaluation(
+            self._base_obs(),
+            byte_count=512 * 1024,
+            datagram_size_effective=1400,
+            runtime_health_ok=True,
+            integrity_ok=True,
+        )
+        self.assertTrue(ev["core_delivery_ok"])
+        self.assertFalse(ev["harness_core_sink_divergence"])
 
 
 if __name__ == "__main__":

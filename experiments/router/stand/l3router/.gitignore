@@ -1,4 +1,7 @@
 .env
+configs/warp-masque-live.local.json
+configs/warp-masque-live.server.local.json
+.secrets/
 artifacts/
 runtime/*.json
 runtime/iperf-raw/

@@ -1,0 +1,81 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "bootstrap-dns",
+        "server": "1.1.1.1",
+        "server_port": 53,
+        "detour": "direct"
+      },
+      {
+        "type": "udp",
+        "tag": "public-dns",
+        "server": "8.8.8.8",
+        "server_port": 53,
+        "detour": "direct"
+      }
+    ],
+    "final": "bootstrap-dns",
+    "strategy": "prefer_ipv4",
+    "independent_cache": true
+  },
+  "endpoints": [
+    {
+      "type": "warp_masque",
+      "tag": "warp-masque-live",
+      "connect_timeout": "15s",
+      "transport_mode": "connect_ip",
+      "fallback_policy": "strict",
+      "tcp_mode": "strict_masque",
+      "tcp_transport": "connect_stream",
+      "domain_resolver": "bootstrap-dns",
+      "profile": {
+        "compatibility": "consumer",
+        "detour": "direct",
+        "recreate": false,
+        "license": "",
+        "private_key": ""
+      }
+    }
+  ],
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-test",
+      "interface_name": "tun-warp-test",
+      "address": ["172.19.100.2/30"],
+      "mtu": 9000,
+      "stack": "mixed",
+      "auto_route": true,
+      "auto_redirect": true,
+      "strict_route": true,
+      "route_address": [
+        "198.18.0.0/15",
+        "1.1.1.0/24",
+        "1.0.0.0/24"
+      ]
+    },
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "0.0.0.0",
+      "listen_port": 1080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "warp-masque-live",
+    "default_domain_resolver": "bootstrap-dns",
+    "auto_detect_interface": true
+  }
+}
+

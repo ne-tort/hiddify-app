@@ -1,0 +1,25 @@
+# Live Cloudflare WARP over MASQUE (no local masque-server). Requires prebuilt binary:
+#   artifacts/sing-box-linux-amd64 (see README-warp-masque-live.md).
+services:
+  sing-box-warp-masque-live:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.warp-masque-live
+      args:
+        SINGBOX_ARTIFACT_STAMP: ${SINGBOX_ARTIFACT_STAMP:-0}
+    image: sing-box-warp-masque-live:local
+    container_name: sing-box-warp-masque-live
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - ${WARP_MASQUE_CONFIG:-./configs/warp-masque-live.json}:/etc/sing-box/config.json:ro
+      # Optional: edge host/port from a machine where api.cloudflareclient.com works (see README).
+      - ${WARP_MASQUE_WARP_CACHE:-./configs/warp-masque-warp-cache.empty.json}:/tmp/hiddify_warp_masque_cache.json:ro
+    command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    restart: unless-stopped

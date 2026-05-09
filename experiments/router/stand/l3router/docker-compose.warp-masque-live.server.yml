@@ -1,0 +1,29 @@
+# VPS: см. README-warp-masque-live-server.md
+# По умолчанию конфиг: configs/warp-masque-live.server.local.json (создайте: cp configs/warp-masque-live.server.json ...).
+name: warp-masque-live-server
+services:
+  sing-box-warp-masque-live:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.warp-masque-live
+      args:
+        SINGBOX_ARTIFACT_STAMP: ${SINGBOX_ARTIFACT_STAMP:-0}
+    image: sing-box-warp-masque-live:local
+    container_name: sing-box-warp-masque-live-server
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    # Bridge + NAT часто ломает UDP/QUIC к WARP edge (symptoms: open_http3_client_conn, no recent network activity).
+    # Host network совпадает с рекомендацией README для полноценного TUN/auto_route.
+    network_mode: host
+    # На части VPS/Docker стеков GSO/ECN дают «тихий» обрыв QUIC; quic-go поддерживает явное отключение.
+    environment:
+      QUIC_GO_DISABLE_GSO: "true"
+      QUIC_GO_DISABLE_ECN: "true"
+    volumes:
+      - ${WARP_MASQUE_CONFIG:-./configs/warp-masque-live.server.local.json}:/etc/sing-box/config.json:ro
+      - ${WARP_MASQUE_WARP_CACHE:-./configs/warp-masque-warp-cache.empty.json}:/tmp/hiddify_warp_masque_cache.json:ro
+    command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    restart: unless-stopped

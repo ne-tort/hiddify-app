@@ -1,83 +1,87 @@
-﻿# AGENTS — MASQUE / WARP_MASQUE
+# AGENTS — WARP MASQUE (sing-box endpoint)
 
-## 1) Mission
+## 1. Задача
 
-Довести `masque` endpoint в `hiddify-core/hiddify-sing-box` до production-качества и RFC-сходимости (`connect_stream`, `connect_udp`, `connect_ip`) по артефактам CI и Docker-стенда.
+Доработать **`type: warp_masque`** в `hiddify-core/hiddify-sing-box`: находить и настраивать **MASQUE dataplane** на реальном Cloudflare WARP (**HTTP/3 + CONNECT-UDP / CONNECT-IP / CONNECT-stream**), добиться **рабочего исходящего трафика** через этот канал на эталонном стенде.
 
-Текущий приоритет: объективно повышать скорость без потерь/hash drift и без регрессий контрактов. Искать и фиксить bottleneck в hot path только по подтверждённой наблюдаемости.
+Legacy **`warp` (WireGuard)** — не цель итерации; при затрагивании общего кода профиля/регистрации **`GetWarpProfile`** не регрессить (см. `hiddify-core/docs/masque-warp-architecture.md`). Общий транспорт MASQUE без WARP-смягчений поддерживать в `transport/masque` и связанном коде без поломки consumers.
 
-**Windows policy:** каноничный e2e-запуск стенда — из **WSL** с backend **Docker Desktop (WSL2)**.
+Общее ядро: `transport/masque`, `third_party/*-go`. Точки WARP bootstrap: [`protocol/masque/endpoint_warp_masque.go`](hiddify-core/hiddify-sing-box/protocol/masque/endpoint_warp_masque.go), [`protocol/masque/warp_control_adapter.go`](hiddify-core/hiddify-sing-box/protocol/masque/warp_control_adapter.go).
 
-## 2) Non-negotiables
+## 2. Гипотезы (не факты до проверки)
 
-- Цикл: сигнал -> код -> тест/стенд -> артефакт -> следующий шаг.
-- Fail (`loss`, `timeout`, `budget_exceeded`, `throughput_target_unmet`, hash drift) не маскировать; triage по boundary слоя.
-- Не ослаблять пороги/таймауты/валидации ради PASS.
-- Для Docker e2e единственный валидный путь: compose-стенд + `masque_stand_runner.py`/`masque_runtime_*` в порядке `masque-gates`.
-- `masque_or_direct` только с `fallback_policy=direct_explicit`.
-- Оптимизации hot path только по метрикам/логам/контрактам, не "на веру".
-- Правки ядра коммитить в `hiddify-core`; в `hiddify-app` фиксировать новый SHA сабмодуля.
+Ниже — рабочие предположения для triage и кода; **не** смешивать с нормативными требованиями Cloudflare, если они не найдены и подтверждены во внешних источниках:
 
-## 3) Source Of Truth
+- Гипотеза: профиль/reg API отдаёт **host:port** под **tunnel/classic WG** и для **RFC MASQUE** нужен другой dataplane-хост или путь (официально MASQUE часто описывается как HTTPS-подобный сценарий, не WG UDP edge).
+- Гипотеза: QUIC «оживает», но узел не объявляет **Extended CONNECT / H3 DATAGRAMS** как ожидают [`connect-ip-go`](hiddify-core/hiddify-sing-box/third_party/connect-ip-go) / [`masque-go`](hiddify-core/hiddify-sing-box/third_party/masque-go).
+- Гипотеза: для CONNECT-* нужен **отдельный Bearer** (`server_token`), недоступный из того же профиля, что поднимает WG; либо наоборот — достаточно корректного edge + заголовков.
+- Гипотеза: таймауты и PMTU/UDP на VPS маскируют отсутствие правильной цели dataplane — длинные ожидания не должны использоваться как «решение».
 
-При расхождениях приоритет:
-1. Код
-2. `hiddify-core/.github/workflows/ci.yml` (job `masque-gates`)
-3. `IDEAL-MASQUE-ARCHITECTURE.md`
-4. `docs/masque/*`
-5. Этот файл
+**Фактические контракты edge WARP под MASQUE** для стороннего клиента в репозитории полностью не заданы — искать во внешних источниках (RFC ниже, документация и записи Cloudflare, community‑эталоны), **сверять с нашей реализацией** и при необходимости править код **архитектурно** (например probe/discovery SETTINGS до полного runtime, конфигурируемые caps, альтернативные candidates).
 
-## 4) Read First (links)
+Ссылки на нормативку транспортного контраста: [RFC 9220](https://www.rfc-editor.org/rfc/rfc9220.html), [RFC 9298](https://www.rfc-editor.org/rfc/rfc9298), [RFC 9484](https://www.rfc-editor.org/rfc/rfc9484.html).
 
-Обязательный минимум перед итерацией:
+## 3. Инварианты
 
-1. `hiddify-core/.github/workflows/ci.yml` (`masque-gates`)
-2. `IDEAL-MASQUE-ARCHITECTURE.md`
-3. `docs/masque/AGENT-RFC-CI-CONTRACTS.md`
-4. `docs/masque/AGENT-LAYER-SOURCE-OF-TRUTH.md`
-5. `docs/masque/AGENT-TEST-AND-STAND-RUNBOOK.md`
-6. `docs/masque/AGENT-CI-REPLAY-CHEATSHEET.md`
-7. `hiddify-core/docs/masque-perf-gates.md`
-8. `hiddify-core/docs/masque-connect-ip-staged-closure.md`
-9. `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (риски потерь, стенд-факты, пробелы observability)
+- Цикл: гипотеза → код/конфиг → стенд → короткий артефакт (лог/metadata без секретов) → следующий шаг.
+- Секреты не коммитить; описывать только способ подстановки через env/secrets.
+- Не маскировать ошибки; triage: **control-plane** (`warp_control_adapter`, профиль/API) против **data-plane** (QUIC / TLS / H3 SETTINGS / CONNECT). В логах старта клиентского рантайма смотрите короткий ключ **`class=`** из [`ClassifyMasqueFailure`](hiddify-core/hiddify-sing-box/protocol/masque/errors_classify.go) (`h3_extended_connect`, `h3_datagrams`, `quic_tls`, `connect_http_auth`, …) — одинаково для `masque` и `warp_masque`.
+- Изменения ядра в **`hiddify-core`**; при необходимости зафиксировать SHA сабмодуля в **`hiddify-app`**.
+- **Таймауты:** не допускать «подвисания» прототипом и автотестами. Ориентиры: проверочный HTTP (curl и аналог) **`--max-time` ≤ ~20 с**; `connect_timeout` endpoint — **до ~20–30 с** на итерации, без минутных значений и без неограниченного ожидания в скриптах. Детали примеров — в README стенда (согласовать с этим файлом).
 
-## 5) Working Protocol
+## 4. Приоритет источников истины
 
-0. Перед стартом итерации обязательно опереться на **последний** записанный результат Docker-стенда (`experiments/router/stand/l3router/runtime/*.json`, в т.ч. `masque_python_runner_summary.json`) как отправную точку и на **незавершённые** пункты чеклиста (§8).
-1. Взять сигнал из runtime/CI/`go test` и выбрать задачу из известных проблем ядра в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (приоритет: `[IN PROGRESS]` -> следующий критичный риск).
-2. Сформулировать boundary + гипотезу (детальный triage в `AGENT-LAYER-SOURCE-OF-TRUTH.md`).
-3. Править один целевой слой за итерацию (фокус: `hiddify-core/hiddify-sing-box`, не раннер, кроме observability-минимума).
-4. Прогнать релевантные тесты + стенд в CI-порядке.
-5. Обновить §7 и §8 этого файла и статус в `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md` (`[DONE]`/`[IN PROGRESS]`/`[TODO]`) с коротким фактом по артефакту.
-6. Если в известных проблемах и §8 нет активных задач: выполнить целевой анализ кода ядра на потери/таймауты, записать новые гипотезы в отдельный файл `docs/masque/AGENT-MASQUE-CORE-ISSUES.md`, добавить их в §8 и попытаться закрыть первую критичную в той же итерации.
+При споре о том, как **мы** хотим себя вести в коде:  
+1) код `protocol/masque/*`, `transport/masque`, `option/masque.go`; 2) `hiddify-core/docs/masque-warp-architecture.md`; 3) `IDEAL-MASQUE-ARCHITECTURE.md`; 4) `docs/masque/MASQUE-SINGBOX-CONFIG.md`; 5) этот файл.
 
-## 6) Definition of Done
+При споре о том, **как себя ведёт реальный edge / что «канонично» для живого WARP без публичного SLA третьим лицам** — первичны **внешние** источники (RFC, CF, наблюдаемые эталоны), затем проверка в коде и на стенде.
 
-- Нет регрессий mode/fallback/lifecycle/scoped-контрактов.
-- PASS у релевантных unit/race/integration.
-- PASS у целевой стендовой матрицы.
-- Изменения поведения отражены в коде + тестах.
+## 5. Учётные данные (два слоя)
 
-## 7) Current Autonomous Cycle (overwrite each iteration)
+| Слой | Назначение | Конфиг / код |
+|------|------------|----------------|
+| Control-plane | Куда звонить: endpoint из профиля Cloudflare через API (как сегодня для bootstrap) | `profile.*`; [`warp_control_adapter.go`](hiddify-core/hiddify-sing-box/protocol/masque/warp_control_adapter.go) → `wireguard.GetWarpProfile` |
+| Data-plane MASQUE | Bearer на CONNECT-* при необходимости | `server_token` |
+| Переопределение порта QUIC к edge | После разрешения host из API | `profile.dataplane_port` (см. [`MASQUE-SINGBOX-CONFIG.md`](docs/masque/MASQUE-SINGBOX-CONFIG.md) §7.2.1) |
 
-- **Дата:** 2026-05-08
-- **`hiddify-core` HEAD:** `7d281185` — `extendPrefetchFromTry` в **`third_party/masque-go`** и **`third_party/connect-ip-go`**: весь try-drain HTTP/3 под **одним** `prefetchMu` (нет пары lock/unlock на каждый снятый кадр), меньше накладных расходов на горячем пути при высоком PPS.
-- **Стендовый артефакт:** `experiments/router/stand/l3router/runtime/connect_ip_udp_degrade_matrix.json` перезаписан прогоном `degrade_matrix` с **`MASQUE_DEGRADE_TCP_IP_RATES=130m,140m,150m`**, **`MASQUE_DEGRADE_UDP_BPS=16250000,17500000,18750000`**, образ **`sing-box-masque-e2e:local`** (бинарь из `artifacts/sing-box-linux-amd64`, раннер собирает с **`-tags with_masque`**). Окружение: **Docker Desktop (Windows, linux/amd64)**. Итог лестницы в том прогоне: **130m PASS (loss 0)**, **140m/150m FAIL** (`sink_writer_boundary_no_udp_errors`, малый `loss_pct`), **UDP** на всех трёх BPS — **PASS**, peer-split, дельты QUIC/HTTP3 drop — **0**. Отдельный короткий прогон только **130m+140m** на том же дне дал **оба TCP PASS** — зафиксирована **дисперсия границы ~140m**; для «жёсткого» baseline по чеклисту деградации лучше **≥3 повтора** или канон **WSL2+Docker**.
-- **Код:** `hiddify-sing-box/third_party/connect-ip-go/conn.go`, `third_party/masque-go/conn.go`.
-- **Локально:** `go test ./transport/masque/... ./protocol/masque/...`; `third_party/masque-go`, `third_party/connect-ip-go` (с `-skip 'TestTTLs|TestClosing'`) — PASS.
+**MASQUE Bearer ≠ WG-ключ.** Bootstrap профилем Bearer для CONNECT автоматически не гарантируется.
 
-## 8) Next Iteration Tasks (single-thread)
+## 6. Ссылки для чтения и стенда
 
-1. Уточнить границу **140 Mb/s** (CONNECT-IP): **≥3** повтора `degrade_matrix` на одном и том же бинаре **или** каноничный WSL2; при стабильном FAIL — triage **`sink_writer_boundary_no_udp_errors`** (sink / writer path), не ослабляя гейты.
+- Топология: [`hiddify-core/docs/masque-warp-architecture.md`](hiddify-core/docs/masque-warp-architecture.md)
+- Поля JSON: [`docs/masque/MASQUE-SINGBOX-CONFIG.md`](docs/masque/MASQUE-SINGBOX-CONFIG.md)
+- Архитектура MASQUE: [`IDEAL-MASQUE-ARCHITECTURE.md`](IDEAL-MASQUE-ARCHITECTURE.md)
+- **Стенд и smoke на VPS (прототип, правится по необходимости):** [`experiments/router/stand/l3router/README-warp-masque-live-server.md`](experiments/router/stand/l3router/README-warp-masque-live-server.md), compose [`docker-compose.warp-masque-live.server.yml`](experiments/router/stand/l3router/docker-compose.warp-masque-live.server.yml), шаблон [`configs/warp-masque-live.server.docker.json`](experiments/router/stand/l3router/configs/warp-masque-live.server.docker.json)
+- Прогоны l3router/CI-контекст: [`docs/masque/AGENT-TEST-AND-STAND-RUNBOOK.md`](docs/masque/AGENT-TEST-AND-STAND-RUNBOOK.md); perf/connect-ip: [`hiddify-core/docs/masque-perf-gates.md`](hiddify-core/docs/masque-perf-gates.md), [`docs/masque/AGENT-LAYER-SOURCE-OF-TRUTH.md`](docs/masque/AGENT-LAYER-SOURCE-OF-TRUTH.md)
 
-## 9) Where Heavy Details Live
+## 7. Как проверять (этот цикл ожиданий от агента)
 
-Чтобы не раздувать `AGENTS.md`, подробности держать в профильных файлах:
+- **Стенд:** Docker на сервере **163.5.180.181** по инструкции README стенда; при изменении кода — **пересборка linux/amd64**, деплой бинаря/образа, **сверка SHA256** артефакта с локальной сборкой (команды не дублировать здесь — в README/`upload_warp_masque_stand.ps1`).
+- **Успех итерации:** `warp_masque` стартует без фатала, есть **измеримый исход** (например trace/curl через SOCKS или узкие маршруты — как описано для выбранного JSON в README стенда). Прототип стенда при нерелевантности править вместе с кодом.
 
-- Архитектура и wire semantics: `IDEAL-MASQUE-ARCHITECTURE.md`
-- Layer/boundary triage и observability-карты: `docs/masque/AGENT-LAYER-SOURCE-OF-TRUTH.md`
-- Команды и порядок локального replay: `docs/masque/AGENT-TEST-AND-STAND-RUNBOOK.md`, `docs/masque/AGENT-CI-REPLAY-CHEATSHEET.md`
-- RFC/CI контракты: `docs/masque/AGENT-RFC-CI-CONTRACTS.md`
-- История прогонов и числовые факты: `experiments/router/stand/l3router/runtime/*.json`
-- Риски деградации MASQUE / CONNECT-IP (чеклист): `docs/masque/AGENT-MASQUE-DEGRADATION-GAPS.md`
-- Отдельный backlog новых проблем ядра (если текущий чеклист пуст): `docs/masque/AGENT-MASQUE-CORE-ISSUES.md`
+## 8. Definition of Done (warp_masque)
+
+- На выбранном профиле (consumer / ZT) документируемые поля `profile.*`, роль **`server_token`**, способ смокей без секретов.
+- Хотя бы один **повторяемый** путь до трафика на реальном WARP или явно зафиксированное продуктовое ограничение с обоснованием.
+- Локально: нет регресса затронутого generic MASQUE / legacy warp там, где шарится код.
+
+## 9. Текущая итерация (перезаписывать)
+
+| Поле | Значение |
+|------|----------|
+| Дата | _заполнить_ |
+| `hiddify-core` HEAD/ветка | _заполнить_ |
+| Профиль | consumer \| zero_trust \| both |
+| Результат live | _этап сбоя / успех ; артефакт без секретов_ |
+| Токены | control достаточен \| нужен Bearer \| уточнить |
+
+Опциональный длинный runbook можно вести отдельно в `docs/masque/` по мере стабилизации; держать AGENTS коротким.
+
+## 10. Задачи вперёд
+
+1. Сверить с внешними источниками ожидания edge: SETTINGS (Extended CONNECT, datagrams), URI шаблоны, заголовки — против `transport/masque` и [`third_party`](hiddify-core/hiddify-sing-box/third_party).
+2. При подтверждении необходимости — **discovery/probe кандидатов** dataplane до полного [`CM.NewRuntime`](hiddify-core/hiddify-sing-box/protocol/masque/endpoint_warp_masque.go) (QUIC + приём SETTINGS, затем CONNECT).
+3. Явная стратегия **`transport_mode`**: smoke **`connect_udp`** vs **`connect_ip`**, документировать выбор без путаницы с WG-портом из профиля; при несовпадении попробовать **`profile.dataplane_port`** (например 443).
+4. Прояснить и автоматизировать где возможно **Bearer** / политики org для CONNECT.
+5. Поддерживать актуальность прототипа Docker-стенда и таймаутов README под §3.
+6. При правках общего transport — не сломать `masque-gates`/локальные CI-смоки (без живых секретов в пайплайне).

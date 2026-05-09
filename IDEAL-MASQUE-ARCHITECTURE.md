@@ -1,5 +1,7 @@
 # Идеальная архитектура MASQUE
 
+Шпаргалка по полям JSON (`type: masque`), таблице client/server и interop см. **[`docs/masque/MASQUE-SINGBOX-CONFIG.md`](docs/masque/MASQUE-SINGBOX-CONFIG.md)**.
+
 Норматив для практической реализации dataplane в этом репозитории: **слои, контракты и логика**. Это не замена RFC и не пересказ спецификаций — см. RFC 9298 (MASQUE), RFC 9297 (HTTP Datagrams), RFC 9484 (CONNECT-IP).
 
 Подробная топология endpoint’ов, ADR и совместимость с legacy см. [`hiddify-core/docs/masque-warp-architecture.md`](hiddify-core/docs/masque-warp-architecture.md).
@@ -16,7 +18,7 @@
   - **`tcp_transport = connect_ip` запрещён** в TUN-only; для TCP через IP-туннель используется netstack-путь при **`transport_mode = connect_ip`**.
 - **`MasqueTCPMode` / fallback:** режим **`masque_or_direct`** возможен только вместе с **`fallback_policy = direct_explicit`** (`endpoint.go`).
 - **`hop_policy = chain`:** обязательны **`hops`**, у каждого hop — **`server`** и **`server_port`**; **`tag`** без дубликатов; граф дополнительно проходит через **`CM.BuildChain`** (`common/masque`). Каждый hop не смешивает QUIC-потоки разных расширенных CONNECT.
-- **`mtu` (CONNECT-IP ceiling в конфиге):** допустимый диапазон на endpoint — **[1280, 65535]** при ненулевом значении; в transport-слое **`CoreClientFactory.NewSession`** клампит эффективный потолок датаграммы в **[1280, верхний предел]** (`transport/masque/transport.go`). Верхний предел по умолчанию **1500** (interop с типичным QUIC path); для лабораторных jumbo-профилей можно поднять через **`HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX`** (целое, **1280..65535**), иначе игнорируется. Без этого переменная окружения **не** меняет прод-дефолт.
+- **`mtu` (CONNECT-IP ceiling в конфиге):** допустимый диапазон на endpoint — **[1280, 65535]** при ненулевом значении; если **`mtu` не задан или 0**, эффективный потолок берётся как **минимум из 1500 и `connectIPDatagramCeilingMax()`** (то есть типичный Ethernet-like ceiling, если env ниже — кламп вниз). В transport-слое **`CoreClientFactory.NewSession`** дополнительно клампит эффективный потолок в **[1280, верхний предел]** (`transport/masque/transport.go`). Верхний предел по умолчанию **1500** (interop с типичным QUIC path); для лабораторных jumbo-профилей можно поднять через **`HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX`** (целое, **1280..65535**), иначе игнорируется. Без этой переменной окружения **не** меняется число **1500** как целевой дефолт при `mtu: 0`.
 - **Контракт MTU vs payload (не смешивать):**
   - **`tun_mtu`**: локальный MTU TUN-интерфейса в ОС (вплоть до jumbo, напр. 9000) — ответственность платформы/инсталлятора; sing-box не подменяет его «магическим» числом из `mtu` outbound.
   - **`masque_datagram_ceiling`**: верхняя граница размера **полного IP-датаграммы** (IPv4/IPv6), которую мы готовы упаковать в один HTTP/3 QUIC DATAGRAM для CONNECT-IP (после клампа — фактический `datagramCeiling` в `coreSession`). От неё зависят начальный UDP payload ceiling в `connectIPUDPPacketConn` и MTU gVisor NIC в netstack.
