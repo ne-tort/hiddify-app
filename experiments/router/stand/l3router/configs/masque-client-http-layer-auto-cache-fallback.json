@@ -1,0 +1,50 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun0",
+      "address": [
+        "172.19.100.2/30"
+      ],
+      "auto_route": false
+    },
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080
+    }
+  ],
+  "endpoints": [
+    {
+      "type": "masque",
+      "tag": "masque-client",
+      "server": "masque-server-core",
+      "server_port": 8443,
+      "transport_mode": "connect_udp",
+      "http_layer": "auto",
+      "http_layer_fallback": true,
+      "http_layer_cache_ttl": "2m",
+      "fallback_policy": "strict",
+      "tcp_mode": "strict_masque",
+      "tcp_transport": "connect_stream",
+      "template_udp": "https://masque-server-core:8443/masque/udp/{target_host}/{target_port}",
+      "template_tcp": "https://masque-server-core:8443/masque/tcp/{target_host}/{target_port}",
+      "tls_server_name": "masque-server-core",
+      "insecure": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "masque-client"
+  }
+}

@@ -76,6 +76,18 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 ## 5. Протоколы: возможности и компенсация
 
+### Внешний HTTP-слой (клиент: `http_layer*`)
+
+Только **режим клиента** (`mode: client`). Сервер отклоняет непустые `http_layer*`. Внешнее соединение к MASQUE: либо **QUIC + HTTP/3** (по умолчанию), либо **TLS + TCP + HTTP/2** с Extended CONNECT (RFC 8441) и капсулами RFC 9297 на CONNECT-потоке.
+
+| Поле | Default | Смысл |
+|------|---------|--------|
+| `http_layer` | `h3` | `h3` — только H3/QUIC; `h2` — H2 поверх TLS/TCP (`ALPN: h2`); `auto` — старт с H3, при `http_layer_cache_ttl` допускается in-memory кэш последнего удачного слоя. |
+| `http_layer_fallback` | `false` | Одна попытка переключить слой **H2↔H3** после ошибки, классифицированной как смена транспорта (не путать с `fallback_policy` на исходящий TCP). |
+| `http_layer_cache_ttl` | `0` | TTL кэша выбранного слоя; **только при** `http_layer: auto`; при явном `h2`/`h3` положительный TTL — ошибка валидации. |
+
+Несовместимость: **`http_layer: h2`** и **`quic_experimental.enabled`** — ошибка конфига. Рантайм и стенд: [`AGENTS.md`](../../AGENTS.md) §6–8, §13–14.
+
 ### UDP
 
 - **CONNECT-UDP:** крупный `WriteTo` режется до безопасного размера датаграммы (см. `masqueUDPDatagramSplitConn`, [`transport.go`](../../hiddify-core/hiddify-sing-box/transport/masque/transport.go)).

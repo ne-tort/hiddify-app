@@ -19,6 +19,9 @@ ARTIFACT = ROOT / "artifacts" / "sing-box-linux-amd64"
 COMPOSE_FILE = ROOT / "docker-compose.masque-e2e.yml"
 RUNTIME_DIR = ROOT / "runtime"
 DEFAULT_CLIENT_CONFIG = "./configs/masque-client.json"
+MASQUE_H2_CLIENT_CONFIG = "./configs/masque-client-h2.json"
+MASQUE_HTTP_LAYER_AUTO_CACHE_FB_CONFIG = "./configs/masque-client-http-layer-auto-cache-fallback.json"
+CONNECT_IP_H2_CLIENT_CONFIG = "./configs/masque-client-connect-ip-h2.json"
 CLIENT_CONFIG_AUTO = "./configs/masque-client-auto.json"
 CONNECT_IP_CLIENT_CONFIG = "./configs/masque-client-connect-ip.json"
 CONNECT_IP_TCP_STACK_CLIENT_CONFIG = "./configs/masque-client-connect-ip-tcp-via-stack.json"
@@ -4563,6 +4566,84 @@ def run_tcp_stream(docker, byte_count, scenario_name="tcp_stream"):
     }
 
 
+def run_masque_h2_connect_ip(
+    docker,
+    byte_count,
+    tcp_ip_mode="bulk_single_flow",
+    tcp_ip_deadline_sec=None,
+    udp_chunk=0,
+    udp_rate_bps=0,
+):
+    """TUN UDP через CONNECT-IP с ``http_layer: h2`` (HTTP Datagram capsules на CONNECT-IP потоке RFC 9297)."""
+    base = run_tcp_ip(
+        docker,
+        byte_count,
+        mode=tcp_ip_mode,
+        tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+        udp_chunk=udp_chunk,
+        udp_rate_bps=udp_rate_bps,
+    )
+    out = dict(base)
+    out["scenario"] = "masque_h2_connect_ip"
+    out["http_layer"] = "h2"
+    out["masque_client_config"] = CONNECT_IP_H2_CLIENT_CONFIG
+    return out
+
+
+def run_masque_h2_smoke(
+    docker,
+    byte_count,
+    udp_chunk=0,
+    udp_rate_bps=0,
+    udp_loss_pct=0.0,
+):
+    """CONNECT-UDP + CONNECT-stream with client ``http_layer: h2`` (server needs TCP+TLS HTTP/2 + GODEBUG http2xconnect=1)."""
+    r_udp = run_udp(
+        docker,
+        byte_count,
+        udp_chunk=udp_chunk,
+        udp_rate_bps=udp_rate_bps,
+        udp_loss_pct=udp_loss_pct,
+    )
+    r_tcp = run_tcp_stream(docker, byte_count)
+    ok = bool(r_udp.get("ok")) and bool(r_tcp.get("ok"))
+    return {
+        "scenario": "masque_h2_smoke",
+        "ok": ok,
+        "udp_row": r_udp,
+        "tcp_stream_row": r_tcp,
+    }
+
+
+def run_masque_http_layer_auto_cache_smoke(
+    docker,
+    byte_count,
+    udp_chunk=0,
+    udp_rate_bps=0,
+    udp_loss_pct=0.0,
+):
+    """CONNECT-UDP + CONNECT-stream: ``http_layer: auto``, ``http_layer_cache_ttl``, ``http_layer_fallback``.
+
+    На стенде с рабочим H3 успешный холодный старт фиксирует h3 и путь TTL-кэша; сервер всё также отдаёт HTTP/2
+    параллельно с QUIC для регрессии общей сборки конфигурации.
+    """
+    r_udp = run_udp(
+        docker,
+        byte_count,
+        udp_chunk=udp_chunk,
+        udp_rate_bps=udp_rate_bps,
+        udp_loss_pct=udp_loss_pct,
+    )
+    r_tcp = run_tcp_stream(docker, byte_count)
+    ok = bool(r_udp.get("ok")) and bool(r_tcp.get("ok"))
+    return {
+        "scenario": "masque_http_layer_auto_cache_smoke",
+        "ok": ok,
+        "udp_row": r_udp,
+        "tcp_stream_row": r_tcp,
+    }
+
+
 def run_tcp_ip(
     docker,
     byte_count,
@@ -6245,6 +6326,9 @@ def _classify_runner_exception_source(scenario: str, message: str) -> str:
         "tcp_ip_iperf",
         "tun_rule_masque_perf",
         "degrade_matrix",
+        "masque_h2_smoke",
+        "masque_h2_connect_ip",
+        "masque_http_layer_auto_cache_smoke",
     }:
         return "runtime"
     compose_markers = (
@@ -6268,7 +6352,7 @@ def _effective_udp_send_bps_for_stand_scenario(
         return 0
     if str(tcp_ip_mode) != "bulk_single_flow":
         return 0
-    if scenario == "tcp_ip":
+    if scenario in {"tcp_ip", "masque_h2_connect_ip"}:
         return _win_host_tcp_ip_default_udp_send_bps()
     return 0
 
@@ -6389,6 +6473,37 @@ def run_scenario(
             tcp_ip_mode=tcp_ip_mode,
             tcp_ip_deadline_sec=tcp_ip_deadline_sec,
         )
+    if scenario == "masque_h2_smoke":
+        if not skip_stand_compose_up():
+            compose_up(docker, MASQUE_H2_CLIENT_CONFIG)
+        return run_masque_h2_smoke(
+            docker,
+            byte_count,
+            udp_chunk=udp_chunk,
+            udp_rate_bps=udp_rate_bps,
+            udp_loss_pct=udp_loss_pct,
+        )
+    if scenario == "masque_http_layer_auto_cache_smoke":
+        if not skip_stand_compose_up():
+            compose_up(docker, MASQUE_HTTP_LAYER_AUTO_CACHE_FB_CONFIG)
+        return run_masque_http_layer_auto_cache_smoke(
+            docker,
+            byte_count,
+            udp_chunk=udp_chunk,
+            udp_rate_bps=udp_rate_bps,
+            udp_loss_pct=udp_loss_pct,
+        )
+    if scenario == "masque_h2_connect_ip":
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_H2_CLIENT_CONFIG)
+        return run_masque_h2_connect_ip(
+            docker,
+            byte_count,
+            tcp_ip_mode=tcp_ip_mode,
+            tcp_ip_deadline_sec=tcp_ip_deadline_sec,
+            udp_chunk=udp_chunk,
+            udp_rate_bps=udp_rate_bps,
+        )
     raise ValueError(f"unsupported scenario: {scenario}")
 
 
@@ -6408,6 +6523,9 @@ ALLOWED_SCENARIOS = frozenset(
         "tcp_ip_iperf",
         "tun_rule_masque_perf",
         "degrade_matrix",
+        "masque_h2_smoke",
+        "masque_h2_connect_ip",
+        "masque_http_layer_auto_cache_smoke",
         "all",
         "real",
         "connect_ip_ingress_quick",
@@ -6474,7 +6592,9 @@ def main():
             "(прогресс в логе [stand i/N], [stand heartbeat], [stand wait]). "
             "Один сценарий: tcp_stream, tcp_ip, … Очередь: udp,tcp_ip. "
             "Special: real, connect_ip_ingress_quick, connect_ip_ingress_quick_netstack_tcp, "
-            "proxy_masque_matrix (отдельно), tcp_stream_auto."
+            "proxy_masque_matrix (отдельно), tcp_stream_auto, masque_h2_smoke (H2 CONNECT-UDP/stream), "
+            "masque_h2_connect_ip (H2 CONNECT-IP / TUN UDP), "
+            "masque_http_layer_auto_cache_smoke (auto + TTL + http_layer_fallback на том же смоке что H2)."
         ),
     )
     parser.add_argument(

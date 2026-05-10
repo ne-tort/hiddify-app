@@ -7,6 +7,9 @@ services:
         SINGBOX_ARTIFACT_STAMP: ${SINGBOX_ARTIFACT_STAMP:-0}
     image: sing-box-masque-e2e:local
     container_name: masque-server-core
+    environment:
+      # net/http HTTP/2: RFC 8441 Extended CONNECT (SETTINGS_ENABLE_CONNECT_PROTOCOL) for MASQUE on TCP.
+      GODEBUG: http2xconnect=1
     cap_add:
       - NET_ADMIN
     devices:
@@ -17,7 +20,11 @@ services:
       - ./configs/masque-key.pem:/etc/sing-box/key.pem:ro
     command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
     healthcheck:
-      test: ["CMD-SHELL", "ss -lun | awk '$4 ~ /:8443$/ {found=1} END {exit !found}'"]
+      test:
+        [
+          "CMD-SHELL",
+          "ss -lun | awk '$4 ~ /:8443$/ {u=1} END {exit !u}' && ss -lnt | awk '$4 ~ /:8443$/ {t=1} END {exit !t}'",
+        ]
       interval: 2s
       timeout: 2s
       retries: 20
@@ -30,6 +37,10 @@ services:
   masque-client-core:
     image: sing-box-masque-e2e:local
     container_name: masque-client-core
+    environment:
+      # net/http client HTTP/2: RFC 8441 Extended CONNECT (CONNECT-UDP / CONNECT-IP / CONNECT-stream).
+      # Must match masque-server-core; without this, RoundTrip may reject or mishandle :protocol.
+      GODEBUG: http2xconnect=1
     privileged: true
     cap_add:
       - NET_ADMIN
