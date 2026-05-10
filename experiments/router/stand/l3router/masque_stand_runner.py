@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -7,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -17,18 +19,117 @@ ARTIFACT = ROOT / "artifacts" / "sing-box-linux-amd64"
 COMPOSE_FILE = ROOT / "docker-compose.masque-e2e.yml"
 RUNTIME_DIR = ROOT / "runtime"
 DEFAULT_CLIENT_CONFIG = "./configs/masque-client.json"
+CLIENT_CONFIG_AUTO = "./configs/masque-client-auto.json"
 CONNECT_IP_CLIENT_CONFIG = "./configs/masque-client-connect-ip.json"
+CONNECT_IP_TCP_STACK_CLIENT_CONFIG = "./configs/masque-client-connect-ip-tcp-via-stack.json"
 CONNECT_IP_SCOPED_CLIENT_CONFIG = "./configs/masque-client-connect-ip-scoped.json"
 CONNECT_IP_SCOPED_BAD_TARGET_CLIENT_CONFIG = "./configs/masque-client-connect-ip-scoped-bad-target.json"
 SERVER_CONFIG_DEFAULT = "./configs/masque-server.json"
 SERVER_CONFIG_SCOPED = "./configs/masque-server-scoped.json"
-
+PROXY_MATRIX_STREAM_CLIENT_CONFIG = "./configs/masque-client-matrix-connect-stream.json"
+PROXY_MATRIX_IP_CLIENT_CONFIG = "./configs/masque-client-matrix-connect-ip.json"
+SCRIPTS_DIR = ROOT / "scripts"
+SOCKS_UDP_PROBE_HOST_PATH = SCRIPTS_DIR / "masque_socks_udp_probe.py"
+TCP_THROUGHPUT_MEASURE_HOST_PATH = SCRIPTS_DIR / "masque_tcp_throughput_measure.py"
+SOCKS_UDP_PROBE_CONTAINER_PATH = "/tmp/masque_socks_udp_probe.py"
+TCP_THROUGHPUT_MEASURE_CONTAINER_PATH = "/tmp/masque_tcp_throughput_measure.py"
 SERVER_CONTAINER = "masque-server-core"
 CLIENT_CONTAINER = "masque-client-core"
 IPERF_CONTAINER = "masque-iperf-server"
 
 # Fixed container_name:s in compose; force-remove survives partial/crashed compose down.
 STAND_CONTAINER_NAMES = (SERVER_CONTAINER, CLIENT_CONTAINER, IPERF_CONTAINER)
+
+_SOCKS_READY_PROBE_PY = """import socket
+# Только TCP до accept: второй ниже SOCKS-CONNECT может сериализоваться с CONNECT-IP;
+# полное SOCKS-рукопожатие здесь лишний раз триггерит dataplane до harness.
+s = socket.create_connection(("127.0.0.1", 1080), timeout=8)
+try:
+    s.shutdown(socket.SHUT_RDWR)
+finally:
+    s.close()
+"""
+_SOCKS_READY_PROBE_B64 = base64.standard_b64encode(
+    _SOCKS_READY_PROBE_PY.strip().encode("utf-8")
+).decode("ascii")
+
+_SOCKS5_STACK_WARM_PY = """import os, socket, struct, time
+
+
+def connect_proxy_budget():
+    raw = os.environ.get("MASQUE_STAND_SOCKS_TCP_DEADLINE_SEC")
+    if raw is None:
+        return socket.create_connection(("127.0.0.1", 1080), timeout=25)
+    budget = float(raw)
+    start = time.monotonic()
+    last_exc = TimeoutError("socks inbound tcp")
+    while time.monotonic() - start < budget:
+        tout = max(4.0, min(22.0, budget - (time.monotonic() - start)))
+        try:
+            return socket.create_connection(("127.0.0.1", 1080), timeout=tout)
+        except TimeoutError as exc:
+            last_exc = exc
+            time.sleep(0.3)
+    raise last_exc
+
+
+def drain_bind(s, atyp):
+    try:
+        if atyp == 1:
+            s.recv(6)
+        elif atyp == 4:
+            s.recv(18)
+        elif atyp == 3:
+            ln_ord = s.recv(1)
+            if not ln_ord:
+                return
+            ln = ln_ord[0]
+            s.recv(ln + 2)
+    except OSError:
+        pass
+
+
+# SOCKS5 CONNECT через connect_ip+tcp netstack; целевой порт — с реальным TCP accept на бэкенде (см. run_tcp_stream).
+h = os.environ["MASQUE_WARM_HOST"].strip()
+p = int(os.environ["MASQUE_WARM_PORT"])
+max_tries = int(os.environ.get("MASQUE_STAND_SOCKS_STACK_WARM_TRIES", "12"))
+wall = float(os.environ.get("MASQUE_STAND_SOCKS_STACK_WARM_WALL_SEC", "45"))
+deadline = time.monotonic() + wall
+ok = False
+for _ in range(max(1, max_tries)):
+    if time.monotonic() >= deadline:
+        break
+    s = None
+    try:
+        s = connect_proxy_budget()
+        s.sendall(bytes([5, 1, 0]))
+        m = s.recv(2)
+        if len(m) != 2 or m[0] != 5 or m[1] != 0:
+            continue
+        bip = socket.inet_aton(h)
+        s.sendall(bytes([5, 1, 0, 1]) + bip + struct.pack("!H", p))
+        hdr = s.recv(4)
+        if len(hdr) == 4 and hdr[1] == 0:
+            drain_bind(s, hdr[3])
+            ok = True
+            break
+        rep = hdr[1] if len(hdr) >= 2 else -1
+        print("socks warm connect failed rep=%s" % rep, flush=True)
+    except OSError:
+        pass
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+    time.sleep(0.75)
+
+raise SystemExit(0 if ok else 2)
+"""
+_SOCKS5_STACK_WARM_B64 = base64.standard_b64encode(
+    _SOCKS5_STACK_WARM_PY.strip().encode("utf-8")
+).decode("ascii")
 
 # Windows Docker Desktop (host): без пейса bulk `tcp_ip` часто упирается в `bridge_boundary_stall`.
 # Значение — байт/с для скриптов с MASQUE_UDP_RATE_BPS (наследованное имя «bps»). Linux CI не затрагивается.
@@ -44,6 +145,68 @@ def _win_host_tcp_ip_default_udp_send_bps() -> int:
         return max(0, int(raw))
     except ValueError:
         return 4_000_000
+
+
+def _default_stand_bulk_socks_udp_send_bps() -> int:
+    """Каноническая скорость пейса (байт/с) для SOCKS5 UDP ASSOCIATE при bulk без явной настройки.
+
+    Переопределение: ``MASQUE_STAND_SOCKS_UDP_DEFAULT_SEND_BPS`` (можно ``0``, тогда отключается
+    только финальный дефолт 4 M; см. ниже ключ ``MASQUE_STAND_SOCKS_UDP_SEND_BPS``).
+    """
+    raw = (os.environ.get("MASQUE_STAND_SOCKS_UDP_DEFAULT_SEND_BPS") or "").strip()
+    if raw != "":
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 4_000_000
+
+
+def _socks_udp_pace_for_stand(byte_count: int, cli_send_bps: int) -> int:
+    """Скорость пейса пробы SOCKS→CONNECT-UDP: CLI → явный env → smoke без пейса → bulk-дефолт.
+
+    Если задан ключ ``MASQUE_STAND_SOCKS_UDP_SEND_BPS``, его значение (в т.ч. ``0``) имеет приоритет
+    над bulk-дефолтом. Без него для bulk после smoke используется
+    ``_default_stand_bulk_socks_udp_send_bps()`` (обычно 4 МБ/с для стабильности Docker Desktop).
+
+    Аргумент ``cli_send_bps`` совпадает с ``--udp-send-bps`` / ``--udp-send-rate`` главного входа,
+    когда сценарий проксирует его в SOCKS-прогон.
+    """
+    if int(cli_send_bps) > 0:
+        return int(cli_send_bps)
+    key = "MASQUE_STAND_SOCKS_UDP_SEND_BPS"
+    if key in os.environ:
+        raw = (os.environ.get(key) or "").strip()
+        if raw == "":
+            return 0
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return _default_stand_bulk_socks_udp_send_bps()
+    if int(byte_count) <= BYTES_10KB:
+        return 0
+    pace = _default_stand_bulk_socks_udp_send_bps()
+    return max(0, pace)
+
+
+def _socks_udp_chunk_for_stand(byte_count: int, cli_chunk_bytes: int) -> int:
+    """Размер полезной нагрузки внутри SOCKS5 UDP-дейтаграммы (до шапки SOCKS).
+
+    Приоритет: ``MASQUE_STAND_SOCKS_UDP_CHUNK`` → ``--udp-chunk-bytes`` → smoke 1200 / bulk 8192.
+    """
+    raw = (os.environ.get("MASQUE_STAND_SOCKS_UDP_CHUNK") or "").strip()
+    if raw != "":
+        try:
+            c = int(raw)
+        except ValueError:
+            c = 0
+    else:
+        c = int(cli_chunk_bytes) if int(cli_chunk_bytes) > 0 else 0
+    if c > 0:
+        return max(512, min(65_400, c))
+    if int(byte_count) <= BYTES_10KB:
+        return 1200
+    return MASQUE_STAND_UDP_CHUNK_BULK_DEFAULT
 
 
 def _env_for_host_go_test() -> dict:
@@ -140,6 +303,12 @@ QUIC_PACKET_RECEIVE_INGRESS_MANDATORY_KEYS = (
 )
 
 
+def _connect_ip_stand_client_config() -> str:
+    """CONNECT-IP TUN/client JSON для tcp_ip*; переопределение через MASQUE_CONNECT_IP_CLIENT_CONFIG (A/B)."""
+    raw = (os.environ.get("MASQUE_CONNECT_IP_CLIENT_CONFIG") or "").strip()
+    return raw if raw else CONNECT_IP_CLIENT_CONFIG
+
+
 def skip_stand_compose_up() -> bool:
     v = (os.environ.get("MASQUE_STAND_SKIP_COMPOSE_UP") or "").strip().lower()
     return v in ("1", "true", "yes")
@@ -162,7 +331,24 @@ DEST_HOST = os.environ["MASQUE_DST_HOST"]
 DEST_PORT = int(os.environ["MASQUE_DST_PORT"])
 
 def socks5_tcp_connect(proxy_host, proxy_port, ip, port):
-    s = socket.create_connection((proxy_host, proxy_port), timeout=20)
+    raw_budget = os.environ.get("MASQUE_STAND_SOCKS_TCP_DEADLINE_SEC")
+    if raw_budget is None:
+        sock = socket.create_connection((proxy_host, proxy_port), timeout=20)
+    else:
+        budget = float(raw_budget)
+        start = time.monotonic()
+        last_exc = TimeoutError("proxy tcp connect exhausted budget")
+        while time.monotonic() - start < budget:
+            tout = max(5.0, min(22.0, budget - (time.monotonic() - start)))
+            try:
+                sock = socket.create_connection((proxy_host, proxy_port), timeout=tout)
+                break
+            except TimeoutError as exc:
+                last_exc = exc
+                time.sleep(0.35)
+        else:
+            raise last_exc
+    s = sock
     s.sendall(b"\x05\x01\x00")
     ver, method = s.recv(2)
     if ver != 5 or method != 0:
@@ -200,9 +386,21 @@ def socks5_tcp_connect(proxy_host, proxy_port, ip, port):
 
 def main():
     s = socks5_tcp_connect("127.0.0.1", 1080, DEST_HOST, DEST_PORT)
-    payload = bytes(BYTE_COUNT)
+    # Chunked send: one giant sendall(100MiB) can block unbounded on slow CONNECT-stream;
+    # smaller writes allow ``timeout`` around this process to take effect between chunks.
+    raw_chunk = (os.environ.get("MASQUE_TCPSEND_CHUNK_BYTES") or "1048576").strip()
     try:
-        s.sendall(memoryview(payload))
+        chunk_sz = max(4096, int(raw_chunk))
+    except ValueError:
+        chunk_sz = 1048576
+    buf = bytes(min(chunk_sz, max(1, BYTE_COUNT)))
+    mv = memoryview(buf)
+    try:
+        sent = 0
+        while sent < BYTE_COUNT:
+            n = min(len(buf), BYTE_COUNT - sent)
+            s.sendall(mv[:n])
+            sent += n
     except OSError as ex:
         raise SystemExit(str(ex))
     # Let the HTTP/3 stream / pipe drain before half-close; otherwise tail bytes
@@ -302,7 +500,10 @@ raise SystemExit(0 if ok else 2)
 """
 
 BYTES_10KB = 10 * 1024
+BYTES_100MIB = 100 * 1024 * 1024
 BYTES_500MB = 500 * 1024 * 1024
+# CI/runtime smoke JSON thresholds (100 MiB канонический объём стенда).
+SMOKE_CONTRACT_MAX_ELAPSED_MS_DEFAULT = 1_200_000
 SMOKE_DEADLINE_SEC = 5.0
 
 # Max UDP payload per IPv4 datagram from app perspective (CONNECT-IP tunnel path).
@@ -658,10 +859,7 @@ BULK_TCP_IP_NEAR_FULL_MICRO_LOSS_BUDGET_MARGIN_ABS_SEC = 1.0
 # high (bytes/sec >> default CI matrix) under slow Desktop Docker: drain/hashing need more
 # wall clock without loosening ratio/hash gates.
 BULK_TCP_IP_NEAR_FULL_HIGH_RATE_BPS_THRESHOLD = 100_000_000
-# Fail-fast contract for bulk CONNECT-IP on stand:
-# if sink stops growing after sender completion, classify as fail immediately.
-BULK_TCP_IP_STALL_EARLY_EXIT_WINDOW_SEC = 1.0
-BULK_TCP_IP_STALL_STARTUP_GRACE_SEC = 2.0
+# Bulk CONNECT-IP recv: см. `_stand_sink_no_traffic_abort_sec` / ``MASQUE_STAND_SINK_NO_TRAFFIC_SEC``.
 # UDP socket buffers for CONNECT-IP bulk harness path (socat sink + sender socket).
 BULK_TCP_IP_SOCKET_BUF_DEFAULT = 16 * 1024 * 1024
 BULK_TCP_IP_SOCKET_BUF_SLOW_HIGH_RATE = 64 * 1024 * 1024
@@ -733,14 +931,286 @@ def parse_iperf_udp_result(raw: str) -> dict:
     }
 
 
-def run(cmd, cwd=None, env=None, check=True):
-    print(f"$ {' '.join(cmd)}")
-    return subprocess.run(cmd, cwd=cwd, env=env, check=check, text=True)
+def _stand_cmd_heartbeat_sec(explicit: float | None) -> float:
+    """Интервал «ещё живой» для длительных subprocess; 0 = выкл. Env: MASQUE_STAND_CMD_HEARTBEAT_SEC."""
+    if explicit is not None:
+        return max(0.0, float(explicit))
+    raw = (os.environ.get("MASQUE_STAND_CMD_HEARTBEAT_SEC") or "12").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 12.0
 
 
-def run_capture(cmd, cwd=None, env=None):
-    print(f"$ {' '.join(cmd)}")
-    return subprocess.run(cmd, cwd=cwd, env=env, check=True, text=True, capture_output=True)
+def _stand_wait_progress_sec() -> float:
+    """Период логов wait_for_bytes*; 0 = выкл. Env: MASQUE_STAND_WAIT_PROGRESS_SEC."""
+    raw = (os.environ.get("MASQUE_STAND_WAIT_PROGRESS_SEC") or "8").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 8.0
+
+
+def _stand_sink_no_traffic_abort_sec(*, legacy_env_fallbacks: tuple[str, ...] = ()) -> float:
+    """Порог «файл-приёмник не растёт» перед обрывом ждущей фазы.
+
+    Основное: ``MASQUE_STAND_SINK_NO_TRAFFIC_SEC`` (по умолчанию ``1`` с).
+    Если не задано, по очереди читаются ``legacy_env_fallbacks`` для обратной совместимости
+    со старыми узкими переменными вроде ``MASQUE_STAND_UDP_PACED_STALL_WINDOW_SEC``.
+    Минимум 0.05 с, чтобы опрос статов не скатывался в busy-loop только из‑за float.
+    """
+    raw = (os.environ.get("MASQUE_STAND_SINK_NO_TRAFFIC_SEC") or "").strip()
+    if not raw:
+        for key in legacy_env_fallbacks:
+            raw = (os.environ.get(key) or "").strip()
+            if raw:
+                break
+    if not raw:
+        return 1.0
+    try:
+        return max(0.05, float(raw))
+    except ValueError:
+        return 1.0
+
+
+def _stand_listener_progress_sec() -> float:
+    raw = (os.environ.get("MASQUE_STAND_LISTENER_PROGRESS_SEC") or "4").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 4.0
+
+
+def _udp_send_sink_kill_idle_sec(_target_rate_bps: int) -> float:
+    """Idle до kill отправителя: канонический env + совместимость ``MASQUE_STAND_UDP_SEND_SINK_IDLE_SEC``."""
+    return _stand_sink_no_traffic_abort_sec(
+        legacy_env_fallbacks=("MASQUE_STAND_UDP_SEND_SINK_IDLE_SEC",),
+    )
+
+
+def _udp_send_sink_zero_abort_sec() -> float:
+    """Полный zero на sink перед kill: канонический env + ``MASQUE_STAND_UDP_SEND_SINK_ZERO_ABORT_SEC``."""
+    return _stand_sink_no_traffic_abort_sec(
+        legacy_env_fallbacks=(
+            "MASQUE_STAND_UDP_SEND_SINK_ZERO_ABORT_SEC",
+            "MASQUE_STAND_UDP_SEND_SINK_IDLE_SEC",
+        ),
+    )
+
+
+def _udp_send_sink_ramp_grace_sec(_paced_budget: int, _idle_kill: float) -> float:
+    """Не задерживаем перед проверкой «нет роста»; см. только ``MASQUE_STAND_UDP_SEND_SINK_RAMP_SEC``."""
+    raw = (os.environ.get("MASQUE_STAND_UDP_SEND_SINK_RAMP_SEC") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, min(300.0, float(raw)))
+    except ValueError:
+        return 0.0
+
+
+def _run_udp_sender_exec_with_sink_watch(
+    docker,
+    client_container,
+    send_shell_lc: str,
+    server_container,
+    sink_path,
+    byte_count,
+    *,
+    target_rate_bps: int,
+    paced_budget_sec: int,
+    max_wall_seconds: float,
+) -> subprocess.CompletedProcess:
+    """Popen docker exec отправителя; при отсутствии роста sink завершаем процесс (не до timeout 400)."""
+    idle_kill = _udp_send_sink_kill_idle_sec(target_rate_bps)
+    zero_abort = _udp_send_sink_zero_abort_sec()
+    ramp_grace = _udp_send_sink_ramp_grace_sec(paced_budget_sec, idle_kill)
+    _poll_raw = (os.environ.get("MASQUE_STAND_UDP_SEND_SINK_POLL_SEC") or "0.25").strip() or "0.25"
+    try:
+        poll_cfg = float(_poll_raw)
+    except ValueError:
+        poll_cfg = 0.25
+    poll_cfg = max(0.05, min(2.0, poll_cfg))
+    sleep_between = max(0.05, min(poll_cfg, idle_kill / 8.0, 0.5))
+
+    cmd = [docker, "exec", client_container, "sh", "-lc", send_shell_lc]
+    print(f"$ {' '.join(cmd)}", flush=True)
+
+    stop_evt = threading.Event()
+    t_anchor = time.monotonic()
+
+    def _udp_send_console_beat():
+        while not stop_evt.wait(10.0):
+            elapsed_b = time.monotonic() - t_anchor
+            got_now = _sink_stat_size(docker, server_container, sink_path)
+            got_lbl = "?" if got_now is None else str(got_now)
+            print(
+                f"[stand udp send-heartbeat] ~{elapsed_b:.0f}s sink={got_lbl}/{byte_count} "
+                f"(idle_abort={idle_kill}s после ramp={ramp_grace:.0f}s; zero_abort={zero_abort:.0f}s)",
+                flush=True,
+            )
+
+    threading.Thread(target=_udp_send_console_beat, daemon=True).start()
+
+    pop_kw: dict = {
+        "cwd": ROOT,
+        "text": True,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        # PIPE без читателя блокирует ``docker.exe exec`` после заполнения буфера stderr.
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        cnow = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if cnow:
+            pop_kw["creationflags"] = int(cnow)
+    proc = subprocess.Popen(cmd, **pop_kw)
+    t0 = t_anchor
+    last_growth = float(t0)
+    last_got_seen = -1
+    abort_note = ""
+    got_peak = 0
+    stat_warn_last = 0.0
+
+    try:
+        while True:
+            rc = proc.poll()
+            elapsed = time.monotonic() - t0
+            if rc is not None:
+                break
+            if elapsed >= max_wall_seconds:
+                abort_note = f"sink_watch max_wall_sec={max_wall_seconds}"
+                _docker_exec_proc_nuke(proc)
+                break
+
+            got = _sink_stat_size(docker, server_container, sink_path)
+            if got is None:
+                now_warn = time.monotonic()
+                if now_warn - stat_warn_last >= 12.0:
+                    print("[stand udp send] sink stat: docker exec timeout, retry poll", flush=True)
+                    stat_warn_last = now_warn
+                time.sleep(0.2)
+                continue
+            got_peak = max(got_peak, got)
+            now_m = time.monotonic()
+
+            if got > last_got_seen:
+                last_got_seen = got
+                last_growth = now_m
+
+            if got >= byte_count:
+                abort_note = ""
+                _docker_exec_proc_nuke(proc)
+                try:
+                    proc.wait(timeout=min(120.0, max(25.0, idle_kill + 45.0)))
+                except subprocess.TimeoutExpired:
+                    _docker_exec_proc_nuke(proc)
+                break
+
+            if got == 0 and elapsed >= zero_abort:
+                abort_note = f"sink_zero_stall_abort>{zero_abort:.0f}s"
+                _docker_exec_proc_nuke(proc)
+                break
+
+            stagn = (
+                elapsed >= ramp_grace
+                and got < byte_count
+                and last_got_seen >= 0
+                and (now_m - last_growth) >= idle_kill
+            )
+            if stagn:
+                abort_note = f"sink_growth_stall got={got} idle_kill={idle_kill}s"
+                _docker_exec_proc_nuke(proc)
+                break
+
+            time.sleep(sleep_between)
+    finally:
+        stop_evt.set()
+
+    stderr_tail = ""
+    try:
+        if proc.stderr:
+            stderr_tail = (proc.stderr.read() or "").strip()
+    except OSError:
+        pass
+    try:
+        if proc.poll() is None:
+            _docker_exec_proc_nuke(proc, grace_sec=1.5)
+            final_rc = int(proc.wait(timeout=120))
+        else:
+            pr = proc.poll()
+            final_rc = int(pr) if pr is not None else -1
+    except subprocess.TimeoutExpired:
+        final_rc = -9
+
+    stderr_l = stderr_tail[-1500:] if len(stderr_tail) > 1500 else stderr_tail if stderr_tail else ""
+    aborted = bool(abort_note.strip())
+    merged_rc = (-9 if aborted and final_rc == 0 else final_rc)
+    stderr_out = abort_note.strip() + ("\nstderr_tail=\n" + stderr_l if stderr_tail else "")
+    fake = subprocess.CompletedProcess(
+        args=cmd,
+        returncode=int(merged_rc),
+        stdout="",
+        stderr=stderr_out,
+    )
+
+    if aborted:
+        print(f"[stand udp send] aborted: {abort_note.strip()} sink_peak={got_peak}", flush=True)
+    elif abort_note.strip() == "" and got_peak >= byte_count:
+        print(
+            f"[stand udp send] stopped sender after sink>={byte_count} (peak {got_peak})",
+            flush=True,
+        )
+
+    return fake
+
+
+def run(cmd, cwd=None, env=None, check=True, timeout=None, heartbeat_sec: float | None = None):
+    print(f"$ {' '.join(cmd)}", flush=True)
+    hb = _stand_cmd_heartbeat_sec(heartbeat_sec)
+    if hb <= 0:
+        return subprocess.run(cmd, cwd=cwd, env=env, check=check, text=True, timeout=timeout)
+    stop_evt = threading.Event()
+    started = time.monotonic()
+    brief = " ".join(str(c) for c in cmd[:6])
+    if len(cmd) > 6:
+        brief += " ..."
+
+    def _beat():
+        while not stop_evt.wait(hb):
+            dt = time.monotonic() - started
+            print(f"[stand heartbeat] {dt:.0f}s subprocess still running: {brief}", flush=True)
+
+    th = threading.Thread(target=_beat, daemon=True)
+    th.start()
+    try:
+        return subprocess.run(cmd, cwd=cwd, env=env, check=check, text=True, timeout=timeout)
+    finally:
+        stop_evt.set()
+
+
+def run_capture(cmd, cwd=None, env=None, heartbeat_sec: float | None = None):
+    print(f"$ {' '.join(cmd)}", flush=True)
+    hb = _stand_cmd_heartbeat_sec(heartbeat_sec)
+    if hb <= 0:
+        return subprocess.run(cmd, cwd=cwd, env=env, check=True, text=True, capture_output=True)
+    stop_evt = threading.Event()
+    started = time.monotonic()
+    brief = " ".join(str(c) for c in cmd[:6])
+    if len(cmd) > 6:
+        brief += " ..."
+
+    def _beat():
+        while not stop_evt.wait(hb):
+            dt = time.monotonic() - started
+            print(f"[stand heartbeat] {dt:.0f}s subprocess still running: {brief}", flush=True)
+
+    th = threading.Thread(target=_beat, daemon=True)
+    th.start()
+    try:
+        return subprocess.run(cmd, cwd=cwd, env=env, check=True, text=True, capture_output=True)
+    finally:
+        stop_evt.set()
 
 
 def docker_bin():
@@ -767,6 +1237,53 @@ def docker_exec_capture(docker, container, script, check=True, quiet=False):
             stderr=result.stderr,
         )
     return (result.stdout or "").strip()
+
+
+def _stand_docker_sink_stat_timeout_sec():
+    """Таймаут ``docker exec … stat`` для поллинга sink; 0/off = без таймаута (старое поведение)."""
+    raw = (os.environ.get("MASQUE_STAND_DOCKER_STAT_TIMEOUT_SEC") or "25").strip().lower()
+    if raw in ("0", "off", "none", "no", "false"):
+        return None
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 25.0
+
+
+def _sink_stat_size(docker: str, container: str, path: str):
+    """Размер файла в контейнере; ``None`` если ``docker exec`` не завершился до таймаута."""
+    cmd = [docker, "exec", container, "sh", "-lc", f"test -f {path} && stat -c %s {path} || printf '0\\n'"]
+    tout = _stand_docker_sink_stat_timeout_sec()
+    try:
+        kw: dict = {"cwd": ROOT, "text": True, "capture_output": True, "check": False}
+        if tout is not None:
+            kw["timeout"] = float(tout)
+        r = subprocess.run(cmd, **kw)
+    except subprocess.TimeoutExpired:
+        return None
+    out = (r.stdout or "").strip()
+    try:
+        return int((out or "0").splitlines()[0] or "0")
+    except (ValueError, IndexError):
+        return 0
+
+
+def _docker_exec_proc_nuke(proc: subprocess.Popen, *, grace_sec: float = 3.0) -> None:
+    """terminate → wait → kill для ``docker exec`` на стороне хоста (часто нужно на Windows)."""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    deadline = time.monotonic() + float(max(0.1, grace_sec))
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 def docker_logs_capture(docker, container):
@@ -1372,14 +1889,61 @@ def compose_up(docker, client_config, server_config=SERVER_CONFIG_DEFAULT):
     time.sleep(1.0)
 
 
-def wait_socks_ready(docker, timeout_sec=12):
-    deadline = time.time() + timeout_sec
+def wait_socks_ready(docker, timeout_sec=None):
+    """Ждём, пока на 127.0.0.1:1080 реально можно установить TCP (accept на SOCKS inbound)."""
+    ts = timeout_sec if timeout_sec is not None else _wait_socks_ready_timeout_sec()
+    deadline = time.time() + float(ts)
+    probe = (
+        'python3 -c "import base64; exec(base64.standard_b64decode(\''
+        + _SOCKS_READY_PROBE_B64
+        + "\').decode())\""
+    )
     while time.time() < deadline:
-        rc = _docker_exec_rc(docker, CLIENT_CONTAINER, "ss -ltn | grep -q ':1080 '", timeout_sec=2.5)
+        rc = _docker_exec_rc(docker, CLIENT_CONTAINER, probe, timeout_sec=12.0)
         if rc == 0:
             return
-        time.sleep(0.2)
-    raise RuntimeError("SOCKS listener on 1080 is not ready")
+        time.sleep(0.25)
+    raise RuntimeError("SOCKS5 inbound on 127.0.0.1:1080 is not responding")
+
+
+def _socks_tcp_ip_stack_dataplane_warm(
+    docker, warmup_host: str = "10.200.0.3", warmup_port: int = 5599
+) -> None:
+    """SOCKS CONNECT через connect_ip/tcp netstack; хост/порт должны принимать TCP (см. run_tcp_stream)."""
+    inner = (
+        'python3 -c "import base64; exec(base64.standard_b64decode(\''
+        + _SOCKS5_STACK_WARM_B64
+        + "\').decode())\""
+    )
+    script = (
+        "export MASQUE_WARM_HOST="
+        + str(warmup_host).strip()
+        + "; export MASQUE_WARM_PORT="
+        + str(int(warmup_port))
+        + "; export MASQUE_STAND_SOCKS_TCP_DEADLINE_SEC=12; "
+        + inner
+    )
+    rc = _docker_exec_rc(docker, CLIENT_CONTAINER, script, timeout_sec=55.0)
+    if rc != 0:
+        time.sleep(1.0)
+        rc = _docker_exec_rc(docker, CLIENT_CONTAINER, script, timeout_sec=55.0)
+    if rc != 0:
+        raise RuntimeError(
+            "socks_tcp_ip_stack warmup failed (SOCKS CONNECT via connect_ip+tcp netstack returned failure; "
+            "warm script exit "
+            f"{rc}). Check client config {CONNECT_IP_TCP_STACK_CLIENT_CONFIG} and that 10.200.0.3 is reachable "
+            "through the stack inbound."
+        )
+
+
+def _wait_socks_ready_timeout_sec() -> float:
+    raw = (os.environ.get("MASQUE_WAIT_SOCKS_SEC") or "").strip()
+    if not raw:
+        return 35.0
+    try:
+        return max(10.0, min(float(raw), 120.0))
+    except ValueError:
+        return 35.0
 
 
 def wait_tcp_listener(docker, container, port, timeout_sec=5):
@@ -1395,10 +1959,21 @@ def wait_tcp_listener(docker, container, port, timeout_sec=5):
         f"ss -ltn 2>/dev/null | grep -qF '*:{p}' || "
         f"ss -ltn 2>/dev/null | grep -q \"[::]:{p}\")"
     )
+    loop_t0 = time.time()
+    last_log = loop_t0
+    pr_every = _stand_listener_progress_sec()
     while time.time() < deadline:
         rc = _docker_exec_rc(docker, container, cmd, timeout_sec=2.5)
         if rc == 0:
             return
+        now = time.time()
+        if pr_every > 0 and (now - loop_t0) >= 2.0 and (now - last_log) >= pr_every:
+            print(
+                f"[stand wait] TCP listen {container}:{port} "
+                f"not ready yet ({now - loop_t0:.0f}s / {timeout_sec}s cap)",
+                flush=True,
+            )
+            last_log = now
         time.sleep(0.2)
     raise RuntimeError(f"TCP listener not ready on {container}:{port}")
 
@@ -1411,10 +1986,21 @@ def wait_udp_listener(docker, container, port, timeout_sec=5):
         f"ss -lun 2>/dev/null | grep -qF '*:{p}' || "
         f"ss -lun 2>/dev/null | grep -q \"[::]:{p}\")"
     )
+    loop_t0 = time.time()
+    last_log = loop_t0
+    pr_every = _stand_listener_progress_sec()
     while time.time() < deadline:
         rc = _docker_exec_rc(docker, container, cmd, timeout_sec=2.5)
         if rc == 0:
             return
+        now = time.time()
+        if pr_every > 0 and (now - loop_t0) >= 2.0 and (now - last_log) >= pr_every:
+            print(
+                f"[stand wait] UDP listen {container}:{port} "
+                f"not ready yet ({now - loop_t0:.0f}s / {timeout_sec}s cap)",
+                flush=True,
+            )
+            last_log = now
         time.sleep(0.2)
     raise RuntimeError(f"UDP listener not ready on {container}:{port}")
 
@@ -1434,56 +2020,113 @@ def bytes_on_file(docker, container, path):
         return 0
 
 
-def wait_for_bytes(docker, container, path, expected, timeout_sec):
+def wait_for_bytes(docker, container, path, expected, timeout_sec, progress_label: str | None = None):
     deadline = time.time() + timeout_sec
+    loop_t0 = time.time()
     got = 0
-    while time.time() < deadline:
-        got = bytes_on_file(docker, container, path)
-        if got >= expected:
-            return got
-        time.sleep(0.1)
-    return got
-
-
-def wait_for_bytes_with_stall_early_exit(
-    docker,
-    container,
-    path,
-    expected,
-    timeout_sec,
-    stall_window_sec=0.0,
-    startup_grace_sec=0.0,
-):
-    """
-    Wait until ``expected`` bytes, but allow early exit when sink size is stalled.
-
-    This is intended for unpaced UDP bulk probes where the sender finishes quickly
-    and prolonged wait mostly reflects harness timeout, not active transfer.
-    """
-    deadline = time.time() + timeout_sec
-    got = 0
-    last = -1
-    last_growth_ts = time.time()
-    stall_window_sec = max(0.0, float(stall_window_sec))
-    startup_grace_sec = max(0.0, float(startup_grace_sec))
+    last_log = loop_t0
+    pr_every = _stand_wait_progress_sec()
+    label = progress_label or path
     while time.time() < deadline:
         now = time.time()
         got = bytes_on_file(docker, container, path)
         if got >= expected:
             return got
-        if got > last:
-            last = got
-            last_growth_ts = now
-        elif (
-            stall_window_sec > 0.0
-            and (now - last_growth_ts) >= stall_window_sec
-            and (now + 1e-9) >= (deadline - max(0.0, float(timeout_sec) - startup_grace_sec))
-        ):
-            # Sink is no longer growing; keep FAIL semantics but avoid waiting for the
-            # full timeout when transfer is already clearly incomplete.
-            return got
+        if pr_every > 0 and (now - last_log) >= pr_every:
+            rem = max(0.0, deadline - now)
+            print(
+                f"[stand wait] sink {container} {label} got={got}/{expected} "
+                f"elapsed={now - loop_t0:.1f}s remaining~{rem:.1f}s",
+                flush=True,
+            )
+            last_log = now
         time.sleep(0.1)
     return got
+
+
+def wait_for_bytes_stop_when_no_growth(
+    docker,
+    container,
+    path,
+    expected,
+    no_growth_idle_sec: float,
+    poll_interval_sec: float = 0.1,
+    max_wait_sec: float | None = None,
+    progress_label: str | None = None,
+) -> int:
+    """До ``expected`` байт на файле; если размер не растёт ``no_growth_idle_sec`` сек — выход.
+
+    Обычно ``no_growth_idle_sec`` задаётся через ``MASQUE_STAND_SINK_NO_TRAFFIC_SEC`` и
+    ``wait_for_sink_bytes_abort_on_no_traffic``.
+
+    ``max_wait_sec``: верхняя граница (иначе без неё корректно только при активном постоянном приросте).
+    """
+    idle = max(0.05, float(no_growth_idle_sec))
+    step = max(0.05, float(poll_interval_sec))
+    last = -1
+    last_change = time.time()
+    loop_t0 = time.time()
+    got = 0
+    last_log = loop_t0
+    pr_every = _stand_wait_progress_sec()
+    label = progress_label or path
+    stat_hang_warn = float(loop_t0)
+    while max_wait_sec is None or (time.time() - loop_t0) < float(max_wait_sec):
+        now = time.time()
+        snap = _sink_stat_size(docker, container, path)
+        if snap is None:
+            if now - stat_hang_warn >= 18.0:
+                print(f"[stand wait] sink_stat_timeout retry {container} {label}", flush=True)
+                stat_hang_warn = now
+            time.sleep(step)
+            continue
+        got = snap
+        if got >= expected:
+            return got
+        if got != last:
+            last = got
+            last_change = now
+        elif (now - last_change) >= idle:
+            return got
+        if pr_every > 0 and (now - last_log) >= pr_every:
+            stall = now - last_change
+            cap = f"max_wait={max_wait_sec}s" if max_wait_sec is not None else "no max_wait"
+            print(
+                f"[stand wait] sink {container} {label} got={got}/{expected} "
+                f"elapsed={now - loop_t0:.1f}s no_growth_for={stall:.1f}s idle_limit={idle}s ({cap})",
+                flush=True,
+            )
+            last_log = now
+        time.sleep(step)
+    return got
+
+
+def wait_for_sink_bytes_abort_on_no_traffic(
+    docker,
+    container,
+    path,
+    expected_bytes: int,
+    max_wait_sec: float,
+    *,
+    progress_label: str | None = None,
+    legacy_idle_env_fallbacks: tuple[str, ...] = (),
+    poll_interval_sec: float | None = None,
+) -> int:
+    """Дочитать ожидаемый объём или выйти, если приёмник перестал расти см. `_stand_sink_no_traffic_abort_sec`."""
+    idle = _stand_sink_no_traffic_abort_sec(legacy_env_fallbacks=legacy_idle_env_fallbacks)
+    step = idle / 10.0 if poll_interval_sec is None else poll_interval_sec
+    step = max(0.05, min(0.5, float(step)))
+    label = progress_label if progress_label else path
+    return wait_for_bytes_stop_when_no_growth(
+        docker,
+        container,
+        path,
+        expected_bytes,
+        idle,
+        poll_interval_sec=step,
+        max_wait_sec=float(max_wait_sec),
+        progress_label=label,
+    )
 
 
 def wait_for_stable_size(docker, container, path, expected, timeout_sec, checks=4, interval_sec=0.2):
@@ -3007,6 +3650,513 @@ def _parse_csv_floats(s, default):
     return out if out else list(default)
 
 
+def _exec_python_stdin(docker: str, container: str, script: str) -> str:
+    proc = subprocess.run(
+        [docker, "exec", "-i", container, "python3", "-"],
+        input=script,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return (proc.stdout or "").strip().replace("\r", "")
+
+
+def _matrix_expected_sha256_zeros_client(docker: str, nbytes: int) -> str:
+    n = int(nbytes)
+    script = (
+        "import hashlib\n"
+        f"n = {n}\n"
+        "h = hashlib.sha256()\n"
+        "z = b'\\x00' * (256 * 1024)\n"
+        "while n:\n"
+        "    c = min(n, len(z))\n"
+        "    h.update(z[:c])\n"
+        "    n -= c\n"
+        "print(h.hexdigest())\n"
+    )
+    out = _exec_python_stdin(docker, CLIENT_CONTAINER, script)
+    return out.split()[0] if out else ""
+
+
+def _matrix_sink_sha256_server(docker: str, path: str) -> str:
+    script = (
+        "import hashlib, os, sys\n"
+        f"p = {path!r}\n"
+        "h = hashlib.sha256()\n"
+        "if not os.path.isfile(p):\n"
+        "    print('')\n"
+        "    sys.exit(0)\n"
+        "with open(p, 'rb') as f:\n"
+        "    while True:\n"
+        "        b = f.read(256 * 1024)\n"
+        "        if not b:\n"
+        "            break\n"
+        "        h.update(b)\n"
+        "print(h.hexdigest())\n"
+    )
+    out = _exec_python_stdin(docker, SERVER_CONTAINER, script)
+    return out.split()[0] if out else ""
+
+
+def _install_stand_probe_scripts(docker: str) -> None:
+    for host_path, dest in (
+        (SOCKS_UDP_PROBE_HOST_PATH, SOCKS_UDP_PROBE_CONTAINER_PATH),
+        (TCP_THROUGHPUT_MEASURE_HOST_PATH, TCP_THROUGHPUT_MEASURE_CONTAINER_PATH),
+    ):
+        if not host_path.is_file():
+            raise FileNotFoundError(str(host_path))
+        run(
+            [docker, "cp", str(host_path), f"{CLIENT_CONTAINER}:{dest}"],
+            cwd=ROOT,
+        )
+
+
+def _wait_container_shell_ok(docker: str, container: str, attempts: int = 45) -> None:
+    for _ in range(max(1, attempts)):
+        if _docker_exec_rc(docker, container, "true", timeout_sec=2.0) == 0:
+            return
+        time.sleep(1.0)
+    raise RuntimeError(f"container {container} not ready")
+
+
+def _compose_recreate_client_core(docker: str, client_config: str) -> None:
+    env = os.environ.copy()
+    env["MASQUE_CLIENT_CONFIG"] = client_config
+    env["MASQUE_SERVER_CONFIG"] = SERVER_CONFIG_DEFAULT
+    if ARTIFACT.is_file():
+        env["SINGBOX_ARTIFACT_STAMP"] = hashlib.sha256(ARTIFACT.read_bytes()).hexdigest()
+    run(
+        [
+            docker,
+            "compose",
+            "-f",
+            str(COMPOSE_FILE),
+            "up",
+            "-d",
+            "--force-recreate",
+            CLIENT_CONTAINER,
+        ],
+        cwd=ROOT,
+        env=env,
+        check=True,
+    )
+    _wait_container_shell_ok(docker, CLIENT_CONTAINER)
+
+
+def _socks_udp_probe_exec_env(
+    socks_port: int,
+    udp_host: str,
+    udp_port: int,
+    ub: int,
+    *,
+    pace_bps: int,
+    chunk: int,
+) -> list[str]:
+    env = [
+        "-e",
+        "MASQUE_SOCKS_HOST=127.0.0.1",
+        "-e",
+        f"MASQUE_SOCKS_PORT={socks_port}",
+        "-e",
+        f"MASQUE_UDP_DST_HOST={udp_host}",
+        "-e",
+        f"MASQUE_UDP_DST_PORT={udp_port}",
+        "-e",
+        f"MASQUE_UDP_SEND_BYTES={ub}",
+        "-e",
+        f"MASQUE_SOCKS_UDP_CHUNK={chunk}",
+    ]
+    if int(pace_bps) > 0:
+        env.extend(["-e", f"MASQUE_SOCKS_UDP_SEND_BPS={int(pace_bps)}"])
+    return env
+
+
+def run_udp_socks_associate(docker, byte_count, udp_chunk_cli: int = 0, socks_cli_bps: int = 0):
+    """SOCKS5 UDP ASSOCIATE -> endpoint CONNECT-UDP (не TUN ``udp``); большие объёмы — чанками в ``masque_socks_udp_probe.py``.
+
+    Uses ``docker exec -e`` without ``-T`` (флаг есть у ``docker compose exec``, но не у ``docker exec`` в Windows CLI).
+    """
+    target_host, port = "10.200.0.3", 5601
+    sink = "/tmp/masque-socks-udp-stand.bin"
+    chunk_eff = _socks_udp_chunk_for_stand(int(byte_count), int(udp_chunk_cli))
+    pace_bps = _socks_udp_pace_for_stand(int(byte_count), int(socks_cli_bps))
+    print(
+        f"[udp_socks_associate] SOCKS5 UDP assoc -> CONNECT-UDP: pace_bps={pace_bps} "
+        f"chunk={chunk_eff} nbytes={byte_count}",
+        flush=True,
+    )
+    base_srv, base_cli, base_wait = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
+    srv_to = max(int(base_srv), 120)
+    wait_cap = max(int(base_wait), 180)
+    if pace_bps > 0:
+        pb = _udp_paced_send_min_timeout_sec(byte_count, pace_bps)
+        srv_to = max(srv_to, int(pb) + _BULK_SERVER_PAD_SEC)
+        wait_cap = max(wait_cap, int(pb) + _BULK_WAIT_PAD_SEC)
+    recv_wait = 20 if byte_count == BYTES_10KB else int(wait_cap) + 5
+    probe_timeout = max(int(recv_wait) + 60, 120)
+    docker_exec(
+        docker,
+        SERVER_CONTAINER,
+        f"pkill -f 'UDP4-LISTEN:{port}' 2>/dev/null || true; sleep 0.15",
+        check=False,
+    )
+    docker_exec(docker, SERVER_CONTAINER, f"rm -f {sink}", check=False)
+    docker_exec(
+        docker,
+        SERVER_CONTAINER,
+        f"nohup timeout {srv_to} socat -u -T1 UDP4-LISTEN:{port},reuseaddr OPEN:{sink},creat,append "
+        f">/tmp/masque-socks-udp-stand.log 2>&1 &",
+    )
+    wait_udp_listener(docker, SERVER_CONTAINER, port, timeout_sec=40)
+    _install_stand_probe_scripts(docker)
+    start = time.time()
+    probe_err = None
+    try:
+        run(
+            [
+                docker,
+                "exec",
+                *_socks_udp_probe_exec_env(
+                    1080,
+                    target_host,
+                    port,
+                    int(byte_count),
+                    pace_bps=pace_bps,
+                    chunk=chunk_eff,
+                ),
+                CLIENT_CONTAINER,
+                "python3",
+                SOCKS_UDP_PROBE_CONTAINER_PATH,
+            ],
+            cwd=ROOT,
+            check=True,
+            timeout=probe_timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        probe_err = str(exc)
+    except subprocess.TimeoutExpired:
+        probe_err = "probe_timeout (docker exec)"
+    got = wait_for_sink_bytes_abort_on_no_traffic(
+        docker,
+        SERVER_CONTAINER,
+        sink,
+        int(byte_count),
+        float(recv_wait),
+        progress_label=f"{sink} udp_socks_associate",
+        legacy_idle_env_fallbacks=("MASQUE_SOCKS_UDP_STAND_NO_TRAFFIC_SEC",),
+    )
+    elapsed = time.time() - start
+    ok = bool(probe_err is None and got >= byte_count)
+    tm_elapsed = max(float(elapsed), 1e-9)
+    tmetrics = transfer_metrics(byte_count, got, tm_elapsed)
+    t_min_50 = _theoretical_transfer_sec_at_mbps(byte_count, _BULK_HARNESS_BASELINE_MBPS)
+    err_msg = None
+    if not ok:
+        err_msg = probe_err or "receiver incomplete"
+    err_class = "none"
+    err_source = "none"
+    if ok:
+        out_err = None
+    else:
+        out_err = err_msg
+        err_class = _classified_error_bucket(err_msg)
+        err_source = "runtime"
+    return {
+        "scenario": "udp_socks_associate",
+        "socks_udp_chunk": chunk_eff,
+        "socks_udp_send_bps": pace_bps,
+        "metric_layer": "application_payload",
+        "bytes_expected": byte_count,
+        "bytes_received": got,
+        "elapsed_sec": round(elapsed, 3),
+        "throughput_mbps": tmetrics["throughput_mbps"],
+        "theoretical_min_sec_at_50mbps": round(t_min_50, 3),
+        "ok": ok,
+        "error": out_err,
+        "error_class": err_class,
+        "error_source": err_source,
+    }
+
+
+def run_proxy_masque_matrix(docker: str, tcp_bytes: int, udp_bytes: int) -> dict:
+    """HTTP/SOCKS/mixed inbounds x connect_stream vs connect_ip (replaces legacy matrix shell).
+
+    Probe subprocesses: ``docker exec -e`` без ``-T`` (совместимость с Windows Docker CLI).
+    """
+    tcp_host, tcp_port = "10.200.0.3", 5602
+    udp_host, udp_port = "10.200.0.3", 5601
+    tcp_sink = "/tmp/masque-matrix-tcp.bin"
+    udp_sink = "/tmp/masque-matrix-udp.bin"
+    tb, ub = int(tcp_bytes), int(udp_bytes)
+    mtx_tcp_wall = float(max(180, _udp_tcp_stream_bulk_harness_timeouts(tb)[2] + 30))
+    mtx_tcp_idle_preview = _stand_sink_no_traffic_abort_sec(
+        legacy_env_fallbacks=("MASQUE_MATRIX_NO_TRAFFIC_SEC",)
+    )
+    mtx_udp_idle_preview = _stand_sink_no_traffic_abort_sec(
+        legacy_env_fallbacks=("MASQUE_MATRIX_NO_TRAFFIC_UDP_SEC", "MASQUE_MATRIX_NO_TRAFFIC_SEC")
+    )
+
+    rows: list[dict[str, str]] = []
+    matrix_fail = False
+    t0 = time.time()
+    # Один раз на объём: пересчёт SHA256(zeros) для 100 MiB на каждую строку матрицы даёт минуты «тишины» без вывода.
+    print(
+        f"[proxy_masque_matrix] computing expected sha256 (tcp_bytes={tb}, udp_bytes={ub}) …",
+        flush=True,
+    )
+    exp_hash_tcp = _matrix_expected_sha256_zeros_client(docker, tb)
+    exp_hash_udp = _matrix_expected_sha256_zeros_client(docker, ub)
+    print(
+        f"[proxy_masque_matrix] expected hashes ready; running rows "
+        f"(idle≈tcp {mtx_tcp_idle_preview}s / udp {mtx_udp_idle_preview}s → "
+        f"MASQUE_STAND_SINK_NO_TRAFFIC_SEC, legacy MATRIX_* …; tcp max_wait≤{mtx_tcp_wall:.0f}s) …",
+        flush=True,
+    )
+
+    def note(ep: str, dp: str, inbound: str, result: str, detail: str) -> None:
+        rows.append(
+            {
+                "endpoint_config": ep,
+                "dataplane": dp,
+                "inbound": inbound,
+                "result": result,
+                "detail": detail,
+            }
+        )
+
+    def tcp_row(ep: str, inbound_tag: str, bench_mode: str, proxy_port: int) -> None:
+        nonlocal matrix_fail
+        print(
+            f"[proxy_masque_matrix] {ep} tcp_connect_stream inbound={inbound_tag} "
+            f"port={proxy_port} mode={bench_mode} bytes={tb}",
+            flush=True,
+        )
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"pkill -f 'TCP-LISTEN:{tcp_port}' 2>/dev/null || true; rm -f {tcp_sink}; sleep 0.15",
+            check=False,
+        )
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"nohup socat -u TCP-LISTEN:{tcp_port},reuseaddr OPEN:{tcp_sink},creat,trunc "
+            f">/tmp/masque-matrix-tcp.log 2>&1 &",
+        )
+        wait_tcp_listener(docker, SERVER_CONTAINER, tcp_port, timeout_sec=60)
+        try:
+            run(
+                [
+                    docker,
+                    "exec",
+                    "-e",
+                    f"MASQUE_BENCH_SCENARIO={inbound_tag}",
+                    "-e",
+                    f"MASQUE_BENCH_MODE={bench_mode}",
+                    "-e",
+                    "MASQUE_PROXY_HOST=127.0.0.1",
+                    "-e",
+                    f"MASQUE_PROXY_PORT={proxy_port}",
+                    "-e",
+                    f"MASQUE_DST_HOST={tcp_host}",
+                    "-e",
+                    f"MASQUE_DST_PORT={tcp_port}",
+                    "-e",
+                    f"MASQUE_TCPSEND_BYTES={tb}",
+                    "-e",
+                    "MASQUE_BENCH_DRAIN_SLEEP_SEC=1.2",
+                    CLIENT_CONTAINER,
+                    "python3",
+                    TCP_THROUGHPUT_MEASURE_CONTAINER_PATH,
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            prc = 0
+        except subprocess.CalledProcessError as exc:
+            prc = int(exc.returncode)
+        if prc != 0:
+            note(ep, "tcp_connect_stream", inbound_tag, "FAIL", f"client_probe_exit={prc}")
+            matrix_fail = True
+            docker_exec(
+                docker,
+                SERVER_CONTAINER,
+                f"pkill -f 'TCP-LISTEN:{tcp_port}' 2>/dev/null || true",
+                check=False,
+            )
+            return
+        got = wait_for_sink_bytes_abort_on_no_traffic(
+            docker,
+            SERVER_CONTAINER,
+            tcp_sink,
+            tb,
+            mtx_tcp_wall,
+            progress_label=f"{tcp_sink} proxy_masque_matrix-tcp",
+            legacy_idle_env_fallbacks=("MASQUE_MATRIX_NO_TRAFFIC_SEC",),
+        )
+        if got != tb:
+            note(ep, "tcp_connect_stream", inbound_tag, "FAIL", f"recv_bytes={got}_want_{tb}")
+            matrix_fail = True
+        else:
+            hash_ok = _matrix_sink_sha256_server(docker, tcp_sink)
+            if hash_ok == exp_hash_tcp:
+                note(ep, "tcp_connect_stream", inbound_tag, "OK", "sha256_ok")
+            else:
+                note(ep, "tcp_connect_stream", inbound_tag, "FAIL", "sha256_mismatch")
+                matrix_fail = True
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"pkill -f 'TCP-LISTEN:{tcp_port}' 2>/dev/null || true; sleep 0.15",
+            check=False,
+        )
+
+    def udp_row(ep: str, inbound_tag: str, socks_port: int) -> None:
+        nonlocal matrix_fail
+        pace = _socks_udp_pace_for_stand(int(ub), 0)
+        chunk_m = _socks_udp_chunk_for_stand(int(ub), 0)
+        pace_note = f" pace_bps={pace}" if pace > 0 else " pace_bps=0"
+        print(
+            f"[proxy_masque_matrix] {ep} udp_socks_associate inbound={inbound_tag} "
+            f"socks_port={socks_port} bytes={ub} chunk={chunk_m}{pace_note}",
+            flush=True,
+        )
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"pkill -f 'UDP4-LISTEN:{udp_port}' 2>/dev/null || true; rm -f {udp_sink}; sleep 0.15",
+            check=False,
+        )
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"nohup socat -u -T1 UDP4-LISTEN:{udp_port},reuseaddr OPEN:{udp_sink},creat,trunc "
+            f">/tmp/masque-matrix-udp.log 2>&1 &",
+        )
+        wait_udp_listener(docker, SERVER_CONTAINER, udp_port, timeout_sec=40)
+        try:
+            run(
+                [
+                    docker,
+                    "exec",
+                    *_socks_udp_probe_exec_env(
+                        socks_port,
+                        udp_host,
+                        udp_port,
+                        ub,
+                        pace_bps=pace,
+                        chunk=chunk_m,
+                    ),
+                    CLIENT_CONTAINER,
+                    "python3",
+                    SOCKS_UDP_PROBE_CONTAINER_PATH,
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            prc = 0
+        except subprocess.CalledProcessError as exc:
+            prc = int(exc.returncode)
+        if prc != 0:
+            note(ep, "udp_socks_associate", inbound_tag, "FAIL", f"udp_probe_exit={prc}")
+            matrix_fail = True
+            docker_exec(
+                docker,
+                SERVER_CONTAINER,
+                f"pkill -f 'UDP4-LISTEN:{udp_port}' 2>/dev/null || true",
+                check=False,
+            )
+            return
+        _, _, _mx_bw = _udp_tcp_stream_bulk_harness_timeouts(ub)
+        _mx_wait = max(int(_mx_bw), 180)
+        if pace > 0:
+            _mx_pb = _udp_paced_send_min_timeout_sec(ub, pace)
+            _mx_wait = max(_mx_wait, int(_mx_pb) + _BULK_WAIT_PAD_SEC)
+        mtx_recv_cap = float(20 if ub == BYTES_10KB else int(_mx_wait) + 5)
+        got = wait_for_sink_bytes_abort_on_no_traffic(
+            docker,
+            SERVER_CONTAINER,
+            udp_sink,
+            ub,
+            mtx_recv_cap,
+            progress_label=f"{udp_sink} proxy_masque_matrix-udp",
+            legacy_idle_env_fallbacks=("MASQUE_MATRIX_NO_TRAFFIC_UDP_SEC", "MASQUE_MATRIX_NO_TRAFFIC_SEC"),
+        )
+        if got < ub:
+            note(ep, "udp_socks_associate", inbound_tag, "FAIL", f"recv_bytes={got}_min_{ub}")
+            matrix_fail = True
+        else:
+            hash_ok = _matrix_sink_sha256_server(docker, udp_sink)
+            if hash_ok == exp_hash_udp:
+                note(ep, "udp_socks_associate", inbound_tag, "OK", "sha256_ok")
+            else:
+                note(ep, "udp_socks_associate", inbound_tag, "FAIL", "sha256_mismatch")
+                matrix_fail = True
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"pkill -f 'UDP4-LISTEN:{udp_port}' 2>/dev/null || true; sleep 0.15",
+            check=False,
+        )
+
+    _install_stand_probe_scripts(docker)
+    docker_exec(docker, CLIENT_CONTAINER, "sing-box check -c //etc/sing-box/config.json", check=True)
+
+    ep_a = "connect_udp+stream"
+    tcp_row(ep_a, "http:8080", "http", 8080)
+    tcp_row(ep_a, "socks:1080", "socks", 1080)
+    tcp_row(ep_a, "mixed_http:2080", "http", 2080)
+    tcp_row(ep_a, "mixed_socks:2080", "socks", 2080)
+    udp_row(ep_a, "socks:1080", 1080)
+    udp_row(ep_a, "mixed_socks:2080", 2080)
+    note(ep_a, "udp_socks_associate", "http:8080", "SKIP", "HTTP_inbound_has_no_UDP_associate")
+
+    _compose_recreate_client_core(docker, PROXY_MATRIX_IP_CLIENT_CONFIG)
+    _install_stand_probe_scripts(docker)
+    docker_exec(docker, CLIENT_CONTAINER, "sing-box check -c //etc/sing-box/config.json", check=True)
+
+    ep_b = "connect_ip"
+    tcp_row(ep_b, "http:8080", "http", 8080)
+    tcp_row(ep_b, "socks:1080", "socks", 1080)
+    tcp_row(ep_b, "mixed_http:2080", "http", 2080)
+    tcp_row(ep_b, "mixed_socks:2080", "socks", 2080)
+    udp_row(ep_b, "socks:1080", 1080)
+    udp_row(ep_b, "mixed_socks:2080", 2080)
+    note(ep_b, "udp_socks_associate", "http:8080", "SKIP", "HTTP_inbound_has_no_UDP_associate")
+
+    elapsed = time.time() - t0
+    ok = not matrix_fail
+    brx = tb + ub if ok else 0
+    err_msg = None
+    if not ok:
+        err_msg = "proxy_masque_matrix: one or more rows failed (see rows)"
+    err_class = "none"
+    err_source = "none"
+    if ok:
+        out_err = None
+    else:
+        out_err = err_msg
+        err_class = _classified_error_bucket(err_msg)
+        err_source = "runtime"
+    return {
+        "scenario": "proxy_masque_matrix",
+        "metric_layer": "matrix",
+        "bytes_expected": tb + ub,
+        "bytes_received": brx,
+        "elapsed_sec": round(elapsed, 3),
+        "throughput_mbps": 0.0,
+        "theoretical_min_sec_at_50mbps": 0.0,
+        "ok": ok,
+        "error": out_err,
+        "error_class": err_class,
+        "error_source": err_source,
+        "rows": rows,
+        "tcp_bytes": tb,
+        "udp_bytes": ub,
+    }
+
+
 def run_udp_matrix(docker, sizes_mib, rates_bps, losses, udp_chunk=0):
     rows = []
     overall_ok = True
@@ -3031,13 +4181,20 @@ def run_udp_matrix(docker, sizes_mib, rates_bps, losses, udp_chunk=0):
 
 
 def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
+    # Dataplane: TUN + CONNECT-UDP to MASQUE (udp_tun_send.py), not SOCKS associate.
+    # For SOCKS -> endpoint, see run_tcp_stream (CONNECT-STREAM) and observability on CONNECT-UDP elsewhere.
     target_host, port = "10.200.0.3", 5601
     sink = "/tmp/udp-python.bin"
     base_srv, base_cli, base_wait = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
+    target_rate_bps = int(udp_rate_bps) if int(udp_rate_bps) > 0 else 0
+    # Docker Desktop / Windows host: unpaced CONNECT-UDP bulk через TUN часто «срывается»;
+    # тот же дефолт байт/с, что и для tcp_ip (см. MASQUE_WIN_HOST_TCP_IP_DEFAULT_UDP_SEND_BPS=0 чтобы отключить).
+    if target_rate_bps <= 0 and os.name == "nt" and int(byte_count) > BYTES_10KB:
+        target_rate_bps = _win_host_tcp_ip_default_udp_send_bps()
     cli_to = int(base_cli)
     paced_budget = 0
-    if int(udp_rate_bps) > 0:
-        paced_budget = _udp_paced_send_min_timeout_sec(byte_count, int(udp_rate_bps))
+    if target_rate_bps > 0:
+        paced_budget = _udp_paced_send_min_timeout_sec(byte_count, int(target_rate_bps))
         cli_to = max(cli_to, paced_budget)
     srv_to = int(cli_to) + _BULK_SERVER_PAD_SEC
     wait_cap = int(cli_to) + _BULK_WAIT_PAD_SEC
@@ -3045,7 +4202,6 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
     srv_to = max(int(base_srv), srv_to)
     wait_cap = max(int(base_wait), wait_cap)
     chunk = _stand_udp_chunk(byte_count, udp_chunk)
-    target_rate_bps = int(udp_rate_bps) if int(udp_rate_bps) > 0 else 0
     udp_sender_sndbuf = int(os.environ.get("MASQUE_STAND_UDP_SNDBUF", str(16 * 1024 * 1024)))
     if target_rate_bps > 0:
         pause = 0.0
@@ -3075,10 +4231,11 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
         _install_udp_tun_sender(docker, CLIENT_CONTAINER)
 
         start = time.time()
-        docker_exec(
-            docker,
-            CLIENT_CONTAINER,
-            _udp_tun_datagram_send_sh(
+        pb_int = int(paced_budget) if int(paced_budget) > 0 else 0
+        _run_udp_sender_exec_with_sink_watch(
+            docker=docker,
+            client_container=CLIENT_CONTAINER,
+            send_shell_lc=_udp_tun_datagram_send_sh(
                 byte_count,
                 target_host,
                 port,
@@ -3088,39 +4245,27 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
                 rate_bps=target_rate_bps,
                 sndbuf=udp_sender_sndbuf,
             ),
-            check=False,
+            server_container=SERVER_CONTAINER,
+            sink_path=sink,
+            byte_count=int(byte_count),
+            target_rate_bps=int(target_rate_bps),
+            paced_budget_sec=pb_int,
+            max_wall_seconds=float(int(cli_to) + 180),
         )
         recv_tail = _udp_bulk_recv_drain_slack_sec(byte_count, cli_to)
         recv_wait = 10 if byte_count == BYTES_10KB else int(wait_cap) + recv_tail
-        # Long bulk waits can look like hangs when sink growth already stopped.
-        # Keep FAIL semantics but exit early on stable stalls (both paced and unpaced).
         if byte_count > BYTES_10KB:
-            if target_rate_bps > 0:
-                stall_raw = (os.environ.get("MASQUE_STAND_UDP_PACED_STALL_WINDOW_SEC") or "12").strip()
-                grace_default = float(max(8, int(paced_budget) + 6)) if paced_budget > 0 else 14.0
-                grace_raw = (
-                    os.environ.get("MASQUE_STAND_UDP_PACED_STALL_STARTUP_GRACE_SEC")
-                    or str(grace_default)
-                ).strip()
-            else:
-                stall_raw = (os.environ.get("MASQUE_STAND_UDP_UNPACED_STALL_WINDOW_SEC") or "6").strip()
-                grace_raw = (os.environ.get("MASQUE_STAND_UDP_UNPACED_STALL_STARTUP_GRACE_SEC") or "4").strip()
-            try:
-                stall_window = max(0.0, min(60.0, float(stall_raw)))
-            except ValueError:
-                stall_window = 12.0 if target_rate_bps > 0 else 6.0
-            try:
-                startup_grace = max(0.0, min(180.0, float(grace_raw)))
-            except ValueError:
-                startup_grace = grace_default if target_rate_bps > 0 else 4.0
-            got = wait_for_bytes_with_stall_early_exit(
+            got = wait_for_sink_bytes_abort_on_no_traffic(
                 docker,
                 SERVER_CONTAINER,
                 sink,
                 byte_count,
-                recv_wait,
-                stall_window_sec=stall_window,
-                startup_grace_sec=startup_grace,
+                float(recv_wait),
+                progress_label=sink + " udp_recv_bulk",
+                legacy_idle_env_fallbacks=(
+                    "MASQUE_STAND_UDP_PACED_STALL_WINDOW_SEC",
+                    "MASQUE_STAND_UDP_UNPACED_STALL_WINDOW_SEC",
+                ),
             )
         else:
             got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
@@ -3273,71 +4418,118 @@ def run_udp(docker, byte_count, udp_chunk=0, udp_rate_bps=0, udp_loss_pct=0.0):
         _netem_clear(docker)
 
 
-def run_tcp_stream(docker, byte_count):
+def _tcp_stream_client_exec_env(byte_count: int, target_host: str, port: int, scenario_name: str) -> list:
+    pairs = [
+        ("MASQUE_TCPSEND_BYTES", str(int(byte_count))),
+        ("MASQUE_DST_HOST", str(target_host)),
+        ("MASQUE_DST_PORT", str(int(port))),
+    ]
+    env: list[str] = []
+    for k, v in pairs:
+        env.extend(["-e", f"{k}={v}"])
+    if scenario_name == "socks_tcp_ip_stack":
+        env.extend(["-e", "MASQUE_STAND_SOCKS_TCP_DEADLINE_SEC=90"])
+    return env
+
+
+def run_tcp_stream(docker, byte_count, scenario_name="tcp_stream"):
     target_host, port = "10.200.0.3", 5602
     sink = "/tmp/tcp-stream-python.bin"
-    srv_to, _, wait_cap = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
+    srv_to, cli_budget, wait_cap = _udp_tcp_stream_bulk_harness_timeouts(byte_count)
     docker_exec(docker, SERVER_CONTAINER, f"rm -f {sink}", check=False)
-    docker_exec(
-        docker,
-        SERVER_CONTAINER,
-        # Single acceptor: no fork (fork+creat per-connection can truncate the sink under bulk).
-        f"nohup timeout {srv_to} socat -u TCP-LISTEN:{port},reuseaddr OPEN:{sink},creat,append >/tmp/tcp-stream-python.log 2>&1 &",
-    )
-    wait_tcp_listener(docker, SERVER_CONTAINER, port)
-    wait_socks_ready(docker)
+    if scenario_name == "socks_tcp_ip_stack":
+        # Smoke outer socat timeout (15s) must not expire during wait_socks_ready + warmup
+        # (socks ready can be ~35s; warmup SOCKS budget 45s). Warm first, then listen.
+        wait_socks_ready(docker)
+        # Порт 9 на бэкенде часто без слушателя → RST/refused; warmup должен завершиться успешным TCP.
+        stack_warm_port = 5599
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"nohup socat TCP-LISTEN:{stack_warm_port},reuseaddr,fork OPEN:/dev/null "
+            f">/tmp/tcp-stack-warm-listen.log 2>&1 &",
+            check=False,
+        )
+        wait_tcp_listener(docker, SERVER_CONTAINER, stack_warm_port, timeout_sec=8)
+        _socks_tcp_ip_stack_dataplane_warm(
+            docker, warmup_host="10.200.0.3", warmup_port=stack_warm_port
+        )
+        time.sleep(0.6)
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            f"nohup timeout {srv_to} socat -u TCP-LISTEN:{port},reuseaddr OPEN:{sink},creat,append >/tmp/tcp-stream-python.log 2>&1 &",
+        )
+        wait_tcp_listener(docker, SERVER_CONTAINER, port)
+        raw_settle = (os.environ.get("MASQUE_STAND_SOCKS_STACK_LISTEN_SETTLE_SEC") or "2.0").strip()
+        try:
+            time.sleep(max(0.0, min(12.0, float(raw_settle))))
+        except ValueError:
+            time.sleep(2.0)
+        wait_socks_ready(docker, timeout_sec=float(_wait_socks_ready_timeout_sec()))
+    else:
+        docker_exec(
+            docker,
+            SERVER_CONTAINER,
+            # Single acceptor: no fork (fork+creat per-connection can truncate the sink under bulk).
+            f"nohup timeout {srv_to} socat -u TCP-LISTEN:{port},reuseaddr OPEN:{sink},creat,append >/tmp/tcp-stream-python.log 2>&1 &",
+        )
+        wait_tcp_listener(docker, SERVER_CONTAINER, port)
+        wait_socks_ready(docker)
     time.sleep(0.35)
 
     route_probe = docker_exec_capture(docker, CLIENT_CONTAINER, f"ip route get {target_host}", check=False)
     start = time.time()
     exec_err = None
-    try:
-        run(
-            [
-                docker,
-                "exec",
-                "-e",
-                f"MASQUE_TCPSEND_BYTES={byte_count}",
-                "-e",
-                f"MASQUE_DST_HOST={target_host}",
-                "-e",
-                f"MASQUE_DST_PORT={port}",
-                CLIENT_CONTAINER,
-                "python3",
-                "-c",
-                _TCP_STREAM_SEND_SOCKS5,
-            ],
-            cwd=ROOT,
-        )
-    except subprocess.CalledProcessError as exc:
-        time.sleep(0.35)
+    bulk = byte_count > BYTES_10KB
+    # Align with server socat ``timeout srv_to`` so a wedged CONNECT-stream cannot hang ``docker exec``.
+    send_timeout_sec = int(srv_to) if bulk else 0
+    send_argv_tail = (
+        ["timeout", str(send_timeout_sec), "python3", "-c", _TCP_STREAM_SEND_SOCKS5]
+        if send_timeout_sec > 0
+        else ["python3", "-c", _TCP_STREAM_SEND_SOCKS5]
+    )
+    send_attempts = 3 if scenario_name == "socks_tcp_ip_stack" else 2
+    for attempt in range(send_attempts):
         try:
             run(
                 [
                     docker,
                     "exec",
-                    "-e",
-                    f"MASQUE_TCPSEND_BYTES={byte_count}",
-                    "-e",
-                    f"MASQUE_DST_HOST={target_host}",
-                    "-e",
-                    f"MASQUE_DST_PORT={port}",
+                    *_tcp_stream_client_exec_env(byte_count, target_host, port, scenario_name),
                     CLIENT_CONTAINER,
-                    "python3",
-                    "-c",
-                    _TCP_STREAM_SEND_SOCKS5,
+                    *send_argv_tail,
                 ],
                 cwd=ROOT,
             )
-        except subprocess.CalledProcessError as exc2:
-            parts = [str(exc2)]
-            if exc2.stderr:
-                parts.append(f"stderr={exc2.stderr!r}")
-            if exc2.stdout:
-                parts.append(f"stdout={exc2.stdout!r}")
-            exec_err = " ".join(parts)
-    recv_wait = 20 if byte_count == BYTES_10KB else wait_cap
-    got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
+            exec_err = None
+            break
+        except subprocess.CalledProcessError as exc:
+            pause = 1.1 if scenario_name == "socks_tcp_ip_stack" else 0.35
+            if attempt + 1 >= send_attempts:
+                parts = [str(exc)]
+                if exc.stderr:
+                    parts.append(f"stderr={exc.stderr!r}")
+                if exc.stdout:
+                    parts.append(f"stdout={exc.stdout!r}")
+                exec_err = " ".join(parts)
+            else:
+                time.sleep(pause)
+    recv_wait = 20 if byte_count == BYTES_10KB else int(wait_cap) + _udp_bulk_recv_drain_slack_sec(
+        byte_count, int(cli_budget)
+    )
+    if bulk:
+        got = wait_for_sink_bytes_abort_on_no_traffic(
+            docker,
+            SERVER_CONTAINER,
+            sink,
+            byte_count,
+            float(recv_wait),
+            progress_label=sink + " tcp_stream_bulk",
+            legacy_idle_env_fallbacks=("MASQUE_STAND_TCP_STREAM_STALL_WINDOW_SEC",),
+        )
+    else:
+        got = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_wait)
     elapsed = time.time() - start
     ok = got >= byte_count and elapsed <= SMOKE_DEADLINE_SEC if byte_count == BYTES_10KB else got >= byte_count
     if exec_err:
@@ -3357,7 +4549,7 @@ def run_tcp_stream(docker, byte_count):
         err_class = _classified_error_bucket(err_msg)
         err_source = "runtime"
     return {
-        "scenario": "tcp_stream",
+        "scenario": str(scenario_name),
         "metric_layer": "application_payload",
         "bytes_expected": byte_count,
         "bytes_received": got,
@@ -3492,14 +4684,14 @@ def run_tcp_ip(
     else:
         wait_timeout = max(0.0, phase_deadline - time.time())
     if byte_count > BYTES_10KB and mode == "bulk_single_flow":
-        got = wait_for_bytes_with_stall_early_exit(
+        got = wait_for_sink_bytes_abort_on_no_traffic(
             docker,
             IPERF_CONTAINER,
             sink,
             byte_count,
-            wait_timeout,
-            stall_window_sec=BULK_TCP_IP_STALL_EARLY_EXIT_WINDOW_SEC,
-            startup_grace_sec=BULK_TCP_IP_STALL_STARTUP_GRACE_SEC,
+            float(wait_timeout),
+            progress_label=sink + " tcp_ip_bulk",
+            legacy_idle_env_fallbacks=(),
         )
     else:
         got = wait_for_bytes(docker, IPERF_CONTAINER, sink, byte_count, wait_timeout)
@@ -3833,7 +5025,7 @@ def run_tcp_ip_threshold_sweep(
             # One compose_up runs in run_scenario before the sweep; reconnect after a FAIL
             # can leave QUIC/CONNECT-IP wedged so later rates see bridge_boundary_stall/0 bytes.
             if idx > 0 and not skip_stand_compose_up():
-                compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+                compose_up(docker, _connect_ip_stand_client_config())
             os.environ["MASQUE_TCP_IP_RATE_LIMIT"] = rate
             result = run_tcp_ip(
                 docker,
@@ -3904,7 +5096,7 @@ def _parse_csv_udp_bps_rates(s: str):
 
 def run_degrade_matrix(docker, byte_count, tcp_ip_mode="bulk_single_flow", tcp_ip_deadline_sec=None):
     """CONNECT-IP + UDP ladders for local dataplane degrade search (standalone compose isolation)."""
-    effective = byte_count if byte_count > BYTES_10KB else int(10 * 1024 * 1024)
+    effective = byte_count if byte_count > BYTES_10KB else BYTES_100MIB
     tcp_rates_csv = os.environ.get("MASQUE_DEGRADE_TCP_IP_RATES", "")
     udp_bps_csv = os.environ.get("MASQUE_DEGRADE_UDP_BPS", "")
     tcp_rates = _parse_csv_tcp_ip_rates_csv(tcp_rates_csv)
@@ -3914,7 +5106,7 @@ def run_degrade_matrix(docker, byte_count, tcp_ip_mode="bulk_single_flow", tcp_i
     tcp_ok = False
     try:
         if not skip_stand_compose_up():
-            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+            compose_up(docker, _connect_ip_stand_client_config())
         tcp_summary = run_tcp_ip_threshold_sweep(
             docker,
             effective,
@@ -4693,9 +5885,26 @@ def run_connect_udp_via_tun_benchmark(docker, byte_count):
             f"(python-udp chunk_datagram={tun_chunk}B)"
         )
 
-    got = bytes_on_file(docker, SERVER_CONTAINER, sink)
-    recv_wait = wait_for_bytes(docker, SERVER_CONTAINER, sink, byte_count, recv_poll_cap)
-    got = max(got, recv_wait)
+    # Не ждать весь recv_poll_cap, если приёмник перестал расти (как run_udp bulk).
+    if byte_count <= BYTES_10KB:
+        got = wait_for_bytes(
+            docker, SERVER_CONTAINER, sink, byte_count, int(recv_poll_cap)
+        )
+    else:
+        recv_tail = _udp_bulk_recv_drain_slack_sec(byte_count, int(budget))
+        recv_wait = int(recv_poll_cap) + recv_tail
+        got = wait_for_sink_bytes_abort_on_no_traffic(
+            docker,
+            SERVER_CONTAINER,
+            sink,
+            byte_count,
+            float(recv_wait),
+            progress_label=sink + " connect_udp_via_tun_bench_bulk",
+            legacy_idle_env_fallbacks=(
+                "MASQUE_STAND_TUN_UDP_BENCH_STALL_WINDOW_SEC",
+                "MASQUE_STAND_UDP_UNPACED_STALL_WINDOW_SEC",
+            ),
+        )
     recv_elapsed = elapsed_sec if elapsed_sec > 0 else 1.0
     recv_mbps = (got * 8.0 / recv_elapsed / 1_000_000.0) if recv_elapsed > 0 else 0.0
 
@@ -4912,14 +6121,24 @@ def _write_masque_smoke_contract_files(results: list, byte_count: int) -> None:
     """Write CI smoke JSON artifacts (see hiddify-core/.github/workflows/ci.yml)."""
     if skip_stand_smoke_contract_files():
         return
-    if byte_count != BYTES_10KB:
+    if byte_count != BYTES_100MIB:
         return
     mapping = {
-        "udp": ("smoke_10kb_latest.json", "connect_udp"),
+        "udp": ("smoke_100mib_udp_latest.json", "connect_udp"),
         "tcp_stream": ("smoke_tcp_connect_stream_latest.json", "connect_stream"),
+        "socks_tcp_ip_stack": (
+            "smoke_socks_tcp_connect_ip_stack_latest.json",
+            "connect_ip_tcp_via_stack",
+        ),
         "tcp_ip": ("smoke_tcp_connect_ip_latest.json", "connect_ip"),
     }
-    min_b, max_ms = 10240, 5000
+    min_b = BYTES_100MIB
+    _mx_raw = (os.environ.get("MASQUE_SMOKE_CONTRACT_MAX_ELAPSED_MS") or "").strip()
+    try:
+        max_ms = int(_mx_raw) if _mx_raw else SMOKE_CONTRACT_MAX_ELAPSED_MS_DEFAULT
+    except ValueError:
+        max_ms = SMOKE_CONTRACT_MAX_ELAPSED_MS_DEFAULT
+    max_ms = max(60_000, min(max_ms, 7_200_000))
     for row in results:
         scen = row.get("scenario")
         if scen not in mapping:
@@ -5016,6 +6235,10 @@ def _classify_runner_exception_source(scenario: str, message: str) -> str:
         "udp",
         "udp_matrix",
         "tcp_stream",
+        "tcp_stream_auto",
+        "udp_socks_associate",
+        "proxy_masque_matrix",
+        "socks_tcp_ip_stack",
         "tcp_ip",
         "tcp_ip_threshold",
         "tcp_ip_icmp",
@@ -5060,6 +6283,7 @@ def run_scenario(
     iperf_cfg=None,
     udp_chunk=0,
     udp_rate_bps=0,
+    socks_cli_bps=0,
     udp_loss_pct=0.0,
     udp_matrix_sizes_mib=None,
     udp_matrix_rates_bps=None,
@@ -5086,9 +6310,33 @@ def run_scenario(
         if not skip_stand_compose_up():
             compose_up(docker, DEFAULT_CLIENT_CONFIG)
         return run_tcp_stream(docker, byte_count)
+    if scenario == "tcp_stream_auto":
+        if not skip_stand_compose_up():
+            compose_up(docker, CLIENT_CONFIG_AUTO)
+        return run_tcp_stream(docker, byte_count, scenario_name="tcp_stream_auto")
+    if scenario == "udp_socks_associate":
+        if not skip_stand_compose_up():
+            compose_up(docker, DEFAULT_CLIENT_CONFIG)
+        return run_udp_socks_associate(
+            docker,
+            byte_count,
+            udp_chunk_cli=int(udp_chunk),
+            socks_cli_bps=int(socks_cli_bps),
+        )
+    if scenario == "proxy_masque_matrix":
+        if not skip_stand_compose_up():
+            compose_up(docker, PROXY_MATRIX_STREAM_CLIENT_CONFIG)
+        return run_proxy_masque_matrix(docker, byte_count, byte_count)
+    # socks_tcp_ip_stack: SOCKS -> masque tcp_transport=connect_ip (gVisor TCP over CONNECT-IP).
+    # Это не то же самое, что tcp_stream (CONNECT-stream) или tcp_ip (TUN + UDP в IP-плоскости);
+    # канонический connect_ip клиент стенда — connect_stream для TCP: masque-client-connect-ip.json.
+    if scenario == "socks_tcp_ip_stack":
+        if not skip_stand_compose_up():
+            compose_up(docker, CONNECT_IP_TCP_STACK_CLIENT_CONFIG)
+        return run_tcp_stream(docker, byte_count, scenario_name="socks_tcp_ip_stack")
     if scenario == "tcp_ip":
         if not skip_stand_compose_up():
-            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+            compose_up(docker, _connect_ip_stand_client_config())
         return run_tcp_ip(
             docker,
             byte_count,
@@ -5099,7 +6347,7 @@ def run_scenario(
         )
     if scenario == "tcp_ip_threshold":
         if not skip_stand_compose_up():
-            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+            compose_up(docker, _connect_ip_stand_client_config())
         return run_tcp_ip_threshold_sweep(
             docker,
             byte_count,
@@ -5116,11 +6364,11 @@ def run_scenario(
         )
     if scenario == "tcp_ip_icmp":
         if not skip_stand_compose_up():
-            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+            compose_up(docker, _connect_ip_stand_client_config())
         return run_tcp_ip_icmp(docker, timeout_sec=5)
     if scenario == "tcp_ip_iperf":
         if not skip_stand_compose_up():
-            compose_up(docker, CONNECT_IP_CLIENT_CONFIG)
+            compose_up(docker, _connect_ip_stand_client_config())
         cfg = iperf_cfg or {}
         return run_tcp_ip_iperf_matrix(
             docker=docker,
@@ -5149,6 +6397,10 @@ ALLOWED_SCENARIOS = frozenset(
         "udp",
         "udp_matrix",
         "tcp_stream",
+        "tcp_stream_auto",
+        "udp_socks_associate",
+        "proxy_masque_matrix",
+        "socks_tcp_ip_stack",
         "tcp_ip",
         "tcp_ip_threshold",
         "tcp_ip_scoped",
@@ -5158,6 +6410,8 @@ ALLOWED_SCENARIOS = frozenset(
         "degrade_matrix",
         "all",
         "real",
+        "connect_ip_ingress_quick",
+        "connect_ip_ingress_quick_netstack_tcp",
     }
 )
 
@@ -5173,16 +6427,36 @@ def build_scenario_list(scenario_arg: str, byte_count: int) -> list[str]:
             raise ValueError(f"unknown scenario {p!r}")
     if len(parts) > 1:
         for p in parts:
-            if p in ("all", "real"):
+            if p in (
+                "all",
+                "real",
+                "connect_ip_ingress_quick",
+                "connect_ip_ingress_quick_netstack_tcp",
+                "proxy_masque_matrix",
+            ):
                 raise ValueError(
-                    "'all' and 'real' must be used alone (not in a comma-separated queue)"
+                    "'all', 'real', 'connect_ip_ingress_quick', "
+                    "'connect_ip_ingress_quick_netstack_tcp', and 'proxy_masque_matrix' "
+                    "must be used alone (not in a comma-separated queue)"
                 )
         return parts
     only = parts[0]
     if only == "all":
         if byte_count > BYTES_10KB:
-            return ["tcp_ip"]
+            # Полный bulk-стенд (канон 100 MiB): все основные ноги, не только CONNECT-IP.
+            return ["udp", "tcp_stream", "tcp_ip", "tcp_ip_icmp", "udp_socks_associate"]
         return ["udp", "tcp_stream", "tcp_ip", "tcp_ip_icmp"]
+    if only == "connect_ip_ingress_quick":
+        if byte_count > BYTES_10KB:
+            return ["tcp_ip"]
+        # Стабильный Docker-smoke: CONNECT-stream TCP, CONNECT-IP UDP (TUN), ICMP.
+        # socks_tcp_ip_stack (gVisor TCP поверх CONNECT-IP) отдельно — см. connect_ip_ingress_quick_netstack_tcp
+        # и логи сервера при сбоях: «datagram destination address not allowed» на исходящем proxied IPv4.
+        return ["tcp_stream", "tcp_ip", "tcp_ip_icmp"]
+    if only == "connect_ip_ingress_quick_netstack_tcp":
+        if byte_count > BYTES_10KB:
+            return ["tcp_ip"]
+        return ["socks_tcp_ip_stack", "tcp_stream", "tcp_ip", "tcp_ip_icmp"]
     if only == "real":
         return ["tcp_ip_iperf"]
     return [only]
@@ -5193,22 +6467,28 @@ def main():
     parser.add_argument(
         "--scenario",
         type=str,
-        required=True,
+        default="all",
         metavar="NAME",
         help=(
-            "Single scenario name, or comma-separated queue run in order "
-            "(e.g. udp,tcp_ip or tcp_ip_threshold,tcp_ip_icmp). "
-            "Special: all (smoke suite), real (tcp_ip_iperf)."
+            "Default: all — по очереди при 100 MiB: udp, tcp_stream, tcp_ip, tcp_ip_icmp, udp_socks_associate "
+            "(прогресс в логе [stand i/N], [stand heartbeat], [stand wait]). "
+            "Один сценарий: tcp_stream, tcp_ip, … Очередь: udp,tcp_ip. "
+            "Special: real, connect_ip_ingress_quick, connect_ip_ingress_quick_netstack_tcp, "
+            "proxy_masque_matrix (отдельно), tcp_stream_auto."
         ),
     )
-    parser.add_argument("--stress", action="store_true", help="run 500MB transfer instead of 10KB")
+    parser.add_argument(
+        "--stress",
+        action="store_true",
+        help="run 500 MiB transfer; --megabytes ignored when set",
+    )
     parser.add_argument(
         "--megabytes",
         type=int,
         default=None,
         metavar="N",
-        help="transfer size in MiB (binary: N*1024*1024). For strict bulk gates (e.g. 10/20/100). "
-        "Incompatible with --stress (stress wins). With --scenario all, only tcp_ip runs at this size.",
+        help="transfer size in MiB (binary: N*1024*1024). Omit flag for 100 MiB (канон стенда). "
+        "Incompatible with --stress (stress wins). Values below 100 only for отладка.",
     )
     parser.add_argument(
         "--tcp-ip-mode",
@@ -5246,7 +6526,8 @@ def main():
         metavar="B",
         help=(
             f"UDP stand sender application payload per datagram (1..{MASQUE_STAND_UDP_CHUNK_MAX}); "
-            "0=auto (smoke 1200 B, bulk 8192 B) to emulate app-level datagrams independent of MASQUE internals."
+            "0=auto (smoke 1200 B, bulk 8192 B) for Tun ``udp``, ``tcp_ip`` bulk, "
+            "and ``udp_socks_associate`` SOCKS payload (переопределение через MASQUE_STAND_SOCKS_UDP_CHUNK)."
         ),
     )
     parser.add_argument(
@@ -5256,7 +6537,8 @@ def main():
         metavar="BPS",
         help=(
             "paced sender target in bytes/sec for scripts using MASQUE_UDP_RATE_BPS (0 = unlimited sender). "
-            "Applies to udp/udp_matrix and tcp_ip bulk_single_flow (name is legacy «bps»). "
+            "Applies to udp/udp_matrix, tcp_ip bulk_single_flow, and ``udp_socks_associate`` "
+            "(если 0 — см. MASQUE_STAND_SOCKS_UDP_SEND_BPS / дефолт bulk 4 M в раннере). "
             "On Windows, tcp_ip still uses MASQUE_WIN_HOST_TCP_IP_DEFAULT_UDP_SEND_BPS when this is 0 "
             "(set that env to 0 for unlimited CONNECT-IP bulk)."
         ),
@@ -5342,16 +6624,11 @@ def main():
     elif args.megabytes is not None:
         byte_count = bytes_from_megabytes_arg(args.megabytes)
     else:
-        byte_count = BYTES_10KB
+        byte_count = BYTES_100MIB
 
-    if (
-        _scenario_tokens == ["degrade_matrix"]
-        and not args.stress
-        and args.megabytes is None
-    ):
-        byte_count = int(10 * 1024 * 1024)
+    if _scenario_tokens == ["degrade_matrix"] and not args.stress and args.megabytes is None:
         print(
-            "Note: degrade_matrix defaults to 10 MiB (--megabytes 10). "
+            "Note: degrade_matrix uses stand default 100 MiB. "
             "Override with --megabytes. Ladders: MASQUE_DEGRADE_TCP_IP_RATES, MASQUE_DEGRADE_UDP_BPS.",
             flush=True,
         )
@@ -5360,10 +6637,14 @@ def main():
         scenarios = build_scenario_list(args.scenario, byte_count)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.scenario.strip() == "all" and byte_count > BYTES_10KB:
+    _scen_strip = args.scenario.strip()
+    if (
+        _scen_strip in ("connect_ip_ingress_quick", "connect_ip_ingress_quick_netstack_tcp")
+        and byte_count > BYTES_10KB
+    ):
         print(
-            "Note: bulk size >10KB with --scenario all runs tcp_ip only "
-            "(udp/tcp_stream harness is smoke-sized).",
+            "Note: bulk size >10KB with connect_ip_ingress_quick* runs tcp_ip only "
+            "(остальные ноги — при малом объёме или отдельные сценарии).",
             flush=True,
         )
     if _stand_slow_docker_profile():
@@ -5386,8 +6667,22 @@ def main():
     results = []
     overall_ok = True
     global _WIN_TCP_IP_DEFAULT_PACE_NOTE_SHOWN
-    for scenario in scenarios:
-        print(f"\n=== Running scenario: {scenario} ({byte_count} bytes) ===")
+    n_scen = len(scenarios)
+    stand_t0 = time.time()
+    print(
+        f"\n[stand] queue: {n_scen} scenario(s), {byte_count} bytes each "
+        f"(heartbeat every {_stand_cmd_heartbeat_sec(None):.0f}s: MASQUE_STAND_CMD_HEARTBEAT_SEC=0 to disable)",
+        flush=True,
+    )
+    for i, name in enumerate(scenarios, start=1):
+        print(f"  {i}. {name}", flush=True)
+    for idx, scenario in enumerate(scenarios, start=1):
+        print(
+            f"\n[stand {idx}/{n_scen}] START {scenario} bytes={byte_count} "
+            f"(queue_wall {time.time() - stand_t0:.1f}s)",
+            flush=True,
+        )
+        scen_t0 = time.time()
         try:
             eff_udp_bps = _effective_udp_send_bps_for_stand_scenario(
                 scenario, udp_send_bytes_per_sec, args.tcp_ip_mode
@@ -5418,6 +6713,7 @@ def main():
                 iperf_cfg=iperf_cfg,
                 udp_chunk=args.udp_chunk_bytes,
                 udp_rate_bps=eff_udp_bps,
+                socks_cli_bps=udp_send_bytes_per_sec,
                 udp_loss_pct=args.udp_loss_pct,
                 udp_matrix_sizes_mib=matrix_sizes,
                 udp_matrix_rates_bps=matrix_rates,
@@ -5439,7 +6735,14 @@ def main():
             }
         results.append(result)
         overall_ok = overall_ok and bool(result.get("ok"))
+        scen_dt = time.time() - scen_t0
+        q_dt = time.time() - stand_t0
         print(json.dumps(result, ensure_ascii=True))
+        print(
+            f"[stand {idx}/{n_scen}] END {scenario} ok={bool(result.get('ok'))} "
+            f"scenario_wall={scen_dt:.1f}s queue_wall={q_dt:.1f}s",
+            flush=True,
+        )
 
     _write_masque_smoke_contract_files(results, byte_count)
     _write_scoped_contract_artifact(results)

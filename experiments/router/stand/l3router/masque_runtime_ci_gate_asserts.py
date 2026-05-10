@@ -520,7 +520,13 @@ def _run_anti_bypass_negative_control(modes: list[str], workdir: Path, docker_bi
                         }
                     )
                     continue
-                run_res = _run_cmd([sys.executable, runner, "--scenario", scenario], cwd=workdir, env=env, check=False)
+                # Same bulk size as stand (100 MiB): negative control checks classification under real volume.
+                run_res = _run_cmd(
+                    [sys.executable, runner, "--scenario", scenario, "--megabytes", "100"],
+                    cwd=workdir,
+                    env=env,
+                    check=False,
+                )
                 if run_res.returncode == 0:
                     failures.append(f"{mode}: runner unexpectedly succeeded with MASQUE server down")
                     mode_rows.append(

@@ -341,7 +341,7 @@ class TestSmokeContractArtifacts(unittest.TestCase):
                             "error_source": "compose_up",
                         }
                     ],
-                    runner.BYTES_10KB,
+                    runner.BYTES_100MIB,
                 )
             finally:
                 runner.RUNTIME_DIR = original_runtime_dir
@@ -350,6 +350,133 @@ class TestSmokeContractArtifacts(unittest.TestCase):
             self.assertEqual(payload["result"], "false")
             self.assertEqual(payload["error_class"], "transport_init")
             self.assertEqual(payload["error_source"], "compose_up")
+
+    def test_smoke_contract_writes_socks_tcp_ip_stack_variant(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_dir = Path(temp_dir)
+            original_runtime_dir = runner.RUNTIME_DIR
+            try:
+                runner.RUNTIME_DIR = runtime_dir
+                runner._write_masque_smoke_contract_files(
+                    [
+                        {
+                            "scenario": "socks_tcp_ip_stack",
+                            "ok": True,
+                            "bytes_received": runner.BYTES_100MIB,
+                            "elapsed_sec": 1.23,
+                            "error_class": "none",
+                            "error_source": "none",
+                        }
+                    ],
+                    runner.BYTES_100MIB,
+                )
+            finally:
+                runner.RUNTIME_DIR = original_runtime_dir
+            payload = json.loads(
+                (runtime_dir / "smoke_socks_tcp_connect_ip_stack_latest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(payload["mode"], "connect_ip_tcp_via_stack")
+            self.assertEqual(payload["result"], "true")
+
+    def test_build_scenario_connect_ip_ingress_quick_smoke_three_legs(self):
+        self.assertEqual(
+            runner.build_scenario_list("connect_ip_ingress_quick", runner.BYTES_10KB),
+            ["tcp_stream", "tcp_ip", "tcp_ip_icmp"],
+        )
+
+    def test_build_scenario_connect_ip_ingress_quick_netstack_tcp_smoke_four_legs(self):
+        self.assertEqual(
+            runner.build_scenario_list(
+                "connect_ip_ingress_quick_netstack_tcp", runner.BYTES_10KB
+            ),
+            ["socks_tcp_ip_stack", "tcp_stream", "tcp_ip", "tcp_ip_icmp"],
+        )
+
+    def test_build_scenario_connect_ip_ingress_quick_bulk_tcp_ip_only(self):
+        self.assertEqual(
+            runner.build_scenario_list("connect_ip_ingress_quick", runner.BYTES_10KB + 1),
+            ["tcp_ip"],
+        )
+
+    def test_build_scenario_connect_ip_ingress_quick_netstack_tcp_bulk_tcp_ip_only(self):
+        self.assertEqual(
+            runner.build_scenario_list(
+                "connect_ip_ingress_quick_netstack_tcp", runner.BYTES_10KB + 1
+            ),
+            ["tcp_ip"],
+        )
+
+    def test_build_scenario_all_smoke_list_excludes_optional_stack_tcp_leg(self):
+        self.assertEqual(
+            runner.build_scenario_list("all", runner.BYTES_10KB),
+            ["udp", "tcp_stream", "tcp_ip", "tcp_ip_icmp"],
+        )
+
+    def test_build_scenario_all_bulk_includes_full_stand_legs(self):
+        self.assertEqual(
+            runner.build_scenario_list("all", runner.BYTES_100MIB),
+            [
+                "udp",
+                "tcp_stream",
+                "tcp_ip",
+                "tcp_ip_icmp",
+                "udp_socks_associate",
+            ],
+        )
+
+    def test_socks_udp_pace_cli_overrides_stand_default(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                runner._socks_udp_pace_for_stand(runner.BYTES_100MIB, 2_000_000),
+                2_000_000,
+            )
+
+    def test_socks_udp_pace_stand_bulk_four_mbps_when_unset(self):
+        """Без ключей SOCKS: bulk (>10 KB) канонически пейсируется 4 M B/s для стабильности стенда."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                runner._socks_udp_pace_for_stand(runner.BYTES_100MIB, 0),
+                4_000_000,
+            )
+
+    def test_socks_udp_pace_env_explicit_zero(self):
+        with mock.patch.dict(
+            os.environ,
+            {"MASQUE_STAND_SOCKS_UDP_SEND_BPS": "0"},
+            clear=True,
+        ):
+            self.assertEqual(
+                runner._socks_udp_pace_for_stand(runner.BYTES_100MIB, 0),
+                0,
+            )
+
+    def test_socks_udp_pace_smoke_unpaced(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                runner._socks_udp_pace_for_stand(runner.BYTES_10KB, 0),
+                0,
+            )
+
+    def test_socks_udp_chunk_bulk_default_and_cli_cap(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                runner._socks_udp_chunk_for_stand(runner.BYTES_100MIB, 0),
+                runner.MASQUE_STAND_UDP_CHUNK_BULK_DEFAULT,
+            )
+            self.assertEqual(
+                runner._socks_udp_chunk_for_stand(runner.BYTES_100MIB, 65500),
+                65_400,
+            )
+
+    def test_build_scenario_proxy_masque_matrix_singleton(self):
+        self.assertEqual(
+            runner.build_scenario_list("proxy_masque_matrix", runner.BYTES_10KB),
+            ["proxy_masque_matrix"],
+        )
+
+    def test_build_scenario_rejects_proxy_masque_matrix_in_comma_queue(self):
+        with self.assertRaises(ValueError):
+            runner.build_scenario_list("udp,proxy_masque_matrix", runner.BYTES_10KB)
 
     def test_classify_runner_exception_source_detects_compose_up(self):
         original_skip = runner.skip_stand_compose_up
@@ -896,15 +1023,20 @@ class TestUdpRunnerIntegrity(unittest.TestCase):
     def test_udp_paced_send_min_timeout_above_bulk_floor_when_rate_tiny(self):
         """Paced transfers can exceed the bulk stall floor; ``timeout`` must not clip the sender."""
         bc = 10 * 1024 * 1024
-        # ~1 MiB/s payload → ~10.49 s nominal; keep sanity bound.
-        need = runner._udp_paced_send_min_timeout_sec(bc, 1_048_576)
-        self.assertGreaterEqual(need, 25)
-        self.assertLess(need, 120)
+        with mock.patch.dict(
+            os.environ,
+            {"MASQUE_BULK_STALL_FLOOR_SEC": "", "MASQUE_STAND_SLOW_DOCKER": "0"},
+            clear=False,
+        ):
+            # ~1 MiB/s payload → ~10.49 s nominal; keep sanity bound.
+            need = runner._udp_paced_send_min_timeout_sec(bc, 1_048_576)
+            self.assertGreaterEqual(need, 25)
+            self.assertLess(need, 120)
 
-        # Slow desktop floor can be < byte_count/rate; budget must extend past the stall floor.
-        need_slow = runner._udp_paced_send_min_timeout_sec(bc, 125_000)
-        self.assertGreater(need_slow, runner._bulk_stall_floor_sec())
-        self.assertEqual(need_slow, math.ceil(bc / 125_000.0) + 15)
+            # Slow desktop floor can be < byte_count/rate; budget must extend past the stall floor.
+            need_slow = runner._udp_paced_send_min_timeout_sec(bc, 125_000)
+            self.assertGreater(need_slow, runner._bulk_stall_floor_sec())
+            self.assertEqual(need_slow, math.ceil(bc / 125_000.0) + 15)
 
 
     def test_udp_recv_drain_slack_bounded_and_positive_for_bulk(self):

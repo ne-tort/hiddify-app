@@ -10,12 +10,13 @@
 
 - `stand/l3router/masque_stand_runner.py`
 
-Сценарии:
+Сценарии (см. `--help` у раннера):
 
-- `udp`
-- `tcp_stream`
-- `tcp_ip`
-- `all`
+- `udp`, `udp_matrix`, `udp_socks_associate`
+- `tcp_stream`, `tcp_stream_auto`, `socks_tcp_ip_stack`
+- `tcp_ip`, `tcp_ip_threshold`, `tcp_ip_scoped`, `tcp_ip_icmp`, `tcp_ip_iperf`
+- `proxy_masque_matrix` (HTTP/SOCKS/mixed × connect_stream + connect_ip; только отдельно, не в очереди через запятую)
+- `tun_rule_masque_perf`, `degrade_matrix`, пресеты `all`, `real`, `connect_ip_ingress_quick`, …
 
 Режим по умолчанию: 10KB smoke.
 `--stress` (500MB) включать только после стабильного non-stress green.
@@ -26,7 +27,13 @@
 - `stand/l3router/configs/masque-server.json`
 - `stand/l3router/configs/masque-client.json`
 - `stand/l3router/configs/masque-client-connect-ip.json`
+- `stand/l3router/configs/masque-client-http.json`, `masque-client-mixed.json`, `masque-client-auto.json`, `masque-client-matrix-*.json` (подмножества покрываются раннером)
 - `stand/l3router/masque_stand_runner.py`
+
+## Семантика UDP: раннер vs SOCKS
+
+- Сценарий **`udp`** в `masque_stand_runner.py` гоняет **TUN → CONNECT-IP** (`udp_tun_send.py`), а не SOCKS5 **UDP ASSOCIATE**.
+- Цепочка **SOCKS5 UDP ASSOCIATE → CONNECT-UDP**: `python masque_stand_runner.py --scenario udp_socks_associate` (или матрица `proxy_masque_matrix`).
 
 ## Текущее состояние
 

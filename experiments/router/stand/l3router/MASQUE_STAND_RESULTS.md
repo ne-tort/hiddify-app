@@ -48,12 +48,12 @@ Result:
 
 Machine-readable smoke gate artifact (latest run path):
 
-- `experiments/router/stand/l3router/runtime/smoke_10kb_latest.json`
+- `experiments/router/stand/l3router/runtime/smoke_100mib_udp_latest.json` (и смежные `smoke_tcp_*_latest.json` при прогоне 100 MiB)
 - `experiments/router/stand/l3router/runtime/smoke_tcp_connect_stream_latest.json`
 
 Automated smoke gate script:
 
-- `python experiments/router/stand/l3router/masque_stand_runner.py --scenario all`
+- `python experiments/router/stand/l3router/masque_stand_runner.py` (по умолчанию **`--scenario all`**, 100 MiB, все ноги по очереди)
 
 ## Observed Limits
 

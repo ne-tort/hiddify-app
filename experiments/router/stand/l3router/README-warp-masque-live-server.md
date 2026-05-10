@@ -94,6 +94,14 @@ docker exec sing-box-warp-masque-live-server curl -sS --max-time 20 \
   --proxy socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
 ```
 
+### Порты MASQUE vs WireGuard (важно для live)
+
+В публичной таблице firewall Cloudflare **MASQUE** часто идёт на **UDP 443** (и запасные порты), а **2408** в той же доке привязан к **WireGuard**. Профиль устройства API может отдавать массив вида `[2408 500 1701 4500]` с `tunnel_protocol`, указывающим на MASQUE: в текущем ядре при **`profile.dataplane_port_strategy: auto`** (по умолчанию) клиент **перебирает** кандидатов (443 и fallbacks, затем порты из профиля). Для строгого порядка только из API задайте **`profile.dataplane_port_strategy: api_first`**. Один фиксированный порт по-прежнему задаёт **`profile.dataplane_port`**.
+
+В логах старта будет строка **`warp_masque dataplane try port=…`** при переборе; успешный порт кэшируется в `hiddify_warp_masque_cache.json` на хосте (путь temp в контейнере = temp хоста при `network_mode: host`).
+
+Опционально для разбора маленьких UDP-ответов при handshake: переменная **`HIDDIFY_MASQUE_QUIC_HEX_SMALL_READS=1`** в `environment` сервиса compose (см. ниже).
+
 При **`network_mode: host`** SOCKS слушает **на хосте** (`0.0.0.0:1080`). Ограничьте доступ **firewall** (или слушайте только `127.0.0.1`, если добавите опцию в inbound в JSON). На ПК: `ssh -N -L 1080:127.0.0.1:1080 user@YOUR_SERVER` и `curl --socks5-hostname 127.0.0.1:1080 https://example.com`.
 
 Для режима **bridge** + `ports:` см. исторические варианты; для WARP **QUIC** bridge часто даёт таймауты — предпочтителен host‑network.
@@ -110,6 +118,12 @@ docker exec sing-box-warp-masque-live-server curl -sS --max-time 20 \
 |------------|---------|
 | `WARP_MASQUE_CONFIG` | Путь к JSON (по умолчанию `./configs/warp-masque-live.server.local.json`) |
 | `WARP_MASQUE_WARP_CACHE` | Кэш edge; по умолчанию пустой [configs/warp-masque-warp-cache.empty.json](configs/warp-masque-warp-cache.empty.json); при офлайн API можно смонтировать свой JSON с `server`/`port`. Порт QUIC при необходимости дополнительно корректируется **`profile.dataplane_port`** в основном конфиге (не ключ кэша). |
+
+Дополнительно (пробросьте через `environment` в [docker-compose.warp-masque-live.server.yml](docker-compose.warp-masque-live.server.yml) при нужде):
+
+| Переменная | Значение |
+|------------|---------|
+| `HIDDIFY_MASQUE_QUIC_HEX_SMALL_READS` | **`1`** — логировать hex первых байт входящих малых UDP-дейтаграмм на QUIC-dial обёртке (диагностика «16 байт» и т.п.; см. [MASQUE-SINGBOX-CONFIG.md](../../../../docs/masque/MASQUE-SINGBOX-CONFIG.md) раздел `warp_masque`). |
 
 Файлы `*-server.local.json` и заполненный кэш с секретами **не коммитить**.
 

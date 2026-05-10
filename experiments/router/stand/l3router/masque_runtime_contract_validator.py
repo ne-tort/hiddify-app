@@ -983,10 +983,13 @@ def _check_scoped_runtime_cross_artifact_parity(runtime_dir: Path, failures: lis
 
 
 def _check_smoke_files(runtime_dir: Path, failures: list):
+    _mib100 = 100 * 1024 * 1024
+    _max_ms = 1_200_000
     files = {
-        "smoke_10kb_latest.json": ("connect_udp", 10240, 5000),
-        "smoke_tcp_connect_stream_latest.json": ("connect_stream", 10240, 5000),
-        "smoke_tcp_connect_ip_latest.json": ("connect_ip", 10240, 5000),
+        "smoke_100mib_udp_latest.json": ("connect_udp", _mib100, _max_ms),
+        "smoke_tcp_connect_stream_latest.json": ("connect_stream", _mib100, _max_ms),
+        "smoke_tcp_connect_ip_latest.json": ("connect_ip", _mib100, _max_ms),
+        "smoke_socks_tcp_connect_ip_stack_latest.json": ("connect_ip_tcp_via_stack", _mib100, _max_ms),
     }
     checks = {}
     for name, (mode, min_bytes, max_ms) in files.items():
