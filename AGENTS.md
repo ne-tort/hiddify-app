@@ -156,6 +156,7 @@
 - Цикл: дизайн → код → стенд / тест → артефакт **без секретов**.
 - Изменения ядра — в **`hiddify-core`**; при необходимости bump сабмодуля в приложении.
 - Источники истины по коду: `protocol/masque/*`, `transport/masque`, `option/masque.go`; затем [`hiddify-core/docs/masque-warp-architecture.md`](hiddify-core/docs/masque-warp-architecture.md), [`IDEAL-MASQUE-ARCHITECTURE.md`](IDEAL-MASQUE-ARCHITECTURE.md), [`docs/masque/MASQUE-SINGBOX-CONFIG.md`](docs/masque/MASQUE-SINGBOX-CONFIG.md), этот файл.
+- **Локальные `go test` MASQUE на Windows:** если в окружении застряли **`GOOS=linux`** / **`GOARCH=amd64`** после кросс-сборки, бинарник тестов не запускается (`%1 is not a valid Win32 application`). Сбросить: `Remove-Item Env:GOOS, Env:GOARCH` или использовать [`hiddify-core/scripts/go-test-masque.ps1`](hiddify-core/scripts/go-test-masque.ps1). Альтернатива: WSL — [`hiddify-core/scripts/go-test-masque-wsl.sh`](hiddify-core/scripts/go-test-masque-wsl.sh).
 
 ---
 
