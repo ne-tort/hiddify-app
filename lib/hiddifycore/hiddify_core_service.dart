@@ -206,7 +206,12 @@ class HiddifyCoreService with InfraLogger {
       loggy.debug("stopping");
       var errMsg = "";
       try {
-        final res = await core.bgClient.stop(Empty());
+        final res = await core.bgClient.stop(
+          Empty(),
+          options: CallOptions(
+            timeout: const Duration(seconds: 240),
+          ),
+        );
       } on GrpcError catch (e) {
         if (e.code == StatusCode.unknown && !(e.message?.contains("HTTP/2") ?? false)) {
           errMsg = e.message ?? "failed to stop core: $e";

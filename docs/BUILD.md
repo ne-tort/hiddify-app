@@ -111,19 +111,12 @@ make windows-release    # см. Makefile: есть linux-release, android-*, mac
 
 Чтобы автоматически собрать релиз с `portable=true` и скопировать **всё содержимое Release** в одну рабочую папку:
 
-```bash
-make windows-portable
-```
+**Рекомендуемый способ (PowerShell + Flutter + Go + MinGW, без Git Bash / make):**  
+`powershell -ExecutionPolicy Bypass -File scripts/build-windows-portable.ps1`  
+Скрипт: ядро в `hiddify-core\bin\`, `pub get` / `build_runner` / `slang`, `flutter build windows --release` с `portable=true`, затем **robocopy /E** в `portable\windows-x64\Hiddify\` (без `rm -rf` всей папки — не ломает занятый `hiddify_portable_data`). Параметры: `-PortableDst`, `-Mode` (`Full`, `Core`, `Prepare`, `Sync`, `CoreRefresh`).  
+Альтернатива: `make windows-portable` из Git Bash; `make windows-portable-sync` удаляет целевой каталог целиком — закройте приложение, если папка занята.
 
-Результат: **`portable/windows-x64/Hiddify/`** (каталог в `.gitignore`). Запуск: `portable/windows-x64/Hiddify/Hiddify.exe`. Данные portable-режима создаются рядом в `hiddify_portable_data/`.
-
-Если сборка уже есть (например после `make windows-zip-release` / fastforge), достаточно синхронизировать папку:
-
-```bash
-make windows-portable-sync
-```
-
-Копирование выполняется **одной целью в Makefile** (POSIX shell), без отдельных ps1/sh-скриптов.
+Результат: **`portable/windows-x64/Hiddify/`** (каталог в `.gitignore`). Запуск: `portable/windows-x64/Hiddify/Hiddify.exe`. Данные portable-режима — в **`hiddify_portable_data/`** внутри этой папки.
 
 ## CI (GitHub Actions)
 

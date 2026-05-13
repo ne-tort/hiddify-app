@@ -61,6 +61,6 @@ if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host ""
-Write-Host "Дальше: откройте Git Bash, cd $(($repoRoot -replace '\\','/')), затем:"
-Write-Host "  make windows-env-check"
-Write-Host "  make windows-portable"
+Write-Host "Сборка portable (рекомендуется, только PowerShell в корне репо):"
+Write-Host "  powershell -ExecutionPolicy Bypass -File scripts/build-windows-portable.ps1"
+Write-Host "Опционально через Git Bash + make: make windows-env-check && make windows-portable"

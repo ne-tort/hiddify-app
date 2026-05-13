@@ -17,6 +17,9 @@ ifeq ($(OS),Windows_NT)
   .SHELLFLAGS := -c
   # GOOS=linux в User/session (часто от IDE) ломает CGO и go build на Windows; рецепты сами задают env GOOS=windows …
   unexport GOOS GOARCH
+  # Унаследованный CGO_LDFLAGS (например после экспериментов с линковкой CLI) ломает сборку hiddify-core.dll
+  # (линкер подставляет DLL как вход самой себе). Не наследовать в дочерние make/go.
+  unexport CGO_LDFLAGS
 endif
 
 # --- Log Colors ---
@@ -97,6 +100,8 @@ help:
 	@echo ""
 	@echo "=== Основные цели ==="
 	@echo "  make windows-portable     — ядро + flutter build + копия в PORTABLE_DST (по умолчанию portable/windows-x64/Hiddify)"
+	@echo "  make windows-portable-core-refresh — только hiddify-core.dll + HiddifyCli.exe + libcronet.dll из hiddify-core/bin в PORTABLE_DST (после сборки ядра)"
+	@echo "  PowerShell (без Git Bash): scripts/build-windows-portable.ps1 [-Mode Full|Core|Prepare|Sync|CoreRefresh] [-PortableDst ...]"
 	@echo "    CORE_PREBUILT_IN_TREE=1 — не пересобирать ядро (использовать hiddify-core/bin после make build-windows-libs в WSL)"
 	@echo "  make build-windows-libs   — только hiddify-core (windows-amd64, MinGW + Go toolchain из hiddify-core/Makefile)"
 	@echo "  make windows-prepare      — pub get + ядро + генерация"
@@ -419,7 +424,20 @@ android-aab-release:
 windows-release: windows-zip-release windows-exe-release windows-msix-release
 
 # Copy build/windows/x64/runner/Release -> portable/windows-x64/Hiddify (единый POSIX-рецепт, без ps1/sh-оркестраторов)
-.PHONY: windows-portable-sync windows-portable
+.PHONY: windows-portable-sync windows-portable windows-portable-core-refresh
+
+# Обновить только нативное ядро в уже собранной portable-папке (без flutter build).
+windows-portable-core-refresh:
+	@set -eu; \
+	ROOT="$(CURDIR)"; \
+	DST="$$ROOT/$(PORTABLE_DST)"; \
+	BIN="$$ROOT/hiddify-core/bin"; \
+	test -d "$$DST" || (echo "Нет $$DST — сначала make windows-portable или make windows-portable-sync" >&2; exit 1); \
+	test -f "$$BIN/hiddify-core.dll" || (echo "Нет $$BIN/hiddify-core.dll — соберите ядро (make build-windows-libs / make -C hiddify-core windows-amd64)" >&2; exit 1); \
+	test -f "$$BIN/HiddifyCli.exe" || (echo "Нет $$BIN/HiddifyCli.exe" >&2; exit 1); \
+	test -f "$$BIN/libcronet.dll" || (echo "Нет $$BIN/libcronet.dll" >&2; exit 1); \
+	cp -a "$$BIN/hiddify-core.dll" "$$BIN/HiddifyCli.exe" "$$BIN/libcronet.dll" "$$DST"/; \
+	echo "Обновлены в $$DST: hiddify-core.dll HiddifyCli.exe libcronet.dll"
 
 windows-portable-sync:
 	@set -eu; \

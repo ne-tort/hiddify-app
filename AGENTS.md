@@ -1,242 +1,87 @@
-# AGENTS — handoff: GUI-интеграция `masque` и `warp_masque`
+# AGENTS — handoff: MASQUE multi-endpoint, ошибка «close endpoint timed out after 10s»
 
-Краткий документ для ИИ/разработчика по текущей задаче: встроить endpoints **`type: masque`** и **`type: warp_masque`** в Hiddify client / Flutter GUI без потери параметров и с включением MASQUE в сборку core. История H2/H3/VPS и низкоуровневого WARP MASQUE перенесена в [docs/masque/AGENTS-MASQUE-H2-ARCHIVE.md](docs/masque/AGENTS-MASQUE-H2-ARCHIVE.md) и [docs/masque/MASQUE-SINGBOX-CONFIG.md](docs/masque/MASQUE-SINGBOX-CONFIG.md).
-
----
-
-## 1. Цель задачи
-
-Сделать так, чтобы Hiddify client:
-
-1. Импортировал `masque` и `warp_masque` endpoints из подписок, локального JSON и "Вставить из буфера обмена".
-2. Позволял редактировать такие профили как raw text в существующем редакторе профиля.
-3. Не нормализовал и не переписывал поля `masque` / `warp_masque` на уровне GUI-парсинга: параметры должны доходить до core/sing-box как есть, кроме уже существующей общей оболочки Hiddify config.
-4. Собирал core/libcore с поддержкой MASQUE во всех целевых бинарниках клиента.
-5. Не трогал WARP settings page в первой реализации: MASQUE/WireGuard вкладки и генерация `warp_masque` preset остаются отдельной следующей задачей.
+Документ для ИИ/разработчика: **текущая задача** — стабильное отключение сессии в Hiddify client при профилях с **множеством** `endpoints` типа `masque` (лабораторный multi-VPS JSON и т.п.). Интеграция GUI `masque` / `warp_masque`, H2/H3/VPS-история и схемы полей по-прежнему в [docs/masque/MASQUE-SINGBOX-CONFIG.md](docs/masque/MASQUE-SINGBOX-CONFIG.md) и [docs/masque/AGENTS-MASQUE-H2-ARCHIVE.md](docs/masque/AGENTS-MASQUE-H2-ARCHIVE.md).
 
 ---
 
-## 2. Важные инварианты
+## 1. Короткий контекст
 
-- Не превращать `warp_masque` в legacy WireGuard WARP. Это отдельный sing-box endpoint с собственным `profile` и MASQUE bootstrap.
-- Не выкидывать неизвестные поля `masque` / `warp_masque`, не пересобирать JSON вручную в Dart, если можно передать raw config в core.
-- Не добавлять секреты в логи, тестовые fixtures или docs: `auth_token`, private keys, `masque_ecdsa_private_key`, полный live profile.
-- Для generic `masque` и `warp_masque` считать источником схемы `hiddify-core/hiddify-sing-box/option/masque.go`.
-- При изменениях core config builder проверять, что обычные outbounds, WireGuard, AWG, WARP и raw sing-box JSON не ломаются.
-- В Plan mode редактировать только markdown; код менять только после явного перехода в Agent mode.
+- В одном sing-box/Hiddify-конфиге может быть **много** клиентских MASQUE-эндпоинтов (`type: masque`, разные теги/порты/http_layer и т.д.) — см. генератор и примеры в `scripts/Generate-MasqueMultiVpsConfigs.ps1`, `scripts/examples/masque_multi_vps_client*.json`.
+- При **остановке ядра / смене профиля / выходе из сессии** клиент закрывает `Box` sing-box. Пользователь видит ошибку вида **`close endpoint timed out after 10s`** (или с длительностью из правки ниже).
 
 ---
 
-## 3. Карта репозитория
+## 2. Симптом и причина (найдено)
 
-Корень: `c:\Users\qwerty\git\hiddify-app`.
+**Симптом:** при отключении в Hiddify для профиля с multi-MASQUE одинаково для всех эндпоинтов всплывает таймаут закрытия endpoint.
 
-Flutter / GUI:
+**Источник строки:** не Flutter и не gRPC обёртка — это **`sing-box` Box.Close** в форке:
 
-- `lib/features/profile/notifier/profile_notifier.dart` — импорт из буфера: `AddProfileNotifier.addClipboard`.
-- `lib/features/profile/data/profile_parser.dart` — определение имени/протокола профиля, headers override, `safeDecodeBase64`, `protocol()`.
-- `lib/features/profile/data/profile_repository.dart` — запись temp file, `validateConfig`, `offlineUpdate`, `getRawConfig`.
-- `lib/features/profile/add/add_profile_modal.dart` — UI добавления профиля, manual URL и clipboard flow.
-- `lib/features/profile/details/profile_details_page.dart` — существующий raw text editor профиля (`TextFormField` с `data.configContent`).
-- `lib/features/profile/details/profile_details_notifier.dart` — сохранение raw content из details page.
-- `lib/singbox/model/singbox_proxy_type.dart` — labels протоколов; сейчас нет `masque` / `warp_masque`.
-- `test/features/profile/data/profile_parser_test.dart` — тесты `ProfileParser.protocol`.
+- Файл: `hiddify-core/hiddify-sing-box/box.go`
+- Функция: `(*Box).Close` → `closeWithTimeout("endpoint", …, s.endpoint.Close)`
+- Раньше для **всех** фаз shutdown использовался один бюджет **`10 * time.Second`**.
+- `s.endpoint.Close()` вызывает **`adapter/endpoint/manager.go` → `(*Manager).Close`**, который раньше **последовательно** вызывал `endpoint.Close()` **для каждого** зарегистрированного endpoint.
 
-WARP GUI / prefs (только для справки, в первой реализации не менять):
+При десятках/сотнях MASQUE-клиентов каждый `Close()` тянет за собой teardown QUIC/H2/CONNECT-IP (`transport/masque` `coreSession.Close` и т.д.). Суммарное время **легко превышает 10 с** → срабатывает `closeWithTimeout` и возвращается:
 
-- `lib/features/settings/overview/sections/warp_options_page.dart` — текущая WARP settings page; не трогать в первой итерации.
-- `lib/features/settings/notifier/warp_option/warp_option_notifier.dart` — генерирует `warp` и `warp2`, сохраняет prefs.
-- `lib/features/settings/data/config_option_repository.dart` — `ConfigOptions`, private keys exclusion, `singboxConfigOptions`.
-- `lib/singbox/model/singbox_config_option.dart` — Dart JSON model для Hiddify options (`SingboxWarpOption`).
-- `lib/singbox/model/singbox_config_enum.dart` — `WarpDetourMode`, service modes, enum labels.
-- `lib/singbox/model/warp_account.dart` — парсинг ответа генерации WARP config.
-- `lib/hiddifycore/hiddify_core_service.dart` — Dart gRPC wrapper, `generateWarpConfig`.
+`fmt.Errorf("close %s timed out after %s", name, timeout)` → **`close endpoint timed out after 10s`**.
 
-Core / config builder:
+Итог: это **не** «эндпоинт не отвечает» в смысле сети, а **слишком жёсткий бюджет shutdown** при большом числе эндпоинтов (и/или не обновлённый `hiddify-core.dll` после правок в `box.go`).
 
-- `hiddify-core/v2/config/parser.go` — JSON/subscription parser в core; full config vs endpoints/outbounds extraction; `patchConfigOptions`.
-- `hiddify-core/v2/config/config.go` — `ReadSingOptions`, `BuildConfigJson`.
-- `hiddify-core/v2/config/builder.go` — `BuildConfig`, `setOutbounds`, перенос input endpoints/outbounds в итоговый config.
-- `hiddify-core/v2/config/outbound.go` — `patchEndpoint`, `patchOutbound`.
-- `hiddify-core/v2/config/hiddify_option.go` — `HiddifyOptions`, `WarpOptions`.
-- `hiddify-core/v2/config/warp.go` — legacy WARP/WireGuard generation and `patchWarp`.
-- `hiddify-core/v2/hcore/warp.go` — gRPC `GenerateWarpConfig`; сейчас возвращает пустой stub, старый реальный код закомментирован.
+**Исправления в дереве:**
 
-MASQUE в sing-box fork:
+1. **`box.go`:** для фазы **`endpoint`** бюджет **`3 * time.Minute`** (`endpointCloseTimeout`); остальные фазы — **`10 * time.Second`** (`defaultCloseTimeout`).
+2. **`adapter/endpoint/manager.go`:** `Close()` закрывает эндпоинты **последовательно** (как upstream sing-box), с `taskmonitor` на каждый `Close`; карта `endpointByTag` сбрасывается вместе со слайсом.
+3. **`lib/hiddifycore/hiddify_core_service.dart`:** у вызова `bgClient.stop` задан **`CallOptions(timeout: 240s)`**, чтобы клиент не обрывал RPC раньше сервера.
 
-- `hiddify-core/hiddify-sing-box/option/masque.go` — JSON поля `MasqueEndpointOptions`, `WarpMasqueEndpointOptions`, `WarpMasqueProfileOptions`.
-- `hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go` — generic `masque` validation.
-- `hiddify-core/hiddify-sing-box/protocol/masque/endpoint_warp_masque.go` — `warp_masque` endpoint bootstrap/runtime.
-- `hiddify-core/hiddify-sing-box/protocol/masque/warp_control_adapter.go` — Cloudflare profile, MASQUE ECDSA enroll/state/cache.
-- `hiddify-core/hiddify-sing-box/transport/masque/` — H2/H3 CONNECT-UDP/IP/stream dataplane.
-
-Сборка:
-
-- `hiddify-core/cmd/internal/build_libcore/main.go` — сборка libcore для desktop/mobile; теги берутся из `build_shared.CoreSingBoxBaseTags()` / `CoreSingBoxTagsWindows()`.
-- `hiddify-core/cmd/internal/build_shared/sdk.go` — сейчас в рабочем дереве не видно функций build tags; проверить до правок сборки.
-- `.github/workflows/build.yml` — сборка Flutter app; Windows core собирается отдельно через `hiddify-core make windows-amd64`.
-- `hiddify-core/.github/workflows/build.yml` — сборка core artifacts.
-- `hiddify-core/build_windows.bat`, Makefile в `hiddify-core/` — локальная/CI автоматизация core.
+**Почему у вас всё ещё было «10s»:** в логе видно ровно `after 10s` — значит в процессе работал **старый** `hiddify-core.dll` (Flutter не подхватил пересобранное ядро). После правок нужно **пересобрать** `hiddify-core/bin/hiddify-core.dll` и снова **`flutter build windows`**, иначе `box.go` не участвует в рантайме.
 
 ---
 
-## 4. Текущие наблюдения перед реализацией
+## 3. Карта путей (репозиторий и ядро)
 
-Импорт через clipboard:
+Корень клиента / монорепо: **`hiddify-app`** (в этом окружении: `c:\Users\qwerty\git\hiddify-app`).
 
-- `AddProfileNotifier.addClipboard` сначала пробует `LinkParser.parse(rawInput)` и remote URL.
-- Если это не URL, вызывает `_profilesRepo.addLocal(safeDecodeBase64(rawInput))`.
-- `ProfileRepository.addLocal` пишет content во временный файл, вызывает `ProfileParser.addLocal`, затем `validateConfig`.
-- `validateConfig` вызывает core parse/check через `_singbox.validateConfigByPath`.
-
-Редактирование:
-
-- `ProfileDetailsPage` уже показывает raw profile content и вызывает `setContent`.
-- Нужно проверить `ProfileDetailsNotifier.save()` и `ProfileRepository.offlineUpdate`, чтобы raw JSON `endpoints: [{type: masque|warp_masque, ...}]` сохранялся без лишней сериализации.
-
-Core parser:
-
-- JSON с `outbounds`/`endpoints` идёт через `options.UnmarshalJSONContext`.
-- Если full config выключен, parser оставляет `outbounds`, `endpoints` и только TUN-inbounds.
-- `patchConfigOptions` вызывает `patchWarp` для endpoints. Важно убедиться, что `patchWarp` не трогает `TypeWarpMasque` и `TypeMasque`.
-- `BuildConfig` в `setOutbounds` переносит input endpoints в `options.Endpoints` после `patchEndpoint`; это главный путь, где нельзя потерять `masque` endpoints.
-
-WARP GUI:
-
-- Текущая WARP страница завязана на legacy `ConfigOptions.warp*` и `SingboxWarpOption`.
-- `WarpOptionNotifier.genWarps()` генерирует две legacy WARP записи (`warp`, `warp2`) через `generateWarpConfig`.
-- `hiddify-core/v2/hcore/warp.go` сейчас возвращает пустой `WarpGenerationResponse`; перед интеграцией MASQUE WARP надо решить, восстанавливать ли legacy генерацию или добавить отдельный MASQUE generator рядом.
-- MASQUE WARP может использовать `profile.license`/`profile.private_key` consumer flow или `profile.id`/`profile.auth_token` Zero Trust flow; core уже умеет auto enroll MASQUE ECDSA через `warp_control_adapter.go`.
-
-Сборка:
-
-- MASQUE уже используется в stand-бинарнике с тегом `with_masque`.
-- Клиентские libcore сборки должны получить тот же тег в общей функции build tags, иначе GUI сможет импортировать JSON, но core не зарегистрирует endpoint.
-- До правок проверить фактическую реализацию `CoreSingBoxBaseTags()` / `CoreSingBoxTagsWindows()` в текущем дереве: ссылки есть в `build_libcore/main.go`, но быстрый поиск по workspace их не нашёл.
+| Зона | Путь |
+|------|------|
+| Flutter-клиент | `lib/` |
+| Обёртка ядра / gRPC | `lib/hiddifycore/` (`hiddify_core_service.dart`, `core_interface/core_interface_desktop.dart`, …) |
+| Submodule core | `hiddify-core/` |
+| Fork sing-box внутри core | `hiddify-core/hiddify-sing-box/` (`go.mod`: `replace github.com/sagernet/sing-box => ./hiddify-sing-box`) |
+| Закрытие Box, таймауты | `hiddify-core/hiddify-sing-box/box.go` |
+| Менеджер endpoints (`Close`, параллельно + сброс `endpointByTag`) | `hiddify-core/hiddify-sing-box/adapter/endpoint/manager.go` |
+| Клиент `type: masque` | `hiddify-core/hiddify-sing-box/protocol/masque/endpoint_client.go` → `common/masque/runtime.go` → `transport/masque/` (`transport.go`, …) |
+| Опции JSON | `hiddify-core/hiddify-sing-box/option/masque.go` |
+| Сборка libcore (Windows и пр.) | `hiddify-core/Makefile`, `hiddify-app/Makefile` (`windows-prepare`, `build-windows-libs`) |
+| Лаб multi VPS (генерация/деплой) | `scripts/Generate-MasqueMultiVpsConfigs.ps1`, `scripts/Deploy-MasqueMultiVps.ps1`, `experiments/router/stand/l3router/configs/masque-server-multi-vps.json` |
 
 ---
 
-## 5. Что должны проверить субагенты
+## 4. Что проверить после правок
 
-Перед запуском субагентов передать им этот файл и конкретные зоны:
+- **Сборка Windows portable (рекомендуемый один шаг, без Git Bash):**  
+  `powershell -ExecutionPolicy Bypass -File scripts/build-windows-portable.ps1`  
+  Полный цикл на PowerShell: ядро (Go+MinGW) → `pub get` / `build_runner` / `slang` → `flutter build windows --release` → копия в `portable/windows-x64/Hiddify` через **robocopy** (не делает `rm -rf` всей portable-папки, чтобы не упираться в занятый `hiddify_portable_data`). Только ядро + три DLL/EXE в уже готовую portable: `-Mode CoreRefresh`. Альтернатива: `make windows-portable` из Git Bash. В Makefile на Windows для `make` задан **`unexport CGO_LDFLAGS`**.
+- **Обязательно** пересобрать **`hiddify-core/bin/hiddify-core.dll`** (и при необходимости `HiddifyCli.exe`), затем **`flutter build windows`** — иначе в логе снова будет `after 10s` при старом бинарнике.
+- Импортировать multi-клиентский JSON; **включить VPN → выключить** — не должно быть стабильного `close endpoint timed out` из-за числа эндпоинтов.
 
-1. **Import/parser agent**
-   - Файлы: `lib/features/profile/*`, `lib/singbox/model/singbox_proxy_type.dart`, `test/features/profile/data/profile_parser_test.dart`, `hiddify-core/v2/config/parser.go`, `hiddify-core/v2/config/builder.go`.
-   - Ответить: где именно добавить detection labels `masque` / `warp_masque`; есть ли место, где JSON endpoint поля теряются; какие тесты нужны для clipboard/subscription/raw editor.
-
-2. **WARP GUI agent**
-   - Файлы: `warp_options_page.dart`, `warp_option_notifier.dart`, `config_option_repository.dart`, `singbox_config_option.dart`, `hiddify_core_service.dart`, `hiddify-core/v2/hcore/warp.go`, `hiddify-core/v2/config/warp.go`, `warp_control_adapter.go`.
-   - Ответить: как устроена старая WireGuard WARP генерация; что сейчас stub; какой минимальный UI/модель для вкладок WireGuard/MASQUE; где хранить MASQUE state без утечек.
-
-3. **Build/core agent**
-   - Файлы: `hiddify-core/cmd/internal/build_libcore/main.go`, `hiddify-core/cmd/internal/build_shared/`, `hiddify-core/Makefile`, `.github/workflows/build.yml`, `hiddify-core/.github/workflows/build.yml`.
-   - Ответить: где добавить `with_masque`; почему отсутствуют найденные build tag helpers; какие локальные и CI команды подтвердят включение endpoint.
-
-4. **Tests/QA agent**
-   - Файлы: Flutter tests, Go tests around `v2/config`, MASQUE unit tests.
-   - Ответить: минимальный набор тестов без VPS для GUI-интеграции; когда нужен VPS smoke только для runtime `warp_masque`.
-
----
-
-## 6. Предварительный план реализации
-
-1. Зафиксировать поведение импорта:
-   - добавить `masque` и `warp_masque` в `ProxyType`/`ProfileParser.protocol`;
-   - добавить unit tests на raw JSON local content, single endpoint JSON и subscription text с `endpoints`;
-   - убедиться, что `safeDecodeBase64` и `expandRemoteLinesInParallel` не ломают JSON.
-
-2. Зафиксировать raw editing:
-   - проверить и при необходимости поправить `ProfileDetailsNotifier` / `offlineUpdate`, чтобы редактирование endpoint JSON не меняло поля `profile`, `hops`, `http_layer*`, `server_token`, `masque_ecdsa_private_key`;
-   - добавить regression test на сохранение raw `warp_masque` JSON.
-
-3. Проверить core config path:
-   - добавить Go tests для `ParseConfig` / `BuildConfigJson` с `type: masque` и `type: warp_masque`;
-   - подтвердить, что `patchWarp` не применяется к MASQUE types;
-   - если builder фильтрует endpoint tags или теряет endpoints, исправить точечно.
-
-4. Включить MASQUE в libcore:
-   - найти фактический список build tags;
-   - добавить `with_masque` в базовые desktop/mobile tags и Windows tags;
-   - добавить проверку/тест команды, что endpoint регистрируется в собранном core.
-
-5. WARP settings не менять:
-   - не добавлять вкладки;
-   - не менять `WarpOptionsPage`, `WarpOptionNotifier`, `ConfigOptions.warp*`;
-   - не проектировать генератор `warp_masque` preset в этой итерации.
-
----
-
-## 7. Критерии готовности
-
-- Clipboard/local import принимает JSON с `endpoints: [{ "type": "masque", ... }]` и `endpoints: [{ "type": "warp_masque", ... }]`.
-- Remote subscription с таким JSON проходит download, parse, validate и появляется в списке профилей с понятным именем.
-- Raw editor сохраняет эти профили без удаления/переименования MASQUE-specific полей.
-- Generated full config содержит endpoint `type: masque` / `type: warp_masque` в `endpoints`.
-- Клиентский core/libcore собирается с `with_masque` на целевых платформах.
-- Старый WARP WireGuard UI не регрессирует, потому что его файлы не меняются.
-- Секреты не попадают в logs/tests/docs.
-
----
-
-## 8. Локальные проверки
-
-Flutter:
+Go (точечно):
 
 ```powershell
-Set-Location "$REPO_ROOT"
-flutter test test/features/profile/data/profile_parser_test.dart
+Set-Location "c:\Users\qwerty\git\hiddify-app\hiddify-core"
+go test ./hiddify-sing-box/... -count=1 -short 2>&1 | Select-Object -First 40
 ```
-
-Core config:
-
-```powershell
-Set-Location "$REPO_ROOT\hiddify-core"
-Remove-Item Env:GOOS, Env:GOARCH -ErrorAction SilentlyContinue
-go test ./v2/config -count=1
-```
-
-MASQUE core regressions, если трогались `hiddify-sing-box` MASQUE файлы:
-
-```powershell
-Set-Location "$REPO_ROOT\hiddify-core"
-.\scripts\go-test-masque.ps1
-```
-
-Libcore build tags:
-
-```powershell
-Set-Location "$REPO_ROOT\hiddify-core"
-go test ./cmd/internal/... -count=1
-```
-
-Если меняется runtime `warp_masque`, а не только GUI/import/build tags, нужен старый VPS smoke из архива: собрать `sing-box` с `with_masque`, задеплоить на стенд, проверить `warp=on` без публикации секретов.
 
 ---
 
-## 9. Справка по MASQUE JSON
+## 5. Инварианты и секреты
 
-Минимальный generic `masque` пример для тестов:
+- Не класть в репозиторий и не цитировать в AGENTS реальные `server_token`, ключи, live-профили.
+- Не смешивать **`warp_masque`** с legacy WireGuard WARP в документации задач.
 
-```json
-{
-  "endpoints": [
-    {
-      "type": "masque",
-      "tag": "masque-client",
-      "server": "example.com",
-      "server_port": 443,
-      "transport_mode": "connect_ip",
-      "fallback_policy": "strict",
-      "tcp_mode": "strict_masque",
-      "tcp_transport": "connect_stream",
-      "template_ip": "https://example.com:443/masque/ip",
-      "template_tcp": "https://example.com:443/masque/tcp/{target_host}/{target_port}",
-      "tls_server_name": "example.com"
-    }
-  ]
-}
-```
+---
 
-Для **CONNECT-UDP / `auto`** без явного `tcp_transport` достаточно полей как в `TestBuildConfigMinimalMasqueEndpointPassthrough` ([`v2/config/masque_passthrough_test.go`](hiddify-core/v2/config/masque_passthrough_test.go)): `type`, `tag`, `server`, `server_port`, при необходимости `insecure` / TLS; ядро подставит **`tcp_transport: connect_stream`**, если `transport_mode` не **`connect_ip`**. Не смешивайте **`transport_mode: connect_udp`** с **`template_ip`** в осмысленном конфиге — лишний `template_ip` на старте endpoint очищается (профиль на диске через `BuildConfig` может сохранить оба ключа).
+## 6. Следующие шаги (по желанию)
 
-`warp_masque` поля описаны в `docs/masque/MASQUE-SINGBOX-CONFIG.md` и `hiddify-core/hiddify-sing-box/option/masque.go`. Для тестов использовать фиктивные значения и не коммитить реальные токены/ключи.
+- Если одиночный MASQUE `Close()` иногда >3 мин: поднять `endpointCloseTimeout` в `box.go`.
+- Добавить unit/integration тест на «много stub endpoints» сложно без моков — проще регрессия руками + лог `box.go` на время `close endpoint`.
