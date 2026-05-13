@@ -1,0 +1,319 @@
+{
+    "log":  {
+                "timestamp":  true,
+                "level":  "warn"
+            },
+    "endpoints":  [
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18610",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18610,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18610/s18610/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18610/s18610/ip",
+                          "template_tcp":  "https://163.5.180.181:18610/s18610/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true,
+                          "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8"
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18611",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18611,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18611/s18611/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18611/s18611/ip/{target}/{ipproto}",
+                          "template_tcp":  "https://163.5.180.181:18611/s18611/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18612",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18612,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18612/s18612/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18612/s18612/ip",
+                          "template_tcp":  "https://163.5.180.181:18612/s18612/tcp/{target_host}/{target_port}",
+                          "blocked_target_ports":  [
+                                                       25
+                                                   ]
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18613",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18613,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18613/s18613/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18613/s18613/ip",
+                          "template_tcp":  "https://163.5.180.181:18613/s18613/tcp/{target_host}/{target_port}",
+                          "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
+                          "allowed_target_ports":  [
+                                                       22,
+                                                       25,
+                                                       53,
+                                                       80,
+                                                       110,
+                                                       143,
+                                                       443,
+                                                       465,
+                                                       587,
+                                                       853,
+                                                       993,
+                                                       8080,
+                                                       8443
+                                                   ]
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18614",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18614,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18614/s18614/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18614/s18614/ip/{target}/{ipproto}",
+                          "template_tcp":  "https://163.5.180.181:18614/s18614/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18615",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18615,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18615/s18615/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18615/s18615/ip",
+                          "template_tcp":  "https://163.5.180.181:18615/s18615/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18616",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18616,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18616/s18616/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18616/s18616/ip",
+                          "template_tcp":  "https://163.5.180.181:18616/s18616/tcp/{target_host}/{target_port}",
+                          "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8"
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18617",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18617,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18617/s18617/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18617/s18617/ip/{target}/{ipproto}",
+                          "template_tcp":  "https://163.5.180.181:18617/s18617/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true,
+                          "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
+                          "allowed_target_ports":  [
+                                                       22,
+                                                       25,
+                                                       53,
+                                                       80,
+                                                       110,
+                                                       143,
+                                                       443,
+                                                       465,
+                                                       587,
+                                                       853,
+                                                       993,
+                                                       8080,
+                                                       8443
+                                                   ]
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18618",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18618,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18618/s18618/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18618/s18618/ip",
+                          "template_tcp":  "https://163.5.180.181:18618/s18618/tcp/{target_host}/{target_port}"
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18619",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18619,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18619/s18619/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18619/s18619/ip",
+                          "template_tcp":  "https://163.5.180.181:18619/s18619/tcp/{target_host}/{target_port}",
+                          "blocked_target_ports":  [
+                                                       25
+                                                   ]
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18620",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18620,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18620/s18620/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18620/s18620/ip/{target}/{ipproto}",
+                          "template_tcp":  "https://163.5.180.181:18620/s18620/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18621",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18621,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18621/s18621/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18621/s18621/ip",
+                          "template_tcp":  "https://163.5.180.181:18621/s18621/tcp/{target_host}/{target_port}",
+                          "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
+                          "allowed_target_ports":  [
+                                                       22,
+                                                       25,
+                                                       53,
+                                                       80,
+                                                       110,
+                                                       143,
+                                                       443,
+                                                       465,
+                                                       587,
+                                                       853,
+                                                       993,
+                                                       8080,
+                                                       8443
+                                                   ]
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18622",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18622,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18622/s18622/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18622/s18622/ip",
+                          "template_tcp":  "https://163.5.180.181:18622/s18622/tcp/{target_host}/{target_port}",
+                          "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8"
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18623",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18623,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18623/s18623/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18623/s18623/ip/{target}/{ipproto}",
+                          "template_tcp":  "https://163.5.180.181:18623/s18623/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18624",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18624,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18624/s18624/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18624/s18624/ip",
+                          "template_tcp":  "https://163.5.180.181:18624/s18624/tcp/{target_host}/{target_port}"
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18625",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18625,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18625/s18625/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18625/s18625/ip",
+                          "template_tcp":  "https://163.5.180.181:18625/s18625/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true,
+                          "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
+                          "allowed_target_ports":  [
+                                                       22,
+                                                       25,
+                                                       53,
+                                                       80,
+                                                       110,
+                                                       143,
+                                                       443,
+                                                       465,
+                                                       587,
+                                                       853,
+                                                       993,
+                                                       8080,
+                                                       8443
+                                                   ]
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18626",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18626,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18626/s18626/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18626/s18626/ip/{target}/{ipproto}",
+                          "template_tcp":  "https://163.5.180.181:18626/s18626/tcp/{target_host}/{target_port}",
+                          "allow_private_targets":  true,
+                          "blocked_target_ports":  [
+                                                       25
+                                                   ]
+                      },
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-srv-18627",
+                          "mode":  "server",
+                          "listen":  "0.0.0.0",
+                          "listen_port":  18627,
+                          "certificate":  "/etc/sing-box/masque-multi/cert.pem",
+                          "key":  "/etc/sing-box/masque-multi/key.pem",
+                          "template_udp":  "https://163.5.180.181:18627/s18627/udp/{target_host}/{target_port}",
+                          "template_ip":  "https://163.5.180.181:18627/s18627/ip",
+                          "template_tcp":  "https://163.5.180.181:18627/s18627/tcp/{target_host}/{target_port}"
+                      }
+                  ],
+    "outbounds":  [
+                      {
+                          "tag":  "direct",
+                          "type":  "direct"
+                      }
+                  ],
+    "route":  {
+                  "auto_detect_interface":  true,
+                  "final":  "direct"
+              }
+}

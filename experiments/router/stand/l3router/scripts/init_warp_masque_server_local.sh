@@ -9,4 +9,4 @@ if [[ -f "$DST" ]]; then
   exit 0
 fi
 cp "$SRC" "$DST"
-echo "created $DST — заполните profile.* и при необходимости WARP_MASQUE_WARP_CACHE"
+echo "created $DST — заполните profile.* (см. README-warp-masque-live-server.md)"

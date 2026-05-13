@@ -1,0 +1,33 @@
+# Override для docker-compose.masque-e2e.yml: несколько MASQUE server endpoints на разных портах
+# (см. configs/masque-server-multi.json). Стандартный клиент в compose всё ещё ждёт один сервер :8443;
+# этот файл — для проверки мульти-endpoint и публикации портов 18500–18503 на хост.
+#
+# Пример:
+#   cd experiments/router/stand/l3router
+#   docker compose -f docker-compose.masque-e2e.yml -f docker-compose.masque-e2e.multi.override.yml up -d masque-server-core
+#
+# Проверка TLS/QUIC с хоста — отдельно (curl/http3), см. README в configs/.
+
+services:
+  masque-server-core:
+    volumes:
+      - ${MASQUE_SERVER_CONFIG:-./configs/masque-server-multi.json}:/etc/sing-box/config.json:ro
+    ports:
+      - "18500:18500/tcp"
+      - "18500:18500/udp"
+      - "18501:18501/tcp"
+      - "18501:18501/udp"
+      - "18502:18502/tcp"
+      - "18502:18502/udp"
+      - "18503:18503/tcp"
+      - "18503:18503/udp"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "ss -lun | grep -q :18500 && ss -lnt | grep -q :18500 && ss -lun | grep -q :18501 && ss -lnt | grep -q :18501 && ss -lun | grep -q :18502 && ss -lnt | grep -q :18502 && ss -lun | grep -q :18503 && ss -lnt | grep -q :18503",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+      start_period: 4s

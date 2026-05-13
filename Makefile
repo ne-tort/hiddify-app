@@ -118,7 +118,7 @@ windows-env-check:
 	@echo "OK: flutter, dart, go найдены."
 	@command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || command -v x86_64-w64-mingw32-gcc-15-posix >/dev/null 2>&1 || (echo "Предупреждение: не найден MinGW (x86_64-w64-mingw32-gcc*) — нужен для build-windows-libs." && exit 1)
 	@echo "OK: MinGW в PATH."
-	@command -v rsrc >/dev/null 2>&1 || (echo "Нет rsrc: выполните go install github.com/akavel/rsrc@latest" && exit 1)
+	@command -v rsrc >/dev/null 2>&1 || test -x "$$(go env GOPATH)/bin/rsrc" || (echo "Нет rsrc: выполните go install github.com/akavel/rsrc@latest" && exit 1)
 	@echo "OK: rsrc."
 
 clean-portable:

@@ -39,4 +39,4 @@ if (-not (Test-Path $Tarball)) {
 
 Write-Host "scp -> ${Target}:${RemotePath}"
 & scp -o BatchMode=yes -o StrictHostKeyChecking=accept-new $Tarball $Target`:$RemotePath
-Write-Host "OK. На сервере: mkdir -p ~/warp-masque-stand && tar xzf $($RemotePath.TrimStart('~/')) -C ~/warp-masque-stand (путь поправьте при необходимости)."
+Write-Host "OK. На сервере (пример): mkdir -p ~/warp-masque-stand && tar xzf $RemotePath -C ~/warp-masque-stand"

@@ -28,11 +28,14 @@
       "type": "warp_masque",
       "tag": "warp-masque-live",
       "connect_timeout": "20s",
+      "http_layer": "h3",
+      "http_layer_fallback": true,
       "transport_mode": "connect_ip",
       "fallback_policy": "strict",
       "tcp_mode": "strict_masque",
-      "tcp_transport": "connect_stream",
+      "tcp_transport": "connect_ip",
       "domain_resolver": "bootstrap-dns",
+      "template_ip": "https://cloudflareaccess.com",
       "mtu": 1350,
       "profile": {
         "compatibility": "consumer",
@@ -48,16 +51,21 @@
       "type": "tun",
       "tag": "tun-test",
       "interface_name": "tun-warp-test",
-      "address": ["172.19.100.2/30"],
+      "address": ["172.19.100.2/31"],
       "mtu": 1500,
-      "stack": "mixed",
-      "auto_route": false,
-      "strict_route": false
+      "stack": "gvisor",
+      "auto_route": true,
+      "strict_route": false,
+      "route_address": [
+        "198.18.0.0/15",
+        "1.1.1.0/24",
+        "1.0.0.0/24"
+      ]
     },
     {
       "type": "socks",
       "tag": "socks-in",
-      "listen": "0.0.0.0",
+      "listen": "127.0.0.1",
       "listen_port": 1080
     }
   ],

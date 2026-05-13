@@ -136,11 +136,11 @@ class ProfileParser {
     required ProfileEntity profile,
     required String tempFilePath,
   }) => profile
-          .map(
-            remote: (rp) => parse(profile: rp, tempFilePath: tempFilePath),
-            local: (lp) => parse(tempFilePath: tempFilePath, profile: lp),
-          )
-          .flatMap((profEntity) => Either.tryCatch(() => profEntity.toUpdateEntry(), ProfileFailure.unexpected));
+      .map(
+        remote: (rp) => parse(profile: rp, tempFilePath: tempFilePath),
+        local: (lp) => parse(tempFilePath: tempFilePath, profile: lp),
+      )
+      .flatMap((profEntity) => Either.tryCatch(() => profEntity.toUpdateEntry(), ProfileFailure.unexpected));
 
   TaskEither<ProfileFailure, Map<String, dynamic>> _downloadProfile(
     String url,
@@ -402,6 +402,8 @@ class ProfileParser {
       ).hasMatch(lower);
       return hasAwgFields ? ProxyType.awg.label : ProxyType.wireguard.label;
     }
+    final jsonProtocol = _protocolFromSingboxJson(content);
+    if (jsonProtocol != null) return jsonProtocol;
     final lines = content.split('\n');
     String? name;
     for (final line in lines) {
@@ -428,6 +430,39 @@ class ProfileParser {
       };
     }
     return name ?? ProxyType.unknown.label;
+  }
+
+  static String? _protocolFromSingboxJson(String content) {
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(content.trimLeft().replaceFirst('\ufeff', ''));
+    } catch (_) {
+      return null;
+    }
+
+    Iterable<dynamic> entriesFor(String key) sync* {
+      if (decoded is Map<String, dynamic>) {
+        final entries = decoded[key];
+        if (entries is List) {
+          yield* entries;
+        }
+      }
+    }
+
+    final candidates = <dynamic>[
+      if (decoded is Map<String, dynamic>) decoded,
+      ...entriesFor('endpoints'),
+      ...entriesFor('outbounds'),
+    ];
+    for (final candidate in candidates) {
+      if (candidate is! Map) continue;
+      final type = candidate['type'];
+      final proxyType = ProxyType.fromJson(type);
+      if (proxyType == ProxyType.masque || proxyType == ProxyType.warpMasque) {
+        return proxyType.label;
+      }
+    }
+    return null;
   }
 
   static Map<String, dynamic> applyProfileOverride(Map<String, dynamic> main, String? profileOverride) {

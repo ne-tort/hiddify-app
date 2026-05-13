@@ -10,6 +10,7 @@ import 'package:hiddify/features/profile/details/profile_details_state.dart';
 import 'package:hiddify/features/profile/model/profile_entity.dart';
 import 'package:hiddify/features/profile/model/profile_failure.dart';
 import 'package:hiddify/utils/utils.dart';
+import 'package:meta/meta.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 part 'profile_details_notifier.g.dart';
@@ -63,6 +64,39 @@ class ProfileDetailsNotifier extends _$ProfileDetailsNotifier with AppLogger {
     return clone;
   }
 
+  static bool _hasMasqueEndpoint(Map<String, dynamic> root) {
+    final endpoints = _toDynamicList(root['endpoints']);
+    return endpoints.any((raw) {
+      if (raw is! Map) return false;
+      final type = raw['type'];
+      return type == 'masque' || type == 'warp_masque';
+    });
+  }
+
+  @visibleForTesting
+  static String prepareEditorContent(String content) {
+    final decoded = jsonDecode(content);
+    final jsonObject = decoded is Map<String, dynamic> ? _normalizeProfileJson(decoded) : <String, dynamic>{};
+    if (_hasMasqueEndpoint(jsonObject)) {
+      return const JsonEncoder.withIndent('  ').convert(jsonObject);
+    }
+
+    final List<Map<String, dynamic>> outbounds = [];
+    if (jsonObject['outbounds'] is List) {
+      for (final outbound in jsonObject['outbounds'] as List<dynamic>) {
+        if (outbound is Map<String, dynamic> &&
+            outbound['type'] != null &&
+            !['selector', 'urltest', 'dns', 'block', 'balancer'].contains(outbound['type']) &&
+            !['direct', 'bypass', 'direct-fragment'].contains(outbound['tag'])) {
+          outbounds.add(outbound);
+        }
+      }
+    }
+    final endpoints = jsonObject['endpoints'] as List? ?? [];
+    final inbounds = jsonObject['inbounds'] as List? ?? [];
+    return '{"outbounds": ${json.encode(outbounds)},"endpoints":${json.encode(endpoints)},"inbounds":${json.encode(inbounds)} }';
+  }
+
   @override
   Future<ProfileDetailsState> build(String id) async {
     final prof = (await _profilesRepo.getById(id).run()).match((l) => throw l, (prof) {
@@ -73,37 +107,22 @@ class ProfileDetailsNotifier extends _$ProfileDetailsNotifier with AppLogger {
       }
       return prof;
     });
-    var profContent = "";
+    final rawContent = await _profilesRepo.getRawConfig(id).run().then((e) => e.getOrElse((f) => ""));
+    var profContent = rawContent;
     try {
-      profContent = (await _profilesRepo.generateConfig(id).run()).match(
-        (l) => throw Exception('Failed to generate config: $l'),
-        (content) => content,
-      );
+      if (rawContent.isEmpty ||
+          !_hasMasqueEndpoint(_normalizeProfileJson(jsonDecode(rawContent) as Map<String, dynamic>))) {
+        profContent = (await _profilesRepo.generateConfig(id).run()).match(
+          (l) => throw Exception('Failed to generate config: $l'),
+          (content) => content,
+        );
+      }
     } catch (e, st) {
       loggy.error('Error generating config for profile $id', e, st);
-      // Optionally, you can set profContent to an empty string or keep the original content
-      profContent = await _profilesRepo.getRawConfig(id).run().then((e) => e.getOrElse((f) => ""));
+      profContent = rawContent;
     }
     try {
-      final decoded = jsonDecode(profContent);
-      final jsonObject = decoded is Map<String, dynamic> ? _normalizeProfileJson(decoded) : <String, dynamic>{};
-      final List<Map<String, dynamic>> outbounds = [];
-      if (jsonObject is Map<String, dynamic> && jsonObject['outbounds'] is List) {
-        for (final outbound in jsonObject['outbounds'] as List<dynamic>) {
-          if (outbound is Map<String, dynamic> &&
-              outbound['type'] != null &&
-              !['selector', 'urltest', 'dns', 'block', 'balancer'].contains(outbound['type']) &&
-              !['direct', 'bypass', 'direct-fragment'].contains(outbound['tag'])) {
-            outbounds.add(outbound);
-          }
-        }
-      } else {
-        // print('No outbounds found in the config');
-      }
-      final endpoints = jsonObject['endpoints'] as List? ?? [];
-      final inbounds = jsonObject['inbounds'] as List? ?? [];
-      profContent =
-          '{"outbounds": ${json.encode(outbounds)},"endpoints":${json.encode(endpoints)},"inbounds":${json.encode(inbounds)} }';
+      profContent = prepareEditorContent(profContent);
       loggy.info("profile details config prepared (len=${profContent.length})");
     } catch (e, st) {
       loggy.error('Error parsing profile-content JSON', e, st);

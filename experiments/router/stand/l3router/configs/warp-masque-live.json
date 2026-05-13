@@ -33,6 +33,8 @@
       "tcp_mode": "strict_masque",
       "tcp_transport": "connect_stream",
       "domain_resolver": "bootstrap-dns",
+      "template_ip": "https://cloudflareaccess.com",
+      "mtu": 1350,
       "profile": {
         "compatibility": "consumer",
         "detour": "direct",
@@ -46,7 +48,7 @@
       "type": "tun",
       "tag": "tun-in",
       "interface_name": "tun0",
-      "address": ["172.19.100.2/30"],
+      "address": ["172.19.100.2/31"],
       "mtu": 9000,
       "stack": "mixed",
       "auto_route": true,

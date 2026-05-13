@@ -24,6 +24,8 @@ enum ProxyType {
   urltest("URLTest"),
   balancer("Balancer"),
   warp("Warp"),
+  masque("MASQUE"),
+  warpMasque("WARP MASQUE"),
 
   xvless("xVLESS"),
   xvmess("xVMess"),
@@ -38,11 +40,17 @@ enum ProxyType {
 
   final String label;
 
-  String get key => name;
+  String get key => switch (this) {
+    warpMasque => 'warp_masque',
+    _ => name,
+  };
 
   static List<ProxyType> groupValues = [selector, urltest, balancer];
 
   bool get isGroup => ProxyType.groupValues.contains(this);
-  static final Map<String, ProxyType> _keyMap = Map.fromEntries(ProxyType.values.map((e) => MapEntry(e.key, e)));
+  static final Map<String, ProxyType> _keyMap = {
+    for (final value in ProxyType.values) value.name.toLowerCase(): value,
+    for (final value in ProxyType.values) value.key.toLowerCase(): value,
+  };
   static ProxyType fromJson(dynamic type) => _keyMap[(type as String?)?.toLowerCase()] ?? ProxyType.unknown;
 }

@@ -194,5 +194,43 @@ Endpoint = 1.1.1.1:51820
 """;
       expect(ProfileParser.protocol(content), equals("WireGuard"));
     });
+
+    test("Should detect MASQUE endpoint from sing-box JSON", () {
+      const content = r'''
+{
+  "endpoints": [
+    {
+      "type": "masque",
+      "tag": "masque-client",
+      "server": "example.com",
+      "server_port": 443,
+      "transport_mode": "connect_ip",
+      "tcp_transport": "connect_stream"
+    }
+  ]
+}
+''';
+      expect(ProfileParser.protocol(content), equals("MASQUE"));
+    });
+
+    test("Should detect WARP MASQUE endpoint from sing-box JSON", () {
+      const content = r'''
+{
+  "endpoints": [
+    {
+      "type": "warp_masque",
+      "tag": "warp-masque",
+      "transport_mode": "connect_ip",
+      "tcp_transport": "connect_stream",
+      "profile": {
+        "id": "test-device",
+        "auth_token": "test-token"
+      }
+    }
+  ]
+}
+''';
+      expect(ProfileParser.protocol(content), equals("WARP MASQUE"));
+    });
   });
 }

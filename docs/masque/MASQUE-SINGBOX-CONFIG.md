@@ -14,6 +14,22 @@
 
 ---
 
+## Минимальный клиент / сервер (generic `masque`)
+
+### Клиент
+
+- **Минимум полей** для стенда с дефолтными путями `/masque/...`: `type`, `tag`, `server`, при необходимости `server_port` (0 → 443 в [`buildTemplates`](../../hiddify-core/hiddify-sing-box/transport/masque/transport.go)), плюс TLS (`insecure` или доверенный сертификат).
+- **`tcp_transport`:** если `transport_mode` **не** `connect_ip`, пустое значение или `auto` **перед валидацией** подставляется **`connect_stream`** ([`applyMasqueClientMasqueDefaults`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go) в [`endpoint_client.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint_client.go)). Для **`transport_mode: connect_ip`** и TCP по **CONNECT-IP / netstack** по-прежнему нужен явный **`tcp_transport: connect_ip`** (см. §3).
+- **`transport_mode: connect_udp` + непустой `template_ip`:** раньше это отклонялось (`transport_mode connect_udp cannot set template_ip`). Сейчас **`template_ip` очищается** на входе в клиентский endpoint перед `validateMasqueOptions`. Слой **Hiddify `BuildConfig`** по-прежнему **не переписывает** сырой JSON профиля — см. тест **`TestBuildConfigPassthroughMasqueConnectUDPWithTemplateIP`** в [`v2/config/masque_passthrough_test.go`](../../hiddify-core/v2/config/masque_passthrough_test.go).
+- **`tls_server_name`:** необязателен; пусто → SNI совпадает с **`server`** ([`resolveTLSServerName`](../../hiddify-core/hiddify-sing-box/transport/masque/transport.go)).
+
+### Сервер
+
+- Минимум: `mode: server`, `listen`, `listen_port`, `certificate`, `key`; шаблоны можно опустить — см. §7.1.
+- **`listen` `0.0.0.0` / `::`:** в [`defaultMasqueListenHTTPSAuthority`](../../hiddify-core/hiddify-sing-box/protocol/masque/template_defaults.go) authority дефолтных шаблонов для mux сводится к **`127.0.0.1:<port>`**. Если клиент набирает **публичный IP или DNS-имя**, а сервер слушает wildcard, задайте явные **`template_*`** с тем же **host:port**, что клиент использует в **`:authority`**, иначе **TCP** CONNECT-stream может разойтись с проверкой Host в [`parseTCPTargetFromRequest`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint_server.go).
+
+---
+
 ## 1. Режимы (`mode`)
 
 | `mode` (JSON) | Описание |
@@ -28,10 +44,10 @@
 | Значение | Нормализация пустого |
 |----------|----------------------|
 | `auto` | default |
-| `connect_udp` | UDP через CONNECT-UDP + `template_udp`; **`template_ip` запрещён** |
+| `connect_udp` | UDP через CONNECT-UDP + `template_udp`; **`template_ip` очищается** на старте endpoint, если был задан |
 | `connect_ip` | UDP через CONNECT-IP + UDP-мост + `template_ip`; **`template_udp` запрещён** |
 
-Правило валидации: несовместимые пары `template_udp` / `template_ip` отсекаются см. [`endpoint.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go).
+Правило валидации: несовместимые пары `template_udp` / `template_ip` отсекаются в [`validateMasqueOptions`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go); перед этим клиентский endpoint применяет [`applyMasqueClientMasqueDefaults`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go) (очистка `template_ip` при явном `connect_udp`, дефолт `tcp_transport`).
 
 **Flow forwarding CONNECT-IP:** если заданы `connect_ip_scope_target` и/или `connect_ip_scope_ipproto`, обязательны `transport_mode: connect_ip` и `template_ip` с подстроками **`{target}`** и **`{ipproto}`**.
 
@@ -60,8 +76,8 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 ## 3. TCP: два разных контракта (не путать)
 
-1. **`tcp_transport: connect_stream`** (на клиенте **обязателен явно**; `auto`/`connect_ip`/пусто — ошибка валидации) — релей TCP через MASQUE **CONNECT stream** по `template_tcp` с `{target_host}`/`{target_port}`.
-2. **TCP через IP-пакетную плоскость** — это **`transport_mode: connect_ip`** + netstack/IP session, **не** значение `tcp_transport = connect_ip` (она **запрещена**: «TUN-only» ошибка из валидации).
+1. **MASQUE TCP relay через CONNECT-stream** — ключ **`tcp_transport: connect_stream`**. Если `transport_mode` **не** `connect_ip`, пустой или `auto` **`tcp_transport`** перед валидацией нормализуется в **`connect_stream`** ([`applyMasqueClientMasqueDefaults`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go)). Шаблон **`template_tcp`** с `{target_host}`/`{target_port}` строится как в §7.1 (или задаётся явно).
+2. **TCP через IP-пакетную плоскость** — это **`transport_mode: connect_ip`** + netstack/IP session; тогда **`tcp_transport: connect_ip`** допустим. Значение **`connect_ip`** при **`transport_mode` ≠ `connect_ip`** по-прежнему ошибка («TUN-only» контракт).
 
 **Fallback на прямой TCP:** только пара **`tcp_mode: masque_or_direct`** + **`fallback_policy: direct_explicit`**. Иные сочетания отклоняются.
 
@@ -70,7 +86,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 ## 4. Цепочка (`hop_policy`)
 
 - пустое → трактуется как **`single`**
-- **`chain`**: нужен непустой `hops`, у каждого hop — **`server`**, **`server_port`** (>0); `tag` уникальны.
+- **`chain`**: нужен непустой `hops`, у каждого hop — **`server`**, **`server_port`** (>0); `tag` уникальны; граф **`via`** должен ссылаться только на известные `tag` (проверка **`CM.BuildChain`** внутри [`validateMasqueOptions`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go), см. [`common/masque/chain.go`](../../hiddify-core/hiddify-sing-box/common/masque/chain.go)).
 
 ---
 
@@ -87,6 +103,10 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 | `http_layer_cache_ttl` | `0` | TTL кэша выбранного слоя; **только при** `http_layer: auto`; при явном `h2`/`h3` положительный TTL — ошибка валидации. |
 
 Несовместимость: **`http_layer: h2`** и **`quic_experimental.enabled`** — ошибка конфига. Рантайм и стенд: [`AGENTS.md`](../../AGENTS.md) §6–8, §13–14.
+
+Для `warp_masque` dataplane cache теперь изолирован по HTTP-режиму (`http_layer` + `http_layer_fallback`) в ключе кэша. Это исключает тихое перетирание состояния между `h2` и `h3` при последовательных перезапусках на одном профиле.
+
+Практика VPS (2026-05-12): `h3`/`auto` давали `warp=on`, а `h2` мог падать с `warp_masque: peer TLS public key does not match Cloudflare device profile pin` (семантически тот же pin-mismatch класс, что и в usque).
 
 ### UDP
 
@@ -138,7 +158,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 | `template_udp` / `template_ip` / `template_tcp` | см. §7.1 | Если заданы непустые строки — **должны** содержать `{target_host}`/`{target_port}` там, где это требует валидатор (см. §7.4). |
 | `mtu` | **внутренний потолок CONNECT-IP ≈ 1500** байт IP-датаграммы (типичный Ethernet path) | `NewSession`: если `mtu` 0 — эффективный ceiling `min(1500, HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX)`; при `mtu > 0` — диапазон [1280, 65535] в валидаторе, затем кламп к env-max |
 | `server_token` | нет Bearer | сервер с пустым токеном тоже без app-auth |
-| `tcp_transport` | — | **нельзя** оставить пустым: валидация требует **явно** `connect_stream` (пустое и `auto` отклоняются) |
+| `tcp_transport` | **`connect_stream`** при пустом/`auto`, если `transport_mode` ≠ `connect_ip` | [`applyMasqueClientMasqueDefaults`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go); для **`connect_ip`** пустой/`auto` по-прежнему ошибка — нужен явный выбор `connect_stream` vs `connect_ip` |
 
 | Поле (сервер `mode: server`) | Пусто / не задано |
 |------------------------------|-------------------|
@@ -162,8 +182,11 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 | `profile.detour` | **Только control-plane:** исходящий detour для запросов к Cloudflare API при `GetWarpProfile` (не путать с корневым `detour` endpoint для dataplane). |
 | `profile.dataplane_port` | Жёсткая подмена **одного** UDP/QUIC-порта (если не `0`): игнорируется авто-подбор кандидатов. Пример: **`443`**, когда профиль API отдаёт WG-first порт вроде **`2408`**, а MASQUE QUIC ожидается на другом порту. Код: [`warp_control_adapter.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/warp_control_adapter.go). |
 | `profile.dataplane_port_strategy` | `auto` (по умолчанию) или **`api_first`**. При **`auto`** и `policy.tunnel_protocol`, указывающем на **MASQUE**, ядро строит **упорядоченный список UDP-портов**: сначала типичные порты MASQUE по [документации Cloudflare One firewall](https://developers.cloudflare.com/cloudflare-one/connections/connect-devices/warp/deployment/firewall/) (**443, 4443, 8443, 8095, 500, 1701, 4500**), затем порты из профиля API (дедупликация). Старт **`warp_masque`** последовательно пробует порты (до 12) пока `Start` не успешен или ошибка не считается нечувствительной к смене порта (401, отсутствие Extended CONNECT/datagrams у сервера). **`api_first`** — только порядок портов из API (старое поведение «первый порт профиля» как база без приоритета 443). Логика списка: [`warp_dataplane_ports.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/warp_dataplane_ports.go). |
+| `profile.auto_enroll_masque` | По умолчанию **включено** (`null` или `true`): если туннель в профиле — MASQUE и в конфиге пусто **`masque_ecdsa_private_key`**, генерируется пара ECDSA P-256 и выполняется **PATCH** `…/reg/{id}` (как в usque). **`false`** — не вызывать enroll (нужен уже выписанный ключ вручную/usque). Код: [`api.go`](../../hiddify-core/hiddify-sing-box/common/cloudflare/api.go) `EnrollMasqueDeviceKey`, [`warp_control_adapter.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/warp_control_adapter.go). |
+| `profile.warp_masque_state_path` | Путь к JSON с **`auth_token`**, **`id`**, **`wireguard_private_key`**, **`masque_ecdsa_private_key`** для персистентности между перезапусками. Пусто: переменная **`HIDDIFY_WARP_MASQUE_DEVICE_STATE`**, иначе каталог конфигурации ОС → **`sing-box/warp_masque_device_state.json`**. Явные поля в JSON конфига sing-box имеют приоритет над файлом state. |
+| `profile.masque_device_name` | Опциональное поле **`name`** в теле PATCH при enroll. |
 
-Успешный порт записывается в кэш `hiddify_warp_masque_cache.json` (функция `RecordWarpMasqueDataplaneSuccess`), чтобы следующий запуск не гонял весь список.
+Успешный порт записывается в кэш **`hiddify_warp_masque_dataplane_cache.json`** рядом с `warp_masque_device_state.json` (`RecordWarpMasqueDataplaneSuccess` / `resolvedWarpMasqueDataplaneCachePath`), чтобы следующий запуск не гонял весь список.
 
 Отладка «короткого» первого `read` на не-`UDPConn` пути QUIC: переменная окружения **`HIDDIFY_MASQUE_QUIC_HEX_SMALL_READS=1`** — hex первых байт входящей датаграммы ≤64 B в логе [`quic_dialer.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/quic_dialer.go) (только для обёртки `connectedPacketConn`; если нижний dial отдаёт **`*net.UDPConn`**, QUIC идёт напрямую и quic-go может увеличивать receive buffer — предпочтительный путь).
 
@@ -177,7 +200,8 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 | Условие | Ошибка / эффект |
 |---------|-----------------|
-| `tcp_transport` пусто или `auto` | ошибка валидации — нужен явный **`connect_stream`** |
+| `tcp_transport` пусто или `auto` при `transport_mode` ≠ `connect_ip` | подстановка **`connect_stream`** перед валидацией |
+| `tcp_transport` пусто или `auto` при **`transport_mode: connect_ip`** | ошибка — нужен явный **`connect_stream`** или **`connect_ip`** |
 | `tcp_transport: connect_ip` | ошибка — только TUN packet-plane, не этот ключ |
 | `tcp_mode: masque_or_direct` без `fallback_policy: direct_explicit` | ошибка |
 | `udp_timeout` или `workers` ≠ 0 | ошибка |
@@ -188,7 +212,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 | `transport_mode` (после нормализации) | Обязательно / допустимо в JSON | Запрещено / неприменимо |
 |---------------------------------------|--------------------------------|-------------------------|
-| **`connect_udp`** | `template_udp` (или дефолт buildTemplates); при непустом клиентском `template_udp` — подстроки `{target_host}` и `{target_port}` | **`template_ip` непустой** |
+| **`connect_udp`** | `template_udp` (или дефолт buildTemplates); при непустом клиентском `template_udp` — подстроки `{target_host}` и `{target_port}` | Непустой **`template_ip`** в сыром JSON допустим на уровне профиля, но **на старте endpoint поле очищается** (несовместимость с CONNECT-UDP). Явно задайте только нужные шаблоны. |
 | **`connect_ip`** | `template_ip` (или дефолт); при непустом `template_udp` — ошибка; при scope — см. ниже | **`template_udp` непустой** |
 | **`auto`** | Оба шаблона могут быть пустыми под дефолты **одновременно** в `buildTemplates`, но валидатор **не запрещает** оба непустыми: тогда оба должны удовлетворять правилам подстрок для TCP/UDP если заданы. На **`ListenPacket`** ветка как у `connect_udp` (пока не `connect_ip`). Для строгого «только одна плоскость UDP» в конфиге лучше выставить явно `connect_udp` или `connect_ip`. | `connect_ip_scope_*` без **`connect_ip`** |
 | любой, не `connect_ip` | — | **`connect_ip_scope_target`** / **`connect_ip_scope_ipproto`** (если не нули) |
@@ -196,7 +220,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 Связка **TCP** с плоскостью:
 
-- **`tcp_transport: connect_stream`** нужен **всегда** на клиенте (MASQUE TCP relay).
+- **`tcp_transport: connect_stream`** нужен для MASQUE TCP relay, если вы не полагаетесь на **дефолт** (см. §7.2): при `transport_mode` ≠ `connect_ip` пустой/`auto` **`tcp_transport`** становится **`connect_stream`**.
 - **`tcp_mode` / `fallback_policy`** влияют на **dial TCP** (stream + опционально direct), **не** переключают `transport_mode` между CONNECT-UDP и CONNECT-IP ([комментарий в `validateMasqueOptions`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go)).
 
 ### 7.5 Сервер: конфликты шаблонов
@@ -226,6 +250,22 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 ---
 
 ## 9. Минимальные примеры (иллюстрация подмножеств)
+
+### Клиент CONNECT-UDP / `auto` (минимум полей, дефолтный `tcp_transport`)
+
+```json
+{
+  "endpoints": [
+    {
+      "type": "masque",
+      "tag": "masque-min",
+      "server": "example.com",
+      "server_port": 443,
+      "insecure": true
+    }
+  ]
+}
+```
 
 ### Клиент CONNECT-IP + TCP stream
 

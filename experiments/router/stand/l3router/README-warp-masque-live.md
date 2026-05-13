@@ -66,14 +66,14 @@ sing-box check -c configs/warp-masque-live.json
 
 ## Smoke: «интернет» через sing-box
 
-Внутри контейнера SOCKS-inbound слушает `127.0.0.1:1080` и уходит в `route.final` → `warp-masque-live`:
+**Основная проверка — через TUN** (`tun0`, `route_address` в [configs/warp-masque-live.json](configs/warp-masque-live.json)), без SOCKS:
 
 ```bash
-docker exec sing-box-warp-masque-live curl -sS --max-time 20 \
-  --proxy socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
+docker exec sing-box-warp-masque-live ip route get 1.1.1.1
+docker exec sing-box-warp-masque-live curl -sS --max-time 25 https://1.1.1.1/cdn-cgi/trace
 ```
 
-Ожидается ответ Cloudflare (строка `warp=on` или аналог для вашего аккаунта).
+Ожидается ответ Cloudflare (строка `warp=on` или аналог для вашего аккаунта). SOCKS на `127.0.0.1:1080` в конфиге — вспомогательный inbound; **не использовать его как основной smoke** для агентов и автоматических прогонов.
 
 Останов:
 
@@ -85,7 +85,7 @@ docker compose -f docker-compose.warp-masque-live.yml down
 
 - Если в логах долго **`warp_masque startup in progress`** / мониторинг **`not ready`**, включите **`log.level: debug`** в копии конфига и перезапустите контейнер.
 - **`connect_timeout`** задаёт базовый дедлайн дозвона; полный старт `warp_masque` ограничен **min/max(2×connect_timeout, 12s..45s)** в коде. Для смокей на стенде держите **короткие** значения порядка **15–20 с** (не минутные) — см. корневой **`AGENTS.md`**. Healthy edge обычно успевает за секунды; долгое зависание — не лечится увеличением таймаута без triage сети/edge.
-- Если **`api.cloudflareclient.com`** с хоста недоступен, но профиль уже получен на другой машине: положите **`license` + `private_key`** в [configs/warp-masque-live.local.json](configs/warp-masque-live.local.json) и добавьте кэш edge (ключ = `compat:consumer|license:<ваш>|detour:<profile.detour>`, значения `server`/`port` из `wgcf-profile.conf`). Установите переменную **`WARP_MASQUE_WARP_CACHE`** на этот файл; по умолчанию Compose монтирует пустой [configs/warp-masque-warp-cache.empty.json](configs/warp-masque-warp-cache.empty.json). Дальше всё равно нужен **UDP/QUIC** до этого edge с вашей сети.
+- Если **`api.cloudflareclient.com`** с хоста недоступен, но профиль уже получен на другой машине: положите **`license` + `private_key`** в [configs/warp-masque-live.local.json](configs/warp-masque-live.local.json) и при необходимости задайте **`profile.dataplane_port`** (часто **443**) по данным из `wgcf-profile.conf` / рабочего usque. Кэш успешного порта пишется в **`hiddify_warp_masque_dataplane_cache.json`** рядом с `warp_masque_device_state.json`. Дальше всё равно нужен **UDP/QUIC** до edge с вашей сети.
 - В логах строка **`runtime start failed class=<ключ>`** (`ClassifyMasqueFailure` в коде) помогает отличить отсутствие Extended CONNECT / datagrams / TLS / 401 на CONNECT от чистого таймаута.
 
 ## Вспомогательный скрипт
@@ -103,12 +103,6 @@ docker compose -f docker-compose.warp-masque-live.yml down
 
 В [configs/warp-masque-live.json](configs/warp-masque-live.json) включены **`auto_route` + `route_address`** (синтаксис [sing-box inbound/tun](https://sing-box.sagernet.org/configuration/inbound/tun/)): в таблицу маршрутизации попадают **только перечисленные CIDR** (лаб‑диапазон **`198.18.0.0/15`** и блоки **`1.1.1.0/24`** / **`1.0.0.0/24`** для смоков к Cloudflare), а не «весь интернет». На Linux включён **`auto_redirect`** как рекомендует документация. **`mtu`** на виртуальном интерфейсе — **9000** (учитывайте PMTU на реальном пути).
 
-Прозрачный смок без SOCKS (если успешная маршрутизация к `1.1.1.x` через `tun0` уже настроена в netns контейнера):
-
-```bash
-docker exec sing-box-warp-masque-live curl -sS --max-time 20 https://1.1.1.1/cdn-cgi/trace
-```
-
 ## Запуск на VPS
 
-Отдельный серверный конфиг (`tun-warp-test`, SOCKS на `0.0.0.0:1080`) и упаковка архива — **[README-warp-masque-live-server.md](README-warp-masque-live-server.md)**.
+Отдельный серверный конфиг (`tun-warp-test`, опционально SOCKS на `127.0.0.1:1080`) и упаковка архива — **[README-warp-masque-live-server.md](README-warp-masque-live-server.md)**.

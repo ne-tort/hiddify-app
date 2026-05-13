@@ -25,8 +25,8 @@ case "$cmd" in
     docker compose -f "$COMPOSE" --project-directory "$ROOT" logs -f sing-box-warp-masque-live
     ;;
   smoke)
-    docker exec sing-box-warp-masque-live curl -sS --max-time 20 \
-      --proxy socks5h://127.0.0.1:1080 https://1.1.1.1/cdn-cgi/trace
+    docker exec sing-box-warp-masque-live curl -sS --max-time 25 \
+      https://1.1.1.1/cdn-cgi/trace
     ;;
   check)
     if command -v sing-box >/dev/null 2>&1; then

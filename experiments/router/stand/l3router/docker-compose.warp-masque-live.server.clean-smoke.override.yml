@@ -1,0 +1,15 @@
+# Мержится с docker-compose.warp-masque-live.server.yml для «холодного» старта WARP:
+# state + dataplane cache пишутся только в примонтированный каталог (не в ~/.config контейнера).
+# См. warp_control_adapter.go: HIDDIFY_WARP_MASQUE_DEVICE_STATE и hiddify_warp_masque_dataplane_cache.json рядом.
+#
+# Перед up задайте абсолютный путь на хосте, например:
+#   export WARP_MASQUE_SCRATCH_DIR="$HOME/warp-masque-stand/.clean-smoke-scratch-$$"
+#   mkdir -p "$WARP_MASQUE_SCRATCH_DIR"
+#
+# Запуск: scripts/warp_masque_vps_clean_fresh_smoke.sh
+services:
+  sing-box-warp-masque-live:
+    environment:
+      HIDDIFY_WARP_MASQUE_DEVICE_STATE: /wmscratch/warp_masque_device_state.json
+    volumes:
+      - ${WARP_MASQUE_SCRATCH_DIR:?export WARP_MASQUE_SCRATCH_DIR to an absolute empty host directory}:/wmscratch

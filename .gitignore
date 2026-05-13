@@ -36,6 +36,9 @@ migrate_working_dir/
 .pub/
 /build/
 
+# Локальные бинарники MASQUE-стенда (не коммитить)
+/dist/masque-stand/
+
 # generated files
 **/*.g.dart
 **/*.freezed.dart

@@ -22,8 +22,12 @@ services:
     environment:
       QUIC_GO_DISABLE_GSO: "true"
       QUIC_GO_DISABLE_ECN: "true"
+      # CONNECT-IP TCP netstack: wait longer for ADDRESS_ASSIGN / LocalPrefixes on live WARP edge.
+      MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC: "20"
+      # Capsule / prefix diagnostics (addresses and lengths only; no payload).
+      HIDDIFY_MASQUE_CONNECT_IP_DEBUG: "1"
+    # Кэш dataplane порта: рядом с warp_masque_device_state.json (см. profile.warp_masque_state_path / AGENTS.md), не bind /tmp.
     volumes:
       - ${WARP_MASQUE_CONFIG:-./configs/warp-masque-live.server.local.json}:/etc/sing-box/config.json:ro
-      - ${WARP_MASQUE_WARP_CACHE:-./configs/warp-masque-warp-cache.empty.json}:/tmp/hiddify_warp_masque_cache.json:ro
     command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
     restart: unless-stopped

@@ -1,0 +1,14 @@
+{
+  "endpoints": [
+    {
+      "type": "masque",
+      "tag": "masque-stand",
+      "server": "YOUR_PUBLIC_IP_OR_DNS",
+      "server_port": 18443,
+      "server_token": "PASTE_SERVER_TOKEN_FROM_DEPLOY_SCRIPT_OUTPUT",
+      "insecure": true,
+      "transport_mode": "connect_udp",
+      "tcp_transport": "connect_stream"
+    }
+  ]
+}

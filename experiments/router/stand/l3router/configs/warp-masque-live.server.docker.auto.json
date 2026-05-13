@@ -31,8 +31,9 @@
       "transport_mode": "auto",
       "fallback_policy": "strict",
       "tcp_mode": "strict_masque",
-      "tcp_transport": "connect_stream",
+      "tcp_transport": "connect_ip",
       "domain_resolver": "bootstrap-dns",
+      "template_ip": "https://cloudflareaccess.com",
       "mtu": 1350,
       "profile": {
         "compatibility": "consumer",
@@ -48,11 +49,16 @@
       "type": "tun",
       "tag": "tun-test",
       "interface_name": "tun-warp-test",
-      "address": ["172.19.100.2/30"],
+      "address": ["172.19.100.2/31"],
       "mtu": 1500,
       "stack": "mixed",
       "auto_route": false,
-      "strict_route": false
+      "strict_route": false,
+      "route_address": [
+        "198.18.0.0/15",
+        "1.1.1.0/24",
+        "1.0.0.0/24"
+      ]
     },
     {
       "type": "socks",
