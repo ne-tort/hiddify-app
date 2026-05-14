@@ -3,13 +3,16 @@
 # Запуск из корня репо:
 #   powershell -NoProfile -File scripts/Generate-MasqueMultiVpsConfigs.ps1
 # Параметры:
-#   -PublicIP     по умолчанию 163.5.180.181
+#   -PublicHost   хост в URL шаблонах и у клиента (server / tls_server_name); по умолчанию masque.ai-qwerty.ru (LE)
+#   -CertPath/-KeyPath пути к PEM на сервере (по умолчанию Let's Encrypt live)
 #   -PortStart    первый порт (по умолчанию 18610)
 #   -ServerCount  число серверных инстансов (по умолчанию 18)
 #   -Token        server_token для части инстансов; пусто = сгенерировать
 
 param(
-    [string]$PublicIP = "163.5.180.181",
+    [string]$PublicHost = "masque.ai-qwerty.ru",
+    [string]$CertPath = "",
+    [string]$KeyPath = "",
     [int]$PortStart = 18610,
     [int]$ServerCount = 18,
     [string]$Token = ""
@@ -24,8 +27,14 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
     $Token = -join ($rb | ForEach-Object { $_.ToString('x2') })
 }
 
-$certPath = "/etc/sing-box/masque-multi/cert.pem"
-$keyPath = "/etc/sing-box/masque-multi/key.pem"
+if ([string]::IsNullOrWhiteSpace($CertPath)) {
+    $CertPath = "/etc/letsencrypt/live/$PublicHost/fullchain.pem"
+}
+if ([string]::IsNullOrWhiteSpace($KeyPath)) {
+    $KeyPath = "/etc/letsencrypt/live/$PublicHost/privkey.pem"
+}
+$certPath = $CertPath
+$keyPath = $KeyPath
 
 $serverEndpoints = [System.Collections.ArrayList]@()
 $clientEndpoints = [System.Collections.ArrayList]@()
@@ -33,16 +42,16 @@ $clientEndpoints = [System.Collections.ArrayList]@()
 for ($k = 0; $k -lt $ServerCount; $k++) {
     $port = [uint16]($PortStart + $k)
     $sfx = "$port"
-    $udp = "https://${PublicIP}:$port/s$sfx/udp/{target_host}/{target_port}"
-    $tcp = "https://${PublicIP}:$port/s$sfx/tcp/{target_host}/{target_port}"
+    $udp = "https://${PublicHost}:$port/s$sfx/udp/{target_host}/{target_port}"
+    $tcp = "https://${PublicHost}:$port/s$sfx/tcp/{target_host}/{target_port}"
 
     # Три класса CONNECT-IP шаблона на сервере (все пути уникальны внутри инстанса)
     $mod3 = $k % 3
     $scopedIP = ($mod3 -eq 1)
     if ($scopedIP) {
-        $ipT = "https://${PublicIP}:$port/s$sfx/ip/{target}/{ipproto}"
+        $ipT = "https://${PublicHost}:$port/s$sfx/ip/{target}/{ipproto}"
     } else {
-        $ipT = "https://${PublicIP}:$port/s$sfx/ip"
+        $ipT = "https://${PublicHost}:$port/s$sfx/ip"
     }
 
     $srvTag = "masque-srv-$sfx"
@@ -84,10 +93,10 @@ for ($k = 0; $k -lt $ServerCount; $k++) {
     # --- клиентские вариации (один и тот же сервер:порт, разные http_layer / transport / tcp) ---
     $baseClient = [ordered]@{
         type              = "masque"
-        server            = $PublicIP
+        server            = $PublicHost
         server_port       = $port
-        insecure          = $true
-        tls_server_name   = $PublicIP
+        insecure          = $false
+        tls_server_name   = $PublicHost
         template_udp      = $udp
         template_tcp      = $tcp
         tcp_transport     = "connect_stream"
