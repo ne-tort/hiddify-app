@@ -152,6 +152,21 @@ func (j *JsonService) GetJsonHapp(subId string, requestHost string) (*string, []
 	return &result, headers, nil
 }
 
+// GetJsonMasque returns JSON subscription with masque / warp_masque endpoints merged for the client.
+func (j *JsonService) GetJsonMasque(subId string, requestHost string) (*string, []string, error) {
+	jsonConfig, client, err := j.assembleJsonMap(subId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := j.patchJsonForMasqueSubscription(&jsonConfig, client, requestHost); err != nil {
+		return nil, nil, err
+	}
+	if err := j.patchJsonForAwg(&jsonConfig, client, requestHost); err != nil {
+		return nil, nil, err
+	}
+	return j.marshalJsonResponse(jsonConfig, client)
+}
+
 func buildHappGeoDatBaseURL(j *JsonService, requestHost string) string {
 	if base := buildSubBaseURL(j, requestHost); base != "" {
 		return base

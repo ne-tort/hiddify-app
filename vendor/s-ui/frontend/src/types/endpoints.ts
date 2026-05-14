@@ -6,6 +6,8 @@ export const EpTypes = {
   Warp: 'warp',
   Tailscale: 'tailscale',
   L3Router: 'l3router',
+  Masque: 'masque',
+  WarpMasque: 'warp_masque',
 }
 
 type EpType = typeof EpTypes[keyof typeof EpTypes]
@@ -125,6 +127,45 @@ export interface L3Router extends EndpointBasics {
   lookup_backend?: string
 }
 
+/** MASQUE sing-box endpoint (server or client); member_* stripped in runtime JSON. */
+export interface Masque extends EndpointBasics, Dial {
+  mode?: string
+  listen?: string
+  listen_port?: number
+  server?: string
+  server_port?: number
+  transport_mode?: string
+  template_udp?: string
+  template_ip?: string
+  template_tcp?: string
+  tls_server_name?: string
+  insecure?: boolean
+  http_layer?: string
+  server_auth?: Record<string, unknown>
+  member_group_ids?: number[]
+  member_client_ids?: number[]
+  /** Reference to TLS row in panel DB; merged into certificate/key at runtime (stripped in MarshalJSON). */
+  sui_tls_id?: number
+  ext?: unknown
+}
+
+/** WARP over MASQUE client profile; sensitive profile keys may live in ext (merged server-side). */
+export interface WarpMasque extends EndpointBasics, Dial {
+  mode?: string
+  server?: string
+  server_port?: number
+  transport_mode?: string
+  template_udp?: string
+  template_ip?: string
+  template_tcp?: string
+  tls_server_name?: string
+  http_layer?: string
+  profile?: Record<string, unknown>
+  member_group_ids?: number[]
+  member_client_ids?: number[]
+  ext?: unknown
+}
+
 // Create interfaces dynamically based on EpTypes keys
 type InterfaceMap = {
   [Key in keyof typeof EpTypes]: {
@@ -143,6 +184,33 @@ const defaultValues: Record<EpType, Endpoint> = {
   warp: { type: EpTypes.Warp, address: [], private_key: '', listen_port: 0, mtu: 1420, peers: [{ address: '', port: 0, public_key: ''}] },
   tailscale: { type: EpTypes.Tailscale, domain_resolver: 'local' },
   l3router: { type: EpTypes.L3Router, peers: [], private_subnet: '', overlay_destination: '198.18.0.1:33333', packet_filter: false },
+  masque: {
+    type: EpTypes.Masque,
+    tag: '',
+    mode: 'server',
+    listen: '0.0.0.0',
+    listen_port: 443,
+    transport_mode: 'connect_udp',
+    tls_server_name: '',
+    sui_tls_id: 0,
+    member_group_ids: [],
+    member_client_ids: [],
+    server_auth: { policy: 'first_match' },
+    ext: {},
+  },
+  warp_masque: {
+    type: EpTypes.WarpMasque,
+    tag: '',
+    mode: 'client',
+    server: '',
+    server_port: 443,
+    transport_mode: 'connect_udp',
+    tls_server_name: '',
+    member_group_ids: [],
+    member_client_ids: [],
+    profile: { compatibility: 'consumer' },
+    ext: {},
+  },
 }
 
 export function createEndpoint<T extends Endpoint>(type: string,json?: Partial<T>): Endpoint {

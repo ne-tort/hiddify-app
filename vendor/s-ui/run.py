@@ -238,10 +238,54 @@ def _remote_compose_dir(cfg: dict) -> str:
     return f'{cfg["remote_root"].rstrip("/")}/vendor/s-ui'
 
 
+def _libcronet_filename(arch: str) -> str:
+    return f"libcronet-linux-{arch}.so"
+
+
+def _ensure_libcronet_for_local_docker_build() -> None:
+    """
+    Файл должен лежать рядом с Dockerfile (COPY в стадии backend-builder).
+    Скачивание на хосте: у BuildKit часто ломается DNS до release-assets.githubusercontent.com.
+    Архитектура: SUI_CRONET_ARCH (по умолчанию amd64). Принудительно заново: SUI_CRONET_FETCH_FORCE=1.
+    """
+    arch = (os.environ.get("SUI_CRONET_ARCH") or "amd64").strip()
+    dst = _SUI_ROOT / _libcronet_filename(arch)
+    min_bytes = 512 * 1024
+    force = (os.environ.get("SUI_CRONET_FETCH_FORCE") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    if dst.is_file() and dst.stat().st_size >= min_bytes and not force:
+        return
+    url = f"https://github.com/SagerNet/cronet-go/releases/latest/download/{dst.name}"
+    print(f"[run] libcronet: fetching {url}", file=sys.stderr)
+    import urllib.error
+    import urllib.request
+
+    tmp = dst.with_suffix(dst.suffix + ".part")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "s-ui-run.py/1"})
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            body = resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        sys.exit(
+            f"Не удалось скачать libcronet ({url}): {e}\n"
+            "Проверьте сеть или положите файл рядом с Dockerfile вручную."
+        )
+    if len(body) < min_bytes:
+        sys.exit(f"libcronet: подозрительно маленький ответ ({len(body)} bytes)")
+    tmp.write_bytes(body)
+    tmp.replace(dst)
+    print(f"[run] libcronet: OK ({dst.stat().st_size} bytes) -> {dst}", file=sys.stderr)
+
+
 def cmd_build_local(cfg: dict) -> None:
     """Сборка образа на локальной машине (кэш BuildKit / go из Dockerfile)."""
     if not _have_docker():
         sys.exit("Нужен Docker (docker compose).")
+    _ensure_libcronet_for_local_docker_build()
     c = cfg["compose"]
     print(
         f"[run] build: DOCKER_BUILDKIT=1 docker compose -f {c} build s-ui-local",

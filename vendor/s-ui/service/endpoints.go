@@ -35,6 +35,8 @@ const (
 	l3RouterType              = "l3router"
 	wireGuardType             = "wireguard"
 	awgType                   = "awg"
+	masqueType                = "masque"
+	warpMasqueType            = "warp_masque"
 	awgGSOEnabledKey          = "gso_enabled"
 	awgKernelPathEnabledKey   = "kernel_path_enabled"
 	l3RouterDefaultOverlayDst = "198.18.0.1:33333"
@@ -91,6 +93,18 @@ func (o *EndpointService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 			if err := o.mergeAwgRuntimeObfuscationOptions(db, endpoint); err != nil {
 				return nil, err
 			}
+		}
+		if endpoint.Type == masqueType {
+			if err := mergeMasqueTLSPemFromStoredProfile(db, endpoint); err != nil {
+				return nil, err
+			}
+		}
+		if endpoint.Type == warpMasqueType {
+			merged, err := MergeWarpMasqueOptionsWithExt(endpoint.Options, endpoint.Ext)
+			if err != nil {
+				return nil, err
+			}
+			endpoint.Options = merged
 		}
 		if endpoint.Type == l3RouterType {
 			var opt map[string]interface{}
@@ -152,6 +166,26 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 				}
 			}
 		}
+		if endpoint.Type == warpMasqueType {
+			if act == "new" {
+				if warpMasqueNeedsCloudflareRegister(&endpoint) {
+					err = s.WarpService.RegisterWarpMasque(&endpoint)
+					if err != nil {
+						return nil, err
+					}
+				}
+			} else {
+				var old_license string
+				err = tx.Model(model.Endpoint{}).Select("json_extract(ext, '$.license_key')").Where("id = ?", endpoint.Id).Find(&old_license).Error
+				if err != nil {
+					return nil, err
+				}
+				err = s.WarpService.SetWarpLicense(old_license, &endpoint)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
 		oldTag := ""
 		if act == "edit" {
 			err = tx.Model(model.Endpoint{}).Select("tag").Where("id = ?", endpoint.Id).Find(&oldTag).Error
@@ -181,6 +215,16 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 				return nil, mErr
 			}
 			endpoint.Options = raw
+		}
+		if endpoint.Type == masqueType {
+			if err := normalizeMasqueEndpointOptionsOnSave(&endpoint); err != nil {
+				return nil, err
+			}
+		}
+		if endpoint.Type == masqueType || endpoint.Type == warpMasqueType {
+			if err := normalizeMasqueFamilyMembership(&endpoint); err != nil {
+				return nil, err
+			}
 		}
 		// Persist endpoint payload first so ClientShouldHaveL3Router sees fresh member_* options
 		// during l3 identity sync on the same save cycle.
@@ -225,7 +269,7 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 			EndpointID:  endpoint.Id,
 			OldTag:      oldTag,
 			Tag:         endpoint.Tag,
-			NeedsReload: endpoint.Type == l3RouterType || endpoint.Type == wireGuardType || endpoint.Type == awgType,
+			NeedsReload: endpoint.Type == l3RouterType || endpoint.Type == wireGuardType || endpoint.Type == awgType || endpoint.Type == masqueType || endpoint.Type == warpMasqueType,
 		}
 	case "del":
 		var tag string
@@ -243,7 +287,7 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 		if err != nil {
 			return nil, err
 		}
-		runtimeAction = &EndpointRuntimeAction{Action: act, Tag: tag, NeedsReload: endpointType == l3RouterType || endpointType == wireGuardType || endpointType == awgType}
+		runtimeAction = &EndpointRuntimeAction{Action: act, Tag: tag, NeedsReload: endpointType == l3RouterType || endpointType == wireGuardType || endpointType == awgType || endpointType == masqueType || endpointType == warpMasqueType}
 	default:
 		return nil, common.NewErrorf("unknown action: %s", act)
 	}
@@ -317,6 +361,18 @@ func (s *EndpointService) ApplyRuntimeAction(action *EndpointRuntimeAction) erro
 			if err := s.mergeAwgRuntimeObfuscationOptions(database.GetDB(), &endpoint); err != nil {
 				return err
 			}
+		}
+		if endpoint.Type == masqueType {
+			if err := mergeMasqueTLSPemFromStoredProfile(database.GetDB(), &endpoint); err != nil {
+				return err
+			}
+		}
+		if endpoint.Type == warpMasqueType {
+			merged, err := MergeWarpMasqueOptionsWithExt(endpoint.Options, endpoint.Ext)
+			if err != nil {
+				return err
+			}
+			endpoint.Options = merged
 		}
 		configData, err := endpoint.MarshalJSON()
 		if err != nil {
@@ -402,6 +458,33 @@ func stripL3RouterClientControlledOptions(ep *model.Endpoint) error {
 	}
 	delete(m, "peers")
 	delete(m, l3PeerIPAllocKey)
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	ep.Options = raw
+	return nil
+}
+
+func normalizeMasqueFamilyMembership(ep *model.Endpoint) error {
+	if ep == nil || (ep.Type != masqueType && ep.Type != warpMasqueType) {
+		return nil
+	}
+	var m map[string]interface{}
+	if len(ep.Options) > 0 {
+		if err := json.Unmarshal(ep.Options, &m); err != nil {
+			return err
+		}
+	}
+	if m == nil {
+		m = make(map[string]interface{})
+	}
+	if _, ok := m["member_group_ids"]; !ok {
+		m["member_group_ids"] = []interface{}{}
+	}
+	if _, ok := m["member_client_ids"]; !ok {
+		m["member_client_ids"] = []interface{}{}
+	}
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err

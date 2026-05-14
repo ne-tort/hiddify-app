@@ -15,7 +15,7 @@
       <v-card-title>
         {{ $t('actions.' + title) + " " + $t('objects.endpoint') }}
         <v-btn
-          v-if="endpoint.type == epTypes.Wireguard || endpoint.type == epTypes.Awg"
+          v-if="endpoint.type == epTypes.Wireguard || endpoint.type == epTypes.Awg || endpoint.type == epTypes.Masque || endpoint.type == epTypes.WarpMasque"
           class="ms-3"
           size="small"
           variant="text"
@@ -64,6 +64,8 @@
         <Warp v-if="endpoint.type == epTypes.Warp" :data="endpoint" />
         <TailscaleVue v-if="endpoint.type == epTypes.Tailscale" :data="endpoint" />
         <L3Router v-if="endpoint.type == epTypes.L3Router" :data="endpoint" :user-groups="userGroups" :clients="clients" :is-new="Number(id) === 0" />
+        <Masque v-if="endpoint.type == epTypes.Masque" :data="endpoint" :user-groups="userGroups" :clients="clients" :tls-configs="tlsConfigsList" />
+        <WarpMasque v-if="endpoint.type == epTypes.WarpMasque" :data="endpoint" :user-groups="userGroups" :clients="clients" />
         <Dial v-if="endpoint.type != epTypes.L3Router" :dial="endpoint" />
       </v-card-text>
       <v-card-actions>
@@ -107,6 +109,8 @@ import Awg from '@/components/protocols/Awg.vue'
 import Warp from '@/components/protocols/Warp.vue'
 import TailscaleVue from '@/components/protocols/Tailscale.vue'
 import L3Router from '@/components/protocols/L3Router.vue'
+import Masque from '@/components/protocols/Masque.vue'
+import WarpMasque from '@/components/protocols/WarpMasque.vue'
 import HttpUtils from '@/plugins/httputil'
 import { push } from 'notivue'
 import { i18n } from '@/locales'
@@ -115,9 +119,15 @@ import { isValidPrivateSubnetField, privateSubnetRuleMessage } from '@/utils/l3S
 import EndpointImport from '@/layouts/modals/EndpointImport.vue'
 import { sanitizeWgAwgByMode } from '@/components/protocols/useWgAwgFormModel'
 export default {
-  props: ['visible', 'data', 'id', 'tags'],
+  props: ['visible', 'data', 'id', 'tags', 'tlsConfigs'],
   emits: ['close'],
   computed: {
+    tlsConfigsList() {
+      const fromStore = Data().tlsConfigs ?? []
+      const fromProp = this.tlsConfigs
+      if (fromProp != null && Array.isArray(fromProp) && fromProp.length > 0) return fromProp
+      return fromStore
+    },
     userGroups() {
       return Data().userGroups ?? []
     },
@@ -215,6 +225,37 @@ export default {
             overlay_destination: "198.18.0.1:33333",
             member_group_ids: [],
             member_client_ids: [],
+          }
+          break
+        case EpTypes.Masque:
+          prevConfig = {
+            tag: tag,
+            type: EpTypes.Masque,
+            mode: 'server',
+            listen: '0.0.0.0',
+            listen_port: 443,
+            transport_mode: 'connect_udp',
+            tls_server_name: '',
+            sui_tls_id: 0,
+            member_group_ids: [],
+            member_client_ids: [],
+            server_auth: { policy: 'first_match' },
+            ext: {},
+          }
+          break
+        case EpTypes.WarpMasque:
+          prevConfig = {
+            tag: tag,
+            type: EpTypes.WarpMasque,
+            mode: 'client',
+            server: '',
+            server_port: 443,
+            transport_mode: 'connect_udp',
+            tls_server_name: '',
+            member_group_ids: [],
+            member_client_ids: [],
+            profile: { compatibility: 'consumer' },
+            ext: {},
           }
           break
       }
@@ -421,6 +462,6 @@ export default {
       }
     },
   },
-  components: { Dial, Wireguard, Awg, Warp, TailscaleVue, L3Router, EndpointImport }
+  components: { Dial, Wireguard, Awg, Warp, TailscaleVue, L3Router, Masque, WarpMasque, EndpointImport }
 }
 </script>

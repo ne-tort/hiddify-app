@@ -72,6 +72,8 @@ func (s *SubHandler) subs(c *gin.Context) {
 			result, headers, err = s.JsonService.GetJsonL3Router(subId, subscriptionRequestHost(c))
 		case "json-wg":
 			result, headers, err = s.JsonService.GetJsonWG(subId, subscriptionRequestHost(c))
+		case "json-masque":
+			result, headers, err = s.JsonService.GetJsonMasque(subId, subscriptionRequestHost(c))
 		case "clash":
 			result, headers, err = s.ClashService.GetClash(subId)
 		}

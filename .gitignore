@@ -38,6 +38,8 @@ migrate_working_dir/
 
 # Локальные бинарники MASQUE-стенда (не коммитить)
 /dist/masque-stand/
+/sing-box-linux-amd64
+/sing-box-win.exe
 
 # generated files
 **/*.g.dart
@@ -152,3 +154,7 @@ tools/wgcf/wgcf-profile.conf
 
 # Local clone of AmneziaWG-Architect (study only; vendor TS lives under vendor/s-ui/frontend)
 /third_party/AmneziaWG-Architect/
+
+# MASQUE auth lab: локальные ключи и сгенерированные конфиги с PEM
+/experiments/router/stand/l3router/masque-auth-lab/pki/
+/experiments/router/stand/l3router/configs/masque-auth-lab*.json

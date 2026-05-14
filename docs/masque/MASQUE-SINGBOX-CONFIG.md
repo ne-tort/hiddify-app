@@ -227,7 +227,28 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 После подстановки дефолтов три path (**udp / ip / tcp**) должны быть **разными** и **не `'/'`**, иначе ошибка (`addServerTemplatePath` / collision). Непустые пользовательские шаблоны для UDP/TCP на сервере должны содержать **`{target_host}`** и **`{target_port}`**.
 
-### 7.6 `omitempty` и обязательность
+### 7.6 Сервер: `server_auth` (ACL) и совместимость с `server_token`
+
+Начиная с текущей ветки, сервер MASQUE может описывать **ACL на уровне приложения** отдельным объектом **`server_auth`** ([`option/masque.go`](../../hiddify-core/hiddify-sing-box/option/masque.go), компиляция и проверка в [`server_auth.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/server_auth.go)):
+
+| JSON | Назначение |
+|------|------------|
+| `server_auth.policy` | **`first_match`** (по умолчанию): достаточно **одного** из включённых слоёв (mTLS **или** HTTP). **`all_required`**: каждый **включённый** слой должен пройти (например, и mTLS, и HTTP, если заданы оба). |
+| `server_auth.bearer_tokens` | Список строк; на старте сервера хранятся только **SHA-256** от токенов; на wire по-прежнему сравнивается значение из **`Authorization`** / **`Proxy-Authorization`** (`Bearer …`). |
+| `server_auth.bearer_token_sha256` | Список **64 hex-символов** (SHA-256 от токена), если токен не хранится в конфиге в открытом виде. |
+| `server_auth.basic_credentials` | Массив `{ "username", "password" }`; на старте — хэш от нормализованного `username` + `NUL` + `password` (как у ACL, не «учётные записи пользователей» в смысле приложения). |
+| `server_auth.mtls.client_ca_pem` | Массив PEM-строк CA для проверки клиентского сертификата. На TLS-уровне используется **`VerifyClientCertIfGiven`** + `ClientCAs` (серт с клиента опционален на рукопожатии; итоговый доступ решает **`server_auth.policy`** и `AuthorizeRequest`: при `first_match` достаточно mTLS **или** HTTP, при `all_required` — оба слоя, если оба заданы). |
+| `server_auth.mtls.trusted_client_cert_pem` | Дополнительные доверенные leaf-серты (PEM), добавляются в пул доверия. |
+
+**Короткие ключи JSON** (парсер [`option/masque_auth_json.go`](../../hiddify-core/hiddify-sing-box/option/masque_auth_json.go), дублируют длинные поля): `bearer` → `bearer_tokens`, `sha256` → `bearer_token_sha256`, `basics` → `basic_credentials`, в `mtls`: `ca` → `client_ca_pem`, `trust` → `trusted_client_cert_pem`; в элементах Basic допустимы `user` / `pass` вместо `username` / `password`.
+
+**`server_token`** (корневое поле) **сохраняется**: непустое значение эквивалентно одному элементу в ACL Bearer (удобная миграция и короткие конфиги).
+
+**Клиент** (только client mode): опционально **`client_basic_username`** / **`client_basic_password`** — тогда на CONNECT-stream / CONNECT-IP (ExtraHeaders) уходит **`Authorization: Basic …`** вместо Bearer; **`server_auth`** на клиенте запрещён. Для **CONNECT-UDP** (masque-go) по-прежнему доступен в основном **`BearerToken`** / `server_token` — Basic на этом пути библиотекой не расширялся. Клиентский mTLS к серверу: предпочтительно **`client_tls_cert_pem`** / **`client_tls_key_pem`** (inline PEM в JSON для подписок) или **`client_tls_cert_b64`** / **`client_tls_key_b64`** (base64); устаревшие **`client_tls_cert`** / **`client_tls_key`** — пути к PEM-файлам (неудобно для «вставил JSON»). Ровно **один** из трёх способов; приоритет загрузки: PEM → base64 → пути.
+
+**Логи:** не логировать сырые токены и пароли; при отладке допустимо ссылаться только на хэши/классы ошибок.
+
+### 7.7 `omitempty` и обязательность
 
 Тег **`omitempty`** в Go — только про сериализацию JSON. **Обязательность полей** определяется **`validateMasqueOptions`** и контекстом (клиент/сервер), а не тем, что ключ отсутствует в файле.
 
@@ -238,7 +259,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 **Должны совпадать по wire (политика связи):**
 
 - Пути после разворачивания шаблонов (`template_udp`/`template_ip`/`template_tcp`): клиент генерирует URL, сервер регистрирует handler по тому же path shape.
-- **`server_token`:** одно и то же поле на клиенте и сервере — при непустом значении клиент шлёт **`Authorization: Bearer <строка>`** на **CONNECT-UDP, CONNECT-IP и TCP CONNECT-stream**; сервер принимает Bearer (или `Proxy-Authorization`) на всех этих путях. Пустой токен на сервере = без app-level проверки (остаётся TLS).
+- **`server_token`** и **`server_auth`:** на клиенте по-прежнему **`server_token`** (Bearer) и/или Basic через **`client_basic_*`**; на сервере **`server_auth`** задаёт ACL (Bearer/Basic/mTLS + политика), а **`server_token`** остаётся сокращением для одного Bearer (см. §7.6).
 - TLS: клиент доверяет сертификату сервера (`tls_server_name` / `insecure`); сервер предоставляет **`certificate`**/**`key`**.
 
 **Только сервер:** `listen`, `listen_port`, certs, `allow_private_targets`, `allowed_target_ports`, `blocked_target_ports`; без client transport/tcp полей.

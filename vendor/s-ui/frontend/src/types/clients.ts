@@ -103,6 +103,11 @@ export function shuffleConfigs(configs: Config, key?: string) {
       case "vless":
         configs[k].uuid = RandomUtil.randomUUID()
         break
+      case "masque":
+      case "warp_masque":
+        if (!configs[k]) (configs as any)[k] = { name: "" }
+        ;(configs[k] as any).server_token = RandomUtil.randomSeq(24)
+        break
     }
   })
 }
@@ -171,6 +176,14 @@ export function randomConfigs(user: string): Config {
     hysteria2: {
       name: user,
       password: mixedPassword,
+    },
+    masque: {
+      name: user,
+      server_token: RandomUtil.randomSeq(24),
+    },
+    warp_masque: {
+      name: user,
+      server_token: RandomUtil.randomSeq(24),
     },
   }
 }

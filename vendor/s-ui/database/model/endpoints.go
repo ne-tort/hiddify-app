@@ -98,6 +98,15 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 				}
 			}
 		}
+		if o.Type == "masque" || o.Type == "warp_masque" {
+			for _, k := range []string{
+				"member_group_ids",
+				"member_client_ids",
+				"sui_tls_id",
+			} {
+				delete(restFields, k)
+			}
+		}
 		if o.Type == "wireguard" || o.Type == "awg" {
 			for _, k := range []string{
 				"member_group_ids",

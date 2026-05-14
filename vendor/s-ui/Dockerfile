@@ -29,11 +29,9 @@ RUN apk update && apk add --no-cache \
 
 ENV CC=gcc
 
-RUN CRONET_ARCH="$TARGETARCH" && \
-    CRONET_URL="https://github.com/SagerNet/cronet-go/releases/latest/download/libcronet-linux-${CRONET_ARCH}.so"; \
-    echo "Downloading $CRONET_URL" && \
-    wget -q -O ./libcronet.so "$CRONET_URL" && \
-    chmod 755 ./libcronet.so
+# libcronet is fetched on the host by `run.py` before `docker compose build` (BuildKit DNS to GitHub assets is flaky on some hosts).
+COPY libcronet-linux-${TARGETARCH}.so ./libcronet.so
+RUN chmod 755 ./libcronet.so && test -s ./libcronet.so
 
 # Prime Go module cache using only dependency manifests first.
 COPY --from=core /go.mod /hiddify-core/hiddify-sing-box/go.mod

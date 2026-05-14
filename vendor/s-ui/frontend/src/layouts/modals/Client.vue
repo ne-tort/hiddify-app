@@ -140,6 +140,18 @@
                   <v-btn class="mt-2" size="small" variant="tonal" @click="rotateWgIdentity"><v-icon icon="mdi-refresh" class="mr-1" />{{ $t('reset') }}</v-btn>
                 </v-col>
               </v-row>
+              <v-row>
+                <v-col cols="12" md="3" align="end" align-self="center">{{ $t('client.masqueRow') }}</v-col>
+                <v-col>
+                  <v-text-field :label="$t('masque.clientServerToken')" v-model="masqueServerToken" hide-details />
+                </v-col>
+              </v-row>
+              <v-row>
+                <v-col cols="12" md="3" align="end" align-self="center">{{ $t('client.warpMasqueRow') }}</v-col>
+                <v-col>
+                  <v-text-field :label="$t('masque.warpClientServerToken')" v-model="warpMasqueServerToken" hide-details />
+                </v-col>
+              </v-row>
               <v-row v-for="key in Object.keys(clientConfig)">
                 <v-col cols="12" md="3" align="end" align-self="center">
                     {{ key }}
@@ -420,6 +432,26 @@ export default {
       set(v: string) {
         if (!this.clientConfig.wireguard) this.clientConfig.wireguard = {}
         this.clientConfig.wireguard.public_key = v
+      },
+    },
+    masqueServerToken: {
+      get() {
+        if (!this.clientConfig.masque) this.clientConfig.masque = {}
+        return (this.clientConfig.masque as any).server_token ?? ''
+      },
+      set(v: string) {
+        if (!this.clientConfig.masque) this.clientConfig.masque = {}
+        ;(this.clientConfig.masque as any).server_token = v
+      },
+    },
+    warpMasqueServerToken: {
+      get() {
+        if (!this.clientConfig.warp_masque) this.clientConfig.warp_masque = {}
+        return (this.clientConfig.warp_masque as any).server_token ?? ''
+      },
+      set(v: string) {
+        if (!this.clientConfig.warp_masque) this.clientConfig.warp_masque = {}
+        ;(this.clientConfig.warp_masque as any).server_token = v
       },
     },
   },

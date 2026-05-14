@@ -83,6 +83,64 @@ func TestEndpointMarshalJSON_AwgStripsUIPeersAndProfileRef(t *testing.T) {
 	}
 }
 
+func TestEndpointMarshalJSON_MasqueStripsMemberLists(t *testing.T) {
+	options := map[string]interface{}{
+		"mode":               "server",
+		"listen":             "0.0.0.0",
+		"listen_port":        float64(8443),
+		"transport_mode":     "connect_udp",
+		"member_client_ids":  []interface{}{float64(1), float64(2)},
+		"member_group_ids":   []interface{}{float64(3)},
+		"server_auth":        map[string]interface{}{"policy": "first_match"},
+		"sui_tls_id":         float64(9),
+	}
+	raw, _ := json.Marshal(options)
+	ep := Endpoint{Type: "masque", Tag: "mq-test", Options: raw}
+	out, err := ep.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "sui_tls_id") {
+		t.Fatalf("sui_tls_id leaked: %s", s)
+	}
+	if strings.Contains(s, "member_client_ids") {
+		t.Fatalf("member_client_ids leaked: %s", s)
+	}
+	if strings.Contains(s, "member_group_ids") {
+		t.Fatalf("member_group_ids leaked: %s", s)
+	}
+	if !strings.Contains(s, "server_auth") {
+		t.Fatalf("expected server_auth in server runtime json: %s", s)
+	}
+}
+
+func TestEndpointMarshalJSON_WarpMasqueStripsMemberLists(t *testing.T) {
+	options := map[string]interface{}{
+		"mode":              "client",
+		"server":            "example.com",
+		"server_port":       float64(443),
+		"member_client_ids": []interface{}{float64(1)},
+		"profile":           map[string]interface{}{"compatibility": "consumer"},
+	}
+	raw, _ := json.Marshal(options)
+	ep := Endpoint{Type: "warp_masque", Tag: "wm-test", Options: raw}
+	out, err := ep.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outMap map[string]interface{}
+	if err := json.Unmarshal(out, &outMap); err != nil {
+		t.Fatal(err)
+	}
+	if outMap["type"] != "warp_masque" {
+		t.Fatalf("expected type warp_masque, got %v", outMap["type"])
+	}
+	if _, ok := outMap["member_client_ids"]; ok {
+		t.Fatal("member_client_ids leaked in warp_masque marshal")
+	}
+}
+
 func TestEndpointMarshalJSON_WireGuardStripsHubClientAndPeerExit(t *testing.T) {
 	options := map[string]interface{}{
 		"address":         []string{"10.8.0.2/32"},

@@ -32,8 +32,19 @@ export function parseEndpointImport(raw: string): AnyRecord {
 export function applyImportedEndpointToDraft(draft: AnyRecord, imported: AnyRecord): EndpointImportResult {
   const warnings: string[] = []
   const sourceType = normalizeType(imported.type)
+  if (sourceType === EpTypes.Masque || sourceType === EpTypes.WarpMasque) {
+    if (draft.type !== sourceType) {
+      warnings.push(`type '${sourceType}' ignored: current form is '${draft.type}'`)
+    }
+    const reserved = new Set(['id'])
+    Object.keys(imported).forEach((k) => {
+      if (reserved.has(k)) return
+      ;(draft as AnyRecord)[k] = (imported as AnyRecord)[k]
+    })
+    return { warnings, type: draft.type }
+  }
   if (sourceType !== EpTypes.Wireguard && sourceType !== EpTypes.Awg) {
-    throw new Error('Only WireGuard/AWG JSON import is supported')
+    throw new Error('Only WireGuard/AWG/MASQUE JSON import is supported')
   }
   if (draft.type !== sourceType) {
     warnings.push(`type '${sourceType}' ignored: current form is '${draft.type}'`)
@@ -91,6 +102,7 @@ export function applyImportedEndpointToDraft(draft: AnyRecord, imported: AnyReco
 function normalizeType(v: unknown): string {
   const s = String(v ?? '').toLowerCase().trim()
   if (s === 'amneziawg') return EpTypes.Awg
+  if (s === 'warp_masque') return EpTypes.WarpMasque
   return s
 }
 

@@ -31,6 +31,9 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 
+# Pre-downloaded for Docker build (run.py); large binary, do not commit.
+libcronet-linux-*.so
+
 # Windows build artifacts
 *.exe
 *.zip

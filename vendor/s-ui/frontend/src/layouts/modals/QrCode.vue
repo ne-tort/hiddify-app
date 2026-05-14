@@ -42,6 +42,12 @@
             </v-row>
             <v-row>
               <v-col style="text-align: center;">
+                <v-chip>{{ $t('setting.jsonSubMasque') }}</v-chip><br />
+                <QrcodeVue :value="clientSub + '?format=json-masque'" :size="size" @click="copyToClipboard(clientSub + '?format=json-masque')" :margin="1" style="border-radius: 1rem; cursor: copy;" />
+              </v-col>
+            </v-row>
+            <v-row>
+              <v-col style="text-align: center;">
                 <v-chip>{{ $t('setting.jsonSubRule') }}</v-chip><br />
                 <QrcodeVue :value="clientSub + '?format=json-rule'" :size="size" @click="copyToClipboard(clientSub + '?format=json-rule')" :margin="1" style="border-radius: 1rem; cursor: copy;" />
               </v-col>

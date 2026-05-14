@@ -7,7 +7,7 @@
 #   -CertPath/-KeyPath пути к PEM на сервере (по умолчанию Let's Encrypt live)
 #   -PortStart    первый порт (по умолчанию 18610)
 #   -ServerCount  число серверных инстансов (по умолчанию 18)
-#   -Token        server_token для части инстансов; пусто = сгенерировать
+#   -Token        server_token / ACL bearer для части инстансов; пусто = сгенерировать
 
 param(
     [string]$PublicHost = "masque.ai-qwerty.ru",
@@ -71,6 +71,13 @@ for ($k = 0; $k -lt $ServerCount; $k++) {
     if ($scopedIP -or ($k % 5 -eq 0)) {
         $srv["allow_private_targets"] = $true
     }
+    # Только ACL через server_auth (эквивалент одному bearer)
+    elseif ($k % 11 -eq 1) {
+        $srv["server_auth"] = [ordered]@{
+            policy        = "first_match"
+            bearer_tokens = @($Token)
+        }
+    }
     # Токен + allowlist
     if ($k % 4 -eq 3) {
         $srv["server_token"] = $Token
@@ -87,7 +94,7 @@ for ($k = 0; $k -lt $ServerCount; $k++) {
 
     [void]$serverEndpoints.Add($srv)
 
-    $needTok = ($null -ne $srv["server_token"])
+    $needTok = ($null -ne $srv["server_token"]) -or ($null -ne $srv["server_auth"])
     $clientTok = if ($needTok) { @{ server_token = $Token } } else { @{} }
 
     # --- клиентские вариации (один и тот же сервер:порт, разные http_layer / transport / tcp) ---
