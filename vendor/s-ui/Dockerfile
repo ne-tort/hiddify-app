@@ -54,7 +54,7 @@ RUN --mount=type=cache,id=s-ui-go-mod-cache,target=/go/pkg/mod \
     --mount=type=cache,id=s-ui-go-build-cache,target=/root/.cache/go-build \
     if [ "$TARGETARCH" = "arm" ]; then export GOARM=7; [ "$TARGETVARIANT" = "v6" ] && export GOARM=6; fi; \
     go build -ldflags="-w -s -checklinkname=0" \
-    -tags "with_gvisor,with_quic,with_wireguard,with_awg,with_l3router,with_utls,with_clash_api,with_grpc,with_acme,with_naive_outbound,with_conntrack,badlinkname,tfogo_checklinkname0,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_purego" \
+    -tags "with_gvisor,with_quic,with_wireguard,with_awg,with_l3router,with_utls,with_clash_api,with_grpc,with_acme,with_naive_outbound,with_conntrack,badlinkname,tfogo_checklinkname0,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_purego,with_masque" \
     -o sui main.go
 
 FROM alpine

@@ -3,8 +3,10 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/alireza0/s-ui/config"
 	"github.com/alireza0/s-ui/database/model"
 )
 
@@ -57,13 +59,50 @@ func finalizeWarpMasqueMergedProfile(prof map[string]interface{}) {
 	delete(prof, "license_key")
 	delete(prof, "access_token")
 	delete(prof, "device_id")
+	lic := strings.TrimSpace(fmt.Sprint(prof["license"]))
+	if lic == "" || strings.EqualFold(lic, "<nil>") || strings.EqualFold(lic, "nil") {
+		delete(prof, "license")
+	}
+}
+
+// DefaultWarpMasqueStatePath returns a persistent JSON path next to the panel DB (e.g. /app/db on Docker stand)
+// so Cloudflare device tokens and MASQUE ECDSA keys survive container restarts.
+func DefaultWarpMasqueStatePath(tag string) string {
+	dir := filepath.Dir(config.GetDBPath())
+	return filepath.Join(dir, "warp_masque_"+warpMasqueSafeFileToken(tag)+"_state.json")
+}
+
+func warpMasqueSafeFileToken(tag string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(tag) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	s := strings.Trim(b.String(), "_")
+	if s == "" {
+		return "default"
+	}
+	return s
 }
 
 // RegisterWarpMasque runs the same Cloudflare consumer registration as legacy WARP
-// (RegisterWarp on a temporary wireguard-shaped endpoint), then rewrites Options for sing-box
-// warp_masque with profile.license + profile.private_key so the core can bootstrap MASQUE at runtime.
+// (RegisterWarp on a temporary wireguard-shaped endpoint), then writes sing-box warp_masque
+// options: license + private_key, auto MASQUE ECDSA enroll, persistent warp_masque_state_path next to the panel DB.
 func (s *WarpService) RegisterWarpMasque(ep *model.Endpoint) error {
 	preserved := preserveWarpMasqueOptionsFrom(ep.Options)
+	var oldProf map[string]interface{}
+	if len(ep.Options) > 0 {
+		var om map[string]interface{}
+		if err := json.Unmarshal(ep.Options, &om); err == nil {
+			if p, ok := om["profile"].(map[string]interface{}); ok && p != nil {
+				oldProf = p
+			}
+		}
+	}
 	tmp := &model.Endpoint{
 		Type:    "warp",
 		Tag:     ep.Tag,
@@ -86,15 +125,30 @@ func (s *WarpService) RegisterWarpMasque(ep *model.Endpoint) error {
 	}
 	licenseKey, _ := extMap["license_key"].(string)
 
+	statePath := DefaultWarpMasqueStatePath(ep.Tag)
+	if oldProf != nil {
+		if sp := strings.TrimSpace(fmt.Sprint(oldProf["warp_masque_state_path"])); sp != "" {
+			statePath = sp
+		}
+	}
+	prof := map[string]interface{}{
+		"license":                strings.TrimSpace(licenseKey),
+		"private_key":            strings.TrimSpace(priv),
+		"auto_enroll_masque":     true,
+		"warp_masque_state_path": statePath,
+	}
+	if oldProf != nil {
+		for _, k := range []string{"detour", "dataplane_port_strategy", "dataplane_port", "masque_device_name", "recreate", "disable_masque_peer_public_key_pin"} {
+			if v, ok := oldProf[k]; ok {
+				prof[k] = v
+			}
+		}
+	}
+
 	wm := map[string]interface{}{
 		"transport_mode": "connect_udp",
 		"http_layer":     "auto",
-		"profile": map[string]interface{}{
-			"compatibility":      "consumer",
-			"license":            strings.TrimSpace(licenseKey),
-			"private_key":        strings.TrimSpace(priv),
-			"auto_enroll_masque": true,
-		},
+		"profile":        prof,
 	}
 	for k, v := range preserved {
 		wm[k] = v
@@ -117,10 +171,9 @@ func preserveWarpMasqueOptionsFrom(options json.RawMessage) map[string]interface
 		return out
 	}
 	for _, k := range []string{
-		"member_group_ids", "member_client_ids", "sui_tls_id",
 		"transport_mode", "template_udp", "template_ip", "template_tcp",
-		"tls_server_name", "http_layer", "listen", "listen_port", "mode",
-		"server", "server_port", "insecure",
+		"http_layer", "listen", "listen_port", "mode",
+		"server", "server_port", "detour",
 	} {
 		if v, ok := m[k]; ok {
 			out[k] = v

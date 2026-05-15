@@ -684,6 +684,9 @@ func (s *GroupService) Save(tx *gorm.DB, act string, data json.RawMessage) error
 				return err
 			}
 		}
+		if err := MasqueRecalcServerAuthLeafPins(tx); err != nil {
+			return err
+		}
 		return nil
 	case "edit":
 		var p groupSavePayload
@@ -717,6 +720,9 @@ func (s *GroupService) Save(tx *gorm.DB, act string, data json.RawMessage) error
 				return err
 			}
 		}
+		if err := MasqueRecalcServerAuthLeafPins(tx); err != nil {
+			return err
+		}
 		return nil
 	case "del":
 		var id uint
@@ -732,7 +738,13 @@ func (s *GroupService) Save(tx *gorm.DB, act string, data json.RawMessage) error
 		if err := tx.Where("group_id = ?", id).Delete(model.ClientGroupMember{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("id = ?", id).Delete(model.UserGroup{}).Error
+		if err := tx.Where("id = ?", id).Delete(model.UserGroup{}).Error; err != nil {
+			return err
+		}
+		if err := MasqueRecalcServerAuthLeafPins(tx); err != nil {
+			return err
+		}
+		return nil
 	case "setMembers":
 		var payload struct {
 			GroupId            uint    `json:"group_id"`
@@ -758,6 +770,9 @@ func (s *GroupService) Save(tx *gorm.DB, act string, data json.RawMessage) error
 			if err := s.replaceParentChildEdges(tx, payload.GroupId, children); err != nil {
 				return err
 			}
+		}
+		if err := MasqueRecalcServerAuthLeafPins(tx); err != nil {
+			return err
 		}
 		return nil
 	default:

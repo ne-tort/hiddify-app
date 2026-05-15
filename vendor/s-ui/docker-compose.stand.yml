@@ -21,6 +21,7 @@ services:
     hostname: "s-ui-local"
     network_mode: host
     environment:
+      GODEBUG: ${GODEBUG:-http2xconnect=1}
       SUI_WEB_TLS_CERT: ${SUI_WEB_TLS_CERT:-/app/cert/fullchain.pem}
       SUI_WEB_TLS_KEY: ${SUI_WEB_TLS_KEY:-/app/cert/privkey.pem}
       SUI_TLS_SELF_SIGNED: ${SUI_TLS_SELF_SIGNED:-0}

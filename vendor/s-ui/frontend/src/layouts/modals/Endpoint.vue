@@ -65,7 +65,7 @@
         <TailscaleVue v-if="endpoint.type == epTypes.Tailscale" :data="endpoint" />
         <L3Router v-if="endpoint.type == epTypes.L3Router" :data="endpoint" :user-groups="userGroups" :clients="clients" :is-new="Number(id) === 0" />
         <Masque v-if="endpoint.type == epTypes.Masque" :data="endpoint" :user-groups="userGroups" :clients="clients" :tls-configs="tlsConfigsList" />
-        <WarpMasque v-if="endpoint.type == epTypes.WarpMasque" :data="endpoint" :user-groups="userGroups" :clients="clients" />
+        <WarpMasque v-if="endpoint.type == epTypes.WarpMasque" :data="endpoint" />
         <Dial v-if="endpoint.type != epTypes.L3Router" :dial="endpoint" />
       </v-card-text>
       <v-card-actions>
@@ -231,15 +231,14 @@ export default {
           prevConfig = {
             tag: tag,
             type: EpTypes.Masque,
-            mode: 'server',
-            listen: '0.0.0.0',
+            listen: '::',
             listen_port: 443,
-            transport_mode: 'connect_udp',
-            tls_server_name: '',
             sui_tls_id: 0,
             member_group_ids: [],
             member_client_ids: [],
-            server_auth: { policy: 'first_match' },
+            server_auth: {},
+            sui_auth_modes: [],
+            sui_sub: { transport_mode: 'connect_udp' },
             ext: {},
           }
           break
@@ -247,14 +246,9 @@ export default {
           prevConfig = {
             tag: tag,
             type: EpTypes.WarpMasque,
-            mode: 'client',
-            server: '',
-            server_port: 443,
             transport_mode: 'connect_udp',
-            tls_server_name: '',
-            member_group_ids: [],
-            member_client_ids: [],
-            profile: { compatibility: 'consumer' },
+            http_layer: 'auto',
+            profile: {},
             ext: {},
           }
           break

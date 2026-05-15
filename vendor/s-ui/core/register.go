@@ -104,6 +104,7 @@ func EndpointRegistry() *endpoint.Registry {
 	wireguard.RegisterEndpoint(registry)
 	awg.RegisterEndpoint(registry)
 	registerL3RouterEndpoint(registry)
+	registerMasqueEndpoints(registry)
 	registerTailscaleEndpoint(registry)
 
 	return registry

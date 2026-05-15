@@ -1,0 +1,5 @@
+artifacts/
+certs/*.pem
+.env
+remote.credentials.env
+configs/masque-client-remote.generated.json

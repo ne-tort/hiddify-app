@@ -105,6 +105,9 @@ func (o *EndpointService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 				return nil, err
 			}
 			endpoint.Options = merged
+			if err := mergeMasqueTLSPemFromStoredProfile(db, endpoint); err != nil {
+				return nil, err
+			}
 		}
 		if endpoint.Type == l3RouterType {
 			var opt map[string]interface{}
@@ -220,6 +223,14 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 			if err := normalizeMasqueEndpointOptionsOnSave(&endpoint); err != nil {
 				return nil, err
 			}
+			if err := validateMasqueServerListenPortAvailable(tx, &endpoint); err != nil {
+				return nil, err
+			}
+		}
+		if endpoint.Type == warpMasqueType {
+			if err := normalizeMasqueEndpointOptionsOnSave(&endpoint); err != nil {
+				return nil, err
+			}
 		}
 		if endpoint.Type == masqueType || endpoint.Type == warpMasqueType {
 			if err := normalizeMasqueFamilyMembership(&endpoint); err != nil {
@@ -262,6 +273,11 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) (*
 				if err != nil {
 					return nil, err
 				}
+			}
+		}
+		if endpoint.Type == masqueType {
+			if err := MasqueRecalcServerAuthLeafPins(tx); err != nil {
+				return nil, err
 			}
 		}
 		runtimeAction = &EndpointRuntimeAction{
@@ -373,6 +389,9 @@ func (s *EndpointService) ApplyRuntimeAction(action *EndpointRuntimeAction) erro
 				return err
 			}
 			endpoint.Options = merged
+			if err := mergeMasqueTLSPemFromStoredProfile(database.GetDB(), &endpoint); err != nil {
+				return err
+			}
 		}
 		configData, err := endpoint.MarshalJSON()
 		if err != nil {
@@ -479,11 +498,16 @@ func normalizeMasqueFamilyMembership(ep *model.Endpoint) error {
 	if m == nil {
 		m = make(map[string]interface{})
 	}
-	if _, ok := m["member_group_ids"]; !ok {
-		m["member_group_ids"] = []interface{}{}
-	}
-	if _, ok := m["member_client_ids"]; !ok {
-		m["member_client_ids"] = []interface{}{}
+	if ep.Type == warpMasqueType {
+		delete(m, "member_group_ids")
+		delete(m, "member_client_ids")
+	} else {
+		if _, ok := m["member_group_ids"]; !ok {
+			m["member_group_ids"] = []interface{}{}
+		}
+		if _, ok := m["member_client_ids"]; !ok {
+			m["member_client_ids"] = []interface{}{}
+		}
 	}
 	raw, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

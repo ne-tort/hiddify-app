@@ -103,6 +103,10 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 				"member_group_ids",
 				"member_client_ids",
 				"sui_tls_id",
+				"sui_auth_modes",
+				"sui_client_auth_modes",
+				"addrs",
+				"sui_sub",
 			} {
 				delete(restFields, k)
 			}
@@ -142,5 +146,45 @@ func (o Endpoint) MarshalJSON() ([]byte, error) {
 		}
 	}
 
+	if o.Type == "masque" {
+		stripMasqueServerAuthDefaultPolicyCombined(combined)
+	}
+
 	return json.Marshal(combined)
+}
+
+// stripMasqueServerAuthDefaultPolicyCombined omits policy when it is sing-box default (first_match).
+func stripMasqueServerAuthDefaultPolicyCombined(combined map[string]interface{}) {
+	if combined == nil {
+		return
+	}
+	raw, ok := combined["server_auth"]
+	if !ok || raw == nil {
+		return
+	}
+	var b []byte
+	switch x := raw.(type) {
+	case json.RawMessage:
+		b = []byte(x)
+	case []byte:
+		b = x
+	default:
+		return
+	}
+	var sa map[string]interface{}
+	if err := json.Unmarshal(b, &sa); err != nil || sa == nil {
+		return
+	}
+	if p, ok := sa["policy"].(string); ok && strings.EqualFold(strings.TrimSpace(p), "first_match") {
+		delete(sa, "policy")
+	}
+	if len(sa) == 0 {
+		delete(combined, "server_auth")
+		return
+	}
+	out, err := json.Marshal(sa)
+	if err != nil {
+		return
+	}
+	combined["server_auth"] = json.RawMessage(out)
 }

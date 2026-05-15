@@ -13,8 +13,11 @@
       "template_ip": "https://masque-server-core:8443/masque/ip/{target}/{ipproto}",
       "template_tcp": "https://masque-server-core:8443/masque/tcp/{target_host}/{target_port}",
       "allow_private_targets": true,
-      "certificate": "/etc/sing-box/cert.pem",
-      "key": "/etc/sing-box/key.pem"
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/cert.pem",
+        "key_path": "/etc/sing-box/key.pem"
+      }
     }
   ],
   "outbounds": [

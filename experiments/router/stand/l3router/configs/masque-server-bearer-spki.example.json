@@ -1,0 +1,40 @@
+{
+  "log": {
+    "level": "warn"
+  },
+  "endpoints": [
+    {
+      "type": "masque",
+      "tag": "masque-server",
+      "mode": "server",
+      "listen": "0.0.0.0",
+      "listen_port": 8443,
+      "template_udp": "https://masque-server-core:8443/masque/udp/{target_host}/{target_port}",
+      "template_ip": "https://masque-server-core:8443/masque/ip",
+      "template_tcp": "https://masque-server-core:8443/masque/tcp/{target_host}/{target_port}",
+      "allow_private_targets": true,
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/cert.pem",
+        "key_path": "/etc/sing-box/key.pem",
+        "client_authentication": 4
+      },
+      "server_auth": {
+        "policy": "first_match",
+        "bearer_tokens": ["REPLACE_WITH_PANEL_ISSUED_BEARER"],
+        "client_leaf_spki_sha256": [
+          "0000000000000000000000000000000000000000000000000000000000000000"
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "final": "direct"
+  }
+}

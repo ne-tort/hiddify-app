@@ -71,3 +71,11 @@ func TestWarpMasqueNeedsCloudflareRegister_licenseInExtOnly(t *testing.T) {
 		t.Fatal("expected false when license_key in ext and private_key in profile")
 	}
 }
+
+func TestFinalizeWarpMasqueMergedProfileStripsNilLicenseString(t *testing.T) {
+	prof := map[string]interface{}{"license": "<nil>", "private_key": "x"}
+	finalizeWarpMasqueMergedProfile(prof)
+	if _, ok := prof["license"]; ok {
+		t.Fatalf("expected bogus license removed, got %#v", prof)
+	}
+}

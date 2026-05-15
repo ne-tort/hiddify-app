@@ -1,0 +1,6 @@
+# Контекст сборки: только Dockerfile + artifacts/sing-box-linux-amd64
+certs
+configs
+bench
+README.md
+.gitignore

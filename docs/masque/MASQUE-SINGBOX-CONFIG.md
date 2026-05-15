@@ -2,6 +2,8 @@
 
 Краткая шпаргалка по полям JSON для endpoint **`type: masque`** (и типам, расширяющим его профилем, например `warp_masque`). Полный норматив dataplane см. [`IDEAL-MASQUE-ARCHITECTURE.md`](../../IDEAL-MASQUE-ARCHITECTURE.md). ADR/топология — [`hiddify-core/docs/masque-warp-architecture.md`](../../hiddify-core/docs/masque-warp-architecture.md).
 
+> **Breaking change (TLS):** плоские поля `certificate`, `key`, `tls_server_name`, `insecure`, `client_tls_*` **удалены**. Клиент задаёт TLS через **`outbound_tls`** (схема [`OutboundTLSOptions`](../../hiddify-core/hiddify-sing-box/option/tls.go)); сервер — через **`tls`** ([`InboundTLSOptions`](../../hiddify-core/hiddify-sing-box/option/tls.go)). Проверка клиентских сертификатов на сервере — только полями **`tls.client_authentication`**, **`tls.client_certificate`*** и т.п. внутри inbound `tls` (не через `server_auth.mtls`).
+
 | Слой | Файлы в дереве |
 |------|----------------|
 | Объявление полей (`MasqueEndpointOptions`, константы) | [`hiddify-core/hiddify-sing-box/option/masque.go`](../../hiddify-core/hiddify-sing-box/option/masque.go) |
@@ -18,15 +20,15 @@
 
 ### Клиент
 
-- **Минимум полей** для стенда с дефолтными путями `/masque/...`: `type`, `tag`, `server`, при необходимости `server_port` (0 → 443 в [`buildTemplates`](../../hiddify-core/hiddify-sing-box/transport/masque/transport.go)), плюс TLS (`insecure` или доверенный сертификат).
+- **Минимум полей** для стенда с дефолтными путями `/masque/...`: `type`, `tag`, `server`, при необходимости `server_port` (0 → 443 в [`buildTemplates`](../../hiddify-core/hiddify-sing-box/transport/masque/transport.go)). Если **`outbound_tls`** не задан, перед валидацией подставляется безопасный дефолт **`{ "enabled": true, "insecure": true }`** ([`applyMasqueClientMasqueDefaults`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go)); для продакшена задайте явный **`outbound_tls`** (SNI, корневые CA, клиентский сертификат и т.д. — см. [`option/tls.go`](../../hiddify-core/hiddify-sing-box/option/tls.go)).
 - **`tcp_transport`:** если `transport_mode` **не** `connect_ip`, пустое значение или `auto` **перед валидацией** подставляется **`connect_stream`** ([`applyMasqueClientMasqueDefaults`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go) в [`endpoint_client.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint_client.go)). Для **`transport_mode: connect_ip`** и TCP по **CONNECT-IP / netstack** по-прежнему нужен явный **`tcp_transport: connect_ip`** (см. §3).
 - **`transport_mode: connect_udp` + непустой `template_ip`:** раньше это отклонялось (`transport_mode connect_udp cannot set template_ip`). Сейчас **`template_ip` очищается** на входе в клиентский endpoint перед `validateMasqueOptions`. Слой **Hiddify `BuildConfig`** по-прежнему **не переписывает** сырой JSON профиля — см. тест **`TestBuildConfigPassthroughMasqueConnectUDPWithTemplateIP`** в [`v2/config/masque_passthrough_test.go`](../../hiddify-core/v2/config/masque_passthrough_test.go).
-- **`tls_server_name`:** необязателен; пусто → SNI совпадает с **`server`** ([`resolveTLSServerName`](../../hiddify-core/hiddify-sing-box/transport/masque/transport.go)).
+- **`outbound_tls.server_name`:** необязателен; пусто → SNI по умолчанию совпадает с **`server`** при сборке QUIC/TCP TLS ([`transport/masque`](../../hiddify-core/hiddify-sing-box/transport/masque)).
 
 ### Сервер
 
-- Минимум: `mode: server`, `listen`, `listen_port`, `certificate`, `key`; шаблоны можно опустить — см. §7.1.
-- **`listen` `0.0.0.0` / `::`:** в [`defaultMasqueListenHTTPSAuthority`](../../hiddify-core/hiddify-sing-box/protocol/masque/template_defaults.go) authority дефолтных шаблонов для mux сводится к **`127.0.0.1:<port>`**. Если клиент набирает **публичный IP или DNS-имя**, а сервер слушает wildcard, задайте явные **`template_*`** с тем же **host:port**, что клиент использует в **`:authority`**, иначе **TCP** CONNECT-stream может разойтись с проверкой Host в [`parseTCPTargetFromRequest`](../../hiddify-core/hiddify-sing-box/protocol/masque/endpoint_server.go).
+- Минимум: `mode: server`, `listen`, `listen_port`, вложенный объект **`tls`** с материалом сервера (те же поля, что у sing-box inbound TLS, например `certificate_path`/`key_path` или inline `certificate`/`key`); шаблоны можно опустить — см. §7.1.
+- **`listen` `0.0.0.0` / `::`:** в [`defaultMasqueListenHTTPSAuthority`](../../hiddify-core/hiddify-sing-box/protocol/masque/template_defaults.go) authority дефолтных шаблонов для mux — стабильный placeholder **`127.0.0.1:<port>`**. При пустых **`template_udp` / `template_ip` / `template_tcp`** ядро **автоматически** согласует клиентский **`:authority`** (публичный IP/DNS + тот же порт) с placeholder для CONNECT-UDP, CONNECT-IP и TCP CONNECT-stream ([`template_authority.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/template_authority.go)). Явные **`template_*`** с нужным host — только если нужен нестандартный path/host; при непустом шаблоне relax отключён.
 
 ---
 
@@ -35,7 +37,7 @@
 | `mode` (JSON) | Описание |
 |---------------|----------|
 | пусто / `client` | Клиент: dial к удалённому MASQUE (поля `server`, транспорт, шаблоны TCP/UDP/IP). По нормализации пустое → client. |
-| `server` | Сервер HTTP/3: `listen_port`, `certificate`, `key` обязательны; клиентские поля (`server`, hops, transport_mode, tcp_*, connect_ip_scope_*) **запрещены**. |
+| `server` | Сервер HTTP/3: `listen`, `listen_port`, непустой **`tls`** обязательны; клиентские поля (`server`, hops, transport_mode, tcp_*, connect_ip_scope_*) **запрещены**. |
 
 ---
 
@@ -142,7 +144,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
     `https://{server}:{port}/masque/udp/{target_host}/{target_port}`,  
     `https://{server}:{port}/masque/ip`,  
     `https://{server}:{port}/masque/tcp/{target_host}/{target_port}`.
-  - **Сервер** (`defaultTemplateIfEmpty`): тот же **path** (`/masque/udp/...`, `/masque/ip`, `/masque/tcp/...`), но хост в строке по умолчанию **`masque.local`** — он нужен только чтобы распарсить **path** для mux; реальный TLS/SNI на сервере задаётся `listen` + клиентский `server`/`tls_server_name`.
+  - **Сервер** (`defaultTemplateIfEmpty`): тот же **path** (`/masque/udp/...`, `/masque/ip`, `/masque/tcp/...`), но хост в строке по умолчанию **`masque.local`** — он нужен только чтобы распарсить **path** для mux; реальный TLS/SNI на сервере задаётся `listen` + клиентский `server` / **`outbound_tls.server_name`**.
 - **Вывод:** опускать `template_*` можно **только если** peer использует те же path (как в дефолтах выше). Сторонний сервер с другим path потребует **явных** `template_*` с обеих сторон.
 
 ### 7.2 Дефолты по полям (после нормализации / до рантайма)
@@ -169,7 +171,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 #### 7.2.1 `warp_masque`: профиль Cloudflare и наследование полей MASQUE
 
-Тип **`warp_masque`** встраивает те же поля, что и **`type: masque`** (`MasqueEndpointOptions`): `transport_mode` (в т.ч. **`connect_udp`** как более мягкий smoke на живом edge), `server_token`, шаблоны, `hop_policy`/`hops`, корневой **`detour`** маршрутизатора, `tcp_*`, `tls_server_name`, и т.д. Валидация **`validateMasqueOptions`** выполняется для вложенного блока так же, как у generic клиента.
+Тип **`warp_masque`** встраивает те же поля, что и **`type: masque`** (`MasqueEndpointOptions`): `transport_mode` (в т.ч. **`connect_udp`** как более мягкий smoke на живом edge), `server_token`, шаблоны, `hop_policy`/`hops`, корневой **`detour`** маршрутизатора, `tcp_*`, **`outbound_tls`**, и т.д. Валидация **`validateMasqueOptions`** выполняется для вложенного блока так же, как у generic клиента.
 
 Дополнительно задаётся объект **`profile`** ([`option/masque.go`](../../hiddify-core/hiddify-sing-box/option/masque.go) `WarpMasqueProfileOptions`):
 
@@ -205,7 +207,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 | `tcp_transport: connect_ip` | ошибка — только TUN packet-plane, не этот ключ |
 | `tcp_mode: masque_or_direct` без `fallback_policy: direct_explicit` | ошибка |
 | `udp_timeout` или `workers` ≠ 0 | ошибка |
-| `listen` / `listen_port` (как сервер) / `certificate` / `key` / `allow_private_targets` / port lists | ошибка в client mode |
+| `listen` / `listen_port` (как сервер) / **`tls`** / `allow_private_targets` / port lists | ошибка в client mode |
 | `quic_experimental.enabled` без `MASQUE_EXPERIMENTAL_QUIC=1` | ошибка |
 
 ### 7.4 Матрица плоскости: `transport_mode` и шаблоны / scope
@@ -229,22 +231,20 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 ### 7.6 Сервер: `server_auth` (ACL) и совместимость с `server_token`
 
-Начиная с текущей ветки, сервер MASQUE может описывать **ACL на уровне приложения** отдельным объектом **`server_auth`** ([`option/masque.go`](../../hiddify-core/hiddify-sing-box/option/masque.go), компиляция и проверка в [`server_auth.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/server_auth.go)):
+Начиная с текущей ветки, сервер MASQUE может описывать **ACL на уровне приложения** отдельным объектом **`server_auth`** ([`option/masque.go`](../../hiddify-core/hiddify-sing-box/option/masque.go), компиляция и проверка в [`server_auth.go`](../../hiddify-core/hiddify-sing-box/protocol/masque/server_auth.go)). **Проверка клиентских TLS-сертификатов** настраивается только в **`tls`** (inbound), а не внутри `server_auth`:
 
 | JSON | Назначение |
 |------|------------|
-| `server_auth.policy` | **`first_match`** (по умолчанию): достаточно **одного** из включённых слоёв (mTLS **или** HTTP). **`all_required`**: каждый **включённый** слой должен пройти (например, и mTLS, и HTTP, если заданы оба). |
+| `server_auth.policy` | **`first_match`** (по умолчанию): достаточно **одного** из включённых HTTP-слоёв (Bearer/Basic). **`all_required`**: каждый **включённый** слой должен пройти. TLS-клиентская аутентификация на сервере настраивается отдельно в **`tls`** inbound (см. [`option/tls.go`](../../hiddify-core/hiddify-sing-box/option/tls.go)), а не в `server_auth`. |
 | `server_auth.bearer_tokens` | Список строк; на старте сервера хранятся только **SHA-256** от токенов; на wire по-прежнему сравнивается значение из **`Authorization`** / **`Proxy-Authorization`** (`Bearer …`). |
 | `server_auth.bearer_token_sha256` | Список **64 hex-символов** (SHA-256 от токена), если токен не хранится в конфиге в открытом виде. |
 | `server_auth.basic_credentials` | Массив `{ "username", "password" }`; на старте — хэш от нормализованного `username` + `NUL` + `password` (как у ACL, не «учётные записи пользователей» в смысле приложения). |
-| `server_auth.mtls.client_ca_pem` | Массив PEM-строк CA для проверки клиентского сертификата. На TLS-уровне используется **`VerifyClientCertIfGiven`** + `ClientCAs` (серт с клиента опционален на рукопожатии; итоговый доступ решает **`server_auth.policy`** и `AuthorizeRequest`: при `first_match` достаточно mTLS **или** HTTP, при `all_required` — оба слоя, если оба заданы). |
-| `server_auth.mtls.trusted_client_cert_pem` | Дополнительные доверенные leaf-серты (PEM), добавляются в пул доверия. |
 
-**Короткие ключи JSON** (парсер [`option/masque_auth_json.go`](../../hiddify-core/hiddify-sing-box/option/masque_auth_json.go), дублируют длинные поля): `bearer` → `bearer_tokens`, `sha256` → `bearer_token_sha256`, `basics` → `basic_credentials`, в `mtls`: `ca` → `client_ca_pem`, `trust` → `trusted_client_cert_pem`; в элементах Basic допустимы `user` / `pass` вместо `username` / `password`.
+**Короткие ключи JSON** (парсер [`option/masque_auth_json.go`](../../hiddify-core/hiddify-sing-box/option/masque_auth_json.go), дублируют длинные поля): `bearer` → `bearer_tokens`, `sha256` → `bearer_token_sha256`, `basics` → `basic_credentials`; в элементах Basic допустимы `user` / `pass` вместо `username` / `password`.
 
 **`server_token`** (корневое поле) **сохраняется**: непустое значение эквивалентно одному элементу в ACL Bearer (удобная миграция и короткие конфиги).
 
-**Клиент** (только client mode): опционально **`client_basic_username`** / **`client_basic_password`** — тогда на CONNECT-stream / CONNECT-IP (ExtraHeaders) уходит **`Authorization: Basic …`** вместо Bearer; **`server_auth`** на клиенте запрещён. Для **CONNECT-UDP** (masque-go) по-прежнему доступен в основном **`BearerToken`** / `server_token` — Basic на этом пути библиотекой не расширялся. Клиентский mTLS к серверу: предпочтительно **`client_tls_cert_pem`** / **`client_tls_key_pem`** (inline PEM в JSON для подписок) или **`client_tls_cert_b64`** / **`client_tls_key_b64`** (base64); устаревшие **`client_tls_cert`** / **`client_tls_key`** — пути к PEM-файлам (неудобно для «вставил JSON»). Ровно **один** из трёх способов; приоритет загрузки: PEM → base64 → пути.
+**Клиент** (только client mode): опционально **`client_basic_username`** / **`client_basic_password`** — тогда на CONNECT-stream / CONNECT-IP (ExtraHeaders) уходит **`Authorization: Basic …`** вместо Bearer; **`server_auth`** на клиенте запрещён. Для **CONNECT-UDP** (masque-go) по-прежнему доступен в основном **`BearerToken`** / `server_token` — Basic на этом пути библиотекой не расширялся. Клиентский mTLS к серверу и доверие к серверному сертификату задаются **только** в **`outbound_tls`** (поля `certificate` / `certificate_path`, `client_certificate`, `server_name`, `insecure`, `utls` и т.д. — см. [`option/tls.go`](../../hiddify-core/hiddify-sing-box/option/tls.go)); комбинация **`outbound_tls.utls.enabled`** с **`http_layer: h3`** или **`auto`** отклоняется валидацией.
 
 **Логи:** не логировать сырые токены и пароли; при отладке допустимо ссылаться только на хэши/классы ошибок.
 
@@ -260,9 +260,9 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
 
 - Пути после разворачивания шаблонов (`template_udp`/`template_ip`/`template_tcp`): клиент генерирует URL, сервер регистрирует handler по тому же path shape.
 - **`server_token`** и **`server_auth`:** на клиенте по-прежнему **`server_token`** (Bearer) и/или Basic через **`client_basic_*`**; на сервере **`server_auth`** задаёт ACL (Bearer/Basic/mTLS + политика), а **`server_token`** остаётся сокращением для одного Bearer (см. §7.6).
-- TLS: клиент доверяет сертификату сервера (`tls_server_name` / `insecure`); сервер предоставляет **`certificate`**/**`key`**.
+- TLS: клиент — объект **`outbound_tls`**; сервер — объект **`tls`** (те же поля, что sing-box inbound/outbound TLS).
 
-**Только сервер:** `listen`, `listen_port`, certs, `allow_private_targets`, `allowed_target_ports`, `blocked_target_ports`; без client transport/tcp полей.
+**Только сервер:** `listen`, `listen_port`, **`tls`**, `allow_private_targets`, `allowed_target_ports`, `blocked_target_ports`; без client transport/tcp полей.
 
 **Только клиент:** `server` (single hop), транспорт и TCP ключи и scope CONNECT-IP; без listen/cert/port policies.
 
@@ -282,7 +282,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
       "tag": "masque-min",
       "server": "example.com",
       "server_port": 443,
-      "insecure": true
+      "outbound_tls": { "enabled": true, "insecure": true }
     }
   ]
 }
@@ -304,7 +304,7 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
       "tcp_transport": "connect_stream",
       "template_ip": "https://example.com:443/masque/ip",
       "template_tcp": "https://example.com:443/masque/tcp/{target_host}/{target_port}",
-      "tls_server_name": "example.com"
+      "outbound_tls": { "enabled": true, "server_name": "example.com" }
     }
   ]
 }
@@ -324,8 +324,11 @@ TCP как **MASQUE CONNECT-stream** — отдельно: **`tcp_transport: con
       "template_udp": "https://host:8443/masque/udp/{target_host}/{target_port}",
       "template_ip": "https://host:8443/masque/ip",
       "template_tcp": "https://host:8443/masque/tcp/{target_host}/{target_port}",
-      "certificate": "/path/cert.pem",
-      "key": "/path/key.pem"
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/path/cert.pem",
+        "key_path": "/path/key.pem"
+      }
     }
   ]
 }

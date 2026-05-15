@@ -33,8 +33,11 @@
       "connect_ip_scope_target": "not-a-cidr",
       "connect_ip_scope_ipproto": 17,
       "template_tcp": "https://masque-server-core:8443/masque/tcp/{target_host}/{target_port}",
-      "tls_server_name": "masque-server-core",
-      "insecure": true
+      "outbound_tls": {
+        "enabled": true,
+        "server_name": "masque-server-core",
+        "insecure": true
+      }
     }
   ],
   "outbounds": [

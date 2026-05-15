@@ -1,0 +1,48 @@
+# Локальный прогон релевантных Go-тестов s-ui с CGO (sqlite) в Linux.
+# Из каталога vendor/s-ui:
+#   docker compose -f docker-compose.go-test.yml run --rm go-test-masque
+# Полный пакет sub+service:
+#   docker compose -f docker-compose.go-test.yml run --rm go-test-all
+services:
+  go-test-masque:
+    image: golang:1.25-bookworm
+    working_dir: /repo/vendor/s-ui
+    environment:
+      CGO_ENABLED: "1"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ../../:/repo
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq gcc libc6-dev libsqlite3-dev >/dev/null
+        cd /repo/vendor/s-ui
+        go test ./sub/ -run 'TestPatchMasqueSubscription' -count=1
+        go test ./service/ -run 'TestMasqueRecalcServerAuthLeafPins' -count=1
+        echo "[go-test-masque] OK"
+
+  go-test-all:
+    image: golang:1.25-bookworm
+    working_dir: /repo/vendor/s-ui
+    environment:
+      CGO_ENABLED: "1"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ../../:/repo
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        apt-get update -qq
+        apt-get install -y -qq gcc libc6-dev libsqlite3-dev >/dev/null
+        cd /repo/vendor/s-ui
+        go test ./sub/... ./service/... -count=1
+        echo "[go-test-all] OK"

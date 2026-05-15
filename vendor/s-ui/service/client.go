@@ -117,6 +117,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, false, err
 		}
+		if err = EnsureMasqueClientIdentity(&client); err != nil {
+			return nil, false, err
+		}
 		err = s.updateLinksWithFixedInbounds(tx, []*model.Client{&client}, hostname)
 		if err != nil {
 			return nil, false, err
@@ -251,6 +254,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			if err != nil {
 				return nil, false, err
 			}
+			if err = EnsureMasqueClientIdentity(client); err != nil {
+				return nil, false, err
+			}
 		}
 		if len(inboundIds) > 0 {
 			err = s.updateLinksWithFixedInbounds(tx, clients, hostname)
@@ -353,6 +359,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		return nil, false, err
 	}
 	if err := PersistL3RouterRouteRules(tx); err != nil {
+		return nil, false, err
+	}
+	if err := MasqueRecalcServerAuthLeafPins(tx); err != nil {
 		return nil, false, err
 	}
 

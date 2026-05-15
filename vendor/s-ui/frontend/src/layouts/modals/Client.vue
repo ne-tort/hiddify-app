@@ -144,12 +144,15 @@
                 <v-col cols="12" md="3" align="end" align-self="center">{{ $t('client.masqueRow') }}</v-col>
                 <v-col>
                   <v-text-field :label="$t('masque.clientServerToken')" v-model="masqueServerToken" hide-details />
-                </v-col>
-              </v-row>
-              <v-row>
-                <v-col cols="12" md="3" align="end" align-self="center">{{ $t('client.warpMasqueRow') }}</v-col>
-                <v-col>
-                  <v-text-field :label="$t('masque.warpClientServerToken')" v-model="warpMasqueServerToken" hide-details />
+                  <v-text-field class="mt-2" :label="$t('masque.clientBasicUsername')" v-model="masqueClientBasicUsername" hide-details />
+                  <v-text-field class="mt-2" :label="$t('masque.clientBasicPassword')" v-model="masqueClientBasicPassword" type="password" autocomplete="new-password" hide-details />
+                  <v-text-field
+                    class="mt-2"
+                    readonly
+                    :label="$t('masque.clientMtlsSpki')"
+                    :model-value="masqueLeafSpkiHex"
+                    hide-details
+                  />
                 </v-col>
               </v-row>
               <v-row v-for="key in Object.keys(clientConfig)">
@@ -444,15 +447,35 @@ export default {
         ;(this.clientConfig.masque as any).server_token = v
       },
     },
-    warpMasqueServerToken: {
+    masqueClientBasicUsername: {
       get() {
-        if (!this.clientConfig.warp_masque) this.clientConfig.warp_masque = {}
-        return (this.clientConfig.warp_masque as any).server_token ?? ''
+        if (!this.clientConfig.masque) this.clientConfig.masque = {}
+        return (this.clientConfig.masque as any).client_basic_username ?? ''
       },
       set(v: string) {
-        if (!this.clientConfig.warp_masque) this.clientConfig.warp_masque = {}
-        ;(this.clientConfig.warp_masque as any).server_token = v
+        if (!this.clientConfig.masque) this.clientConfig.masque = {}
+        ;(this.clientConfig.masque as any).client_basic_username = v
       },
+    },
+    masqueClientBasicPassword: {
+      get() {
+        if (!this.clientConfig.masque) this.clientConfig.masque = {}
+        return (this.clientConfig.masque as any).client_basic_password ?? ''
+      },
+      set(v: string) {
+        if (!this.clientConfig.masque) this.clientConfig.masque = {}
+        ;(this.clientConfig.masque as any).client_basic_password = v
+      },
+    },
+    masqueLeafSpkiHex(): string {
+      try {
+        const sm = (this.clientConfig as any)?.sui_masque
+        if (!sm || typeof sm !== 'object') return ''
+        const h = sm.client_leaf_spki_sha256
+        return typeof h === 'string' ? h : ''
+      } catch {
+        return ''
+      }
     },
   },
   watch: {

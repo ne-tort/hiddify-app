@@ -44,8 +44,11 @@
       "tcp_transport": "connect_stream",
       "template_ip": "https://masque-server-core:8443/masque/ip",
       "template_tcp": "https://masque-server-core:8443/masque/tcp/{target_host}/{target_port}",
-      "tls_server_name": "masque-server-core",
-      "insecure": true
+      "outbound_tls": {
+        "enabled": true,
+        "server_name": "masque-server-core",
+        "insecure": true
+      }
     }
   ],
   "outbounds": [

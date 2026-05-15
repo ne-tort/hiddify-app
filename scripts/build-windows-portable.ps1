@@ -40,6 +40,28 @@ function Assert-Command([string] $Name, [string] $Hint) {
     }
 }
 
+function Get-HiddifyCoreBuildTags {
+    param([string] $CoreRoot)
+    # Fallback = CoreSingBoxBaseTags + with_naive (см. cmd/internal/build_shared/core_build_tags.go)
+    $fallback = 'with_gvisor,with_quic,with_wireguard,with_awg,with_l3router,with_utls,with_clash_api,with_grpc,with_acme,with_masque,with_conntrack,badlinkname,tfogo_checklinkname0,with_tailscale,ts_omit_logtail,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_naive_outbound'
+    $helper = Join-Path $CoreRoot 'bin\print_core_build_tags.exe'
+    Push-Location $CoreRoot
+    try {
+        if (-not (Test-Path -LiteralPath $helper)) {
+            & go build -o $helper ./cmd/print_core_build_tags 2>&1 | Out-Null
+        }
+        if (Test-Path -LiteralPath $helper) {
+            $t = (& $helper 2>&1 | Out-String).Trim()
+            if ($t -and $LASTEXITCODE -eq 0) { return $t }
+        }
+        $t2 = (& go run ./cmd/print_core_build_tags 2>&1 | Out-String).Trim()
+        if ($t2 -and $LASTEXITCODE -eq 0) { return $t2 }
+    }
+    finally { Pop-Location }
+    Write-Host "[build-windows-portable] WARN: using fallback build tags (go run helper blocked?)"
+    return $fallback
+}
+
 function Build-HiddifyCoreWindows {
     param(
         [string] $CoreRoot,
@@ -70,9 +92,8 @@ function Build-HiddifyCoreWindows {
         Assert-File $cronetDll "Missing libcronet.dll: $cronetDll"
         Copy-Item -LiteralPath $cronetDll -Destination (Join-Path $binDir 'libcronet.dll') -Force
 
-        $tags = (& go run ./cmd/print_core_build_tags).Trim()
-        if (-not $tags) { throw 'print_core_build_tags returned empty' }
-        $tagsWithPure = "$tags,with_purego"
+        $tags = Get-HiddifyCoreBuildTags -CoreRoot $CoreRoot
+        $tagsWithPure = if ($tags -match 'with_purego') { $tags } else { "$tags,with_purego" }
 
         Write-Host "[build-windows-portable] go build hiddify-core.dll (tags: $tagsWithPure)..."
         & go build -trimpath -ldflags='-w -s -checklinkname=0' -buildmode=c-shared -tags $tagsWithPure `

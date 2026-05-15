@@ -1,3 +1,4 @@
+# Optional: generic masque with bearer + SPKI pins — set MASQUE_SERVER_CONFIG=./configs/masque-server-bearer-spki.example.json (edit bearer and hex pins).
 services:
   masque-server-core:
     build:

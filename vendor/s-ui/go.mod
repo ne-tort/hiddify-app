@@ -46,6 +46,7 @@ require (
 	github.com/database64128/netx-go v0.1.1 // indirect
 	github.com/database64128/tfo-go/v2 v2.3.2 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
+	github.com/dunglas/httpsfv v1.0.2 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/florianl/go-nfqueue/v2 v2.0.2 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
@@ -107,6 +108,8 @@ require (
 	github.com/pires/go-proxyproto v0.11.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/prometheus-community/pro-bing v0.4.0 // indirect
+	github.com/quic-go/connect-ip-go v0.2.0 // indirect
+	github.com/quic-go/masque-go v0.3.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/safchain/ethtool v0.3.0 // indirect
@@ -177,6 +180,7 @@ require (
 	github.com/ugorji/go/codec v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
@@ -206,6 +210,10 @@ require (
 
 replace github.com/quic-go/quic-go => github.com/quic-go/quic-go v0.57.1
 
+replace github.com/quic-go/connect-ip-go => ../../hiddify-core/hiddify-sing-box/third_party/connect-ip-go
+
+replace github.com/quic-go/masque-go => ../../hiddify-core/hiddify-sing-box/third_party/masque-go
+
 replace github.com/sagernet/sing-box => ../../hiddify-core/hiddify-sing-box
 
 replace github.com/sagernet/sing => github.com/sagernet/sing v0.8.0-beta.11
@@ -217,7 +225,9 @@ replace github.com/amnezia-vpn/amneziawg-go => ../../hiddify-core/hiddify-sing-b
 replace github.com/sagernet/tailscale => ../../hiddify-core/hiddify-sing-box/replace/tailscale
 
 replace github.com/sagernet/sing-tun => ../../hiddify-core/hiddify-sing-box/replace/sing-tun
+
 replace github.com/sagernet/cronet-go => ../../hiddify-core/hiddify-sing-box/replace/cronet-go
+
 replace github.com/sagernet/cronet-go/all => ../../hiddify-core/hiddify-sing-box/replace/cronet-go-all
 
 replace github.com/Psiphon-Labs/quic-go => ../../hiddify-core/hiddify-sing-box/replace/psiphon-quic-go

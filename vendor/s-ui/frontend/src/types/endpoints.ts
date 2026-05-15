@@ -127,9 +127,8 @@ export interface L3Router extends EndpointBasics {
   lookup_backend?: string
 }
 
-/** MASQUE sing-box endpoint (server or client); member_* stripped in runtime JSON. */
+/** MASQUE sing-box endpoint (server listen in panel); member_* stripped in runtime JSON. */
 export interface Masque extends EndpointBasics, Dial {
-  mode?: string
   listen?: string
   listen_port?: number
   server?: string
@@ -138,31 +137,26 @@ export interface Masque extends EndpointBasics, Dial {
   template_udp?: string
   template_ip?: string
   template_tcp?: string
-  tls_server_name?: string
-  insecure?: boolean
   http_layer?: string
   server_auth?: Record<string, unknown>
   member_group_ids?: number[]
   member_client_ids?: number[]
-  /** Reference to TLS row in panel DB; merged into certificate/key at runtime (stripped in MarshalJSON). */
+  /** Reference to TLS row in panel DB; merged into inbound tls at runtime. */
   sui_tls_id?: number
+  /** Panel-only: which server auth layers are used (stripped in sing-box JSON / subscription). */
+  sui_auth_modes?: string[]
+  /** @deprecated Prefer sui_sub.sui_client_auth_modes */
+  sui_client_auth_modes?: string[]
+  /** Panel-only: subscription-only overrides (transport, addrs, client auth modes). */
+  sui_sub?: Record<string, unknown>
   ext?: unknown
 }
 
-/** WARP over MASQUE client profile; sensitive profile keys may live in ext (merged server-side). */
+/** WARP over MASQUE: panel-only sing-box endpoint (not in member subscriptions). */
 export interface WarpMasque extends EndpointBasics, Dial {
-  mode?: string
-  server?: string
-  server_port?: number
   transport_mode?: string
-  template_udp?: string
-  template_ip?: string
-  template_tcp?: string
-  tls_server_name?: string
   http_layer?: string
   profile?: Record<string, unknown>
-  member_group_ids?: number[]
-  member_client_ids?: number[]
   ext?: unknown
 }
 
@@ -187,28 +181,22 @@ const defaultValues: Record<EpType, Endpoint> = {
   masque: {
     type: EpTypes.Masque,
     tag: '',
-    mode: 'server',
-    listen: '0.0.0.0',
+    listen: '::',
     listen_port: 443,
-    transport_mode: 'connect_udp',
-    tls_server_name: '',
     sui_tls_id: 0,
     member_group_ids: [],
     member_client_ids: [],
-    server_auth: { policy: 'first_match' },
+    server_auth: {},
+    sui_auth_modes: [],
+    sui_sub: { transport_mode: 'connect_udp' },
     ext: {},
   },
   warp_masque: {
     type: EpTypes.WarpMasque,
     tag: '',
-    mode: 'client',
-    server: '',
-    server_port: 443,
     transport_mode: 'connect_udp',
-    tls_server_name: '',
-    member_group_ids: [],
-    member_client_ids: [],
-    profile: { compatibility: 'consumer' },
+    http_layer: 'auto',
+    profile: {},
     ext: {},
   },
 }

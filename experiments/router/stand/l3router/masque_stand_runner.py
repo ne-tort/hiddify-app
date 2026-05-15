@@ -1803,7 +1803,7 @@ def compile_singbox():
             "go",
             "build",
             "-tags",
-            "with_masque",
+            "with_masque,with_utls",
             "-o",
             str(ARTIFACT),
             "./cmd/sing-box",
@@ -6699,6 +6699,12 @@ def main():
         help="comma-separated loss %% rows for udp_matrix (e.g. 0,1); uses relaxed ok floor when >0",
     )
     args = parser.parse_args()
+
+    # Optional: same compose paths as DEFAULT_CLIENT_CONFIG but different file (TLS matrix / local edits).
+    _stand_cli = os.environ.get("MASQUE_STAND_CLIENT_CONFIG", "").strip()
+    if _stand_cli:
+        globals()["DEFAULT_CLIENT_CONFIG"] = _stand_cli
+        print(f"[stand] MASQUE_STAND_CLIENT_CONFIG -> {DEFAULT_CLIENT_CONFIG}", flush=True)
 
     if args.stress and args.megabytes is not None:
         print("Note: --stress forces 500MB; ignoring --megabytes", flush=True)

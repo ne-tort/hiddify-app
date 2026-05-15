@@ -104,9 +104,10 @@ export function shuffleConfigs(configs: Config, key?: string) {
         configs[k].uuid = RandomUtil.randomUUID()
         break
       case "masque":
-      case "warp_masque":
         if (!configs[k]) (configs as any)[k] = { name: "" }
         ;(configs[k] as any).server_token = RandomUtil.randomSeq(24)
+        ;(configs[k] as any).client_basic_username = RandomUtil.randomSeq(8)
+        ;(configs[k] as any).client_basic_password = RandomUtil.randomSeq(16)
         break
     }
   })
@@ -180,10 +181,9 @@ export function randomConfigs(user: string): Config {
     masque: {
       name: user,
       server_token: RandomUtil.randomSeq(24),
-    },
-    warp_masque: {
-      name: user,
-      server_token: RandomUtil.randomSeq(24),
+      client_basic_username: RandomUtil.randomSeq(8),
+      client_basic_password: RandomUtil.randomSeq(16),
+      sui_auth_modes: [],
     },
   }
 }

@@ -91,7 +91,7 @@ func TestEndpointMarshalJSON_MasqueStripsMemberLists(t *testing.T) {
 		"transport_mode":     "connect_udp",
 		"member_client_ids":  []interface{}{float64(1), float64(2)},
 		"member_group_ids":   []interface{}{float64(3)},
-		"server_auth":        map[string]interface{}{"policy": "first_match"},
+		"server_auth":        map[string]interface{}{"policy": "first_match", "bearer_tokens": []interface{}{"tok"}},
 		"sui_tls_id":         float64(9),
 	}
 	raw, _ := json.Marshal(options)
@@ -112,6 +112,9 @@ func TestEndpointMarshalJSON_MasqueStripsMemberLists(t *testing.T) {
 	}
 	if !strings.Contains(s, "server_auth") {
 		t.Fatalf("expected server_auth in server runtime json: %s", s)
+	}
+	if strings.Contains(s, `"policy":"first_match"`) || strings.Contains(s, `"policy": "first_match"`) {
+		t.Fatalf("default policy first_match should be omitted from marshal: %s", s)
 	}
 }
 

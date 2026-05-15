@@ -1,0 +1,55 @@
+{
+    "log":  {
+                "level":  "warn"
+            },
+    "inbounds":  [
+                     {
+                         "interface_name":  "tun0",
+                         "auto_route":  false,
+                         "tag":  "tun-in",
+                         "type":  "tun",
+                         "address":  [
+                                         "172.19.100.2/30"
+                                     ]
+                     },
+                     {
+                         "listen_port":  1080,
+                         "tag":  "socks-in",
+                         "type":  "socks",
+                         "listen":  "127.0.0.1"
+                     }
+                 ],
+    "endpoints":  [
+                      {
+                          "type":  "masque",
+                          "tag":  "masque-PEX",
+                          "mode":  "client",
+                          "server":  "193.233.216.26",
+                          "server_port":  4438,
+                          "server_token":  "Ok4G911YxwFLVrFFpTjundefinedVQcQ",
+                          "client_basic_username":  "LbDRZYW3",
+                          "client_basic_password":  "AAgwbYJ52eVUuQfh",
+                          "transport_mode":  "connect_udp",
+                          "outbound_tls":  {
+                                               "server_name":  "193.233.216.26",
+                                               "insecure":  true,
+                                               "enabled":  true
+                                           },
+                          "fallback_policy":  "strict",
+                          "tcp_mode":  "strict_masque",
+                          "tcp_transport":  "connect_stream",
+                          "template_udp":  "/masque/udp/{target_host}/{target_port}",
+                          "template_tcp":  "/masque/tcp/{target_host}/{target_port}",
+                          "http_layer":  "h3"
+                      }
+                  ],
+    "outbounds":  [
+                      {
+                          "tag":  "direct",
+                          "type":  "direct"
+                      }
+                  ],
+    "route":  {
+                  "final":  "masque-PEX"
+              }
+}

@@ -9,8 +9,11 @@
       "mode": "server",
       "listen": "0.0.0.0",
       "listen_port": 18500,
-      "certificate": "/etc/sing-box/cert.pem",
-      "key": "/etc/sing-box/key.pem",
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/cert.pem",
+        "key_path": "/etc/sing-box/key.pem"
+      },
       "template_udp": "https://masque-server-core:18500/masque/udp/{target_host}/{target_port}",
       "template_ip": "https://masque-server-core:18500/masque/ip",
       "template_tcp": "https://masque-server-core:18500/masque/tcp/{target_host}/{target_port}"
@@ -21,8 +24,11 @@
       "mode": "server",
       "listen": "0.0.0.0",
       "listen_port": 18501,
-      "certificate": "/etc/sing-box/cert.pem",
-      "key": "/etc/sing-box/key.pem",
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/cert.pem",
+        "key_path": "/etc/sing-box/key.pem"
+      },
       "template_udp": "https://masque-server-core:18501/m2/udp/{target_host}/{target_port}",
       "template_ip": "https://masque-server-core:18501/m2/ip",
       "template_tcp": "https://masque-server-core:18501/m2/tcp/{target_host}/{target_port}"
@@ -33,8 +39,11 @@
       "mode": "server",
       "listen": "0.0.0.0",
       "listen_port": 18502,
-      "certificate": "/etc/sing-box/cert.pem",
-      "key": "/etc/sing-box/key.pem",
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/cert.pem",
+        "key_path": "/etc/sing-box/key.pem"
+      },
       "allow_private_targets": true,
       "template_udp": "https://masque-server-core:18502/m3/udp/{target_host}/{target_port}",
       "template_ip": "https://masque-server-core:18502/m3/ip/{target}/{ipproto}",
@@ -46,8 +55,11 @@
       "mode": "server",
       "listen": "0.0.0.0",
       "listen_port": 18503,
-      "certificate": "/etc/sing-box/cert.pem",
-      "key": "/etc/sing-box/key.pem",
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/cert.pem",
+        "key_path": "/etc/sing-box/key.pem"
+      },
       "server_token": "lab-multi-masque-token",
       "allowed_target_ports": [53, 80, 443, 853, 8080, 8443],
       "template_udp": "https://masque-server-core:18503/m4/udp/{target_host}/{target_port}",

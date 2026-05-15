@@ -1,0 +1,20 @@
+# Только клиент sing-box → реальный MASQUE VPS (конфиг из configs/masque-client-remote.generated.json).
+# Генерация: scripts/Gen-MasquePerfRemoteConfig.ps1 + remote.credentials.env
+services:
+  masque-remote-client:
+    image: masque-perf-lab:local
+    container_name: masque-perf-remote-client
+    environment:
+      GODEBUG: http2xconnect=1
+      # Optional: set in docker/masque-perf-lab/.env (compose substitutes ${VAR:-default})
+      HIDDIFY_MASQUE_CONNECT_IP_DEBUG: ${HIDDIFY_MASQUE_CONNECT_IP_DEBUG:-0}
+      MASQUE_QUIC_PACKET_CONN_POLICY: ${MASQUE_QUIC_PACKET_CONN_POLICY:-}
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/masque-client-remote.generated.json:/etc/sing-box/config.json:ro
+    command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    restart: "no"

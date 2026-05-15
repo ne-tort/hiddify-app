@@ -1,0 +1,72 @@
+# Локальный MASQUE perf lab: sing-box server + client + iperf3 через CONNECT-UDP (см. AGENTS.md §16).
+# Сертификаты: см. scripts/Build-MasquePerfLab.ps1 (certs/ не в git).
+services:
+  masque-server-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SINGBOX_ARTIFACT_STAMP: ${SINGBOX_ARTIFACT_STAMP:-0}
+    image: masque-perf-lab:local
+    container_name: masque-perf-masque-server
+    environment:
+      GODEBUG: http2xconnect=1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/masque-server.json:/etc/sing-box/config.json:ro
+      - ./certs/masque-cert.pem:/etc/sing-box/cert.pem:ro
+      - ./certs/masque-key.pem:/etc/sing-box/key.pem:ro
+    command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "ss -lun | awk '$4 ~ /:8443$/ {u=1} END {exit !u}' && ss -lnt | awk '$4 ~ /:8443$/ {t=1} END {exit !t}'",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 25
+      start_period: 3s
+    networks:
+      masque-public:
+      masque-backend:
+        ipv4_address: 172.30.99.3
+
+  masque-client-core:
+    image: masque-perf-lab:local
+    container_name: masque-perf-masque-client
+    environment:
+      GODEBUG: http2xconnect=1
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./configs/masque-client-benchmark.json:/etc/sing-box/config.json:ro
+    command: ["/usr/local/bin/sing-box", "run", "-c", "/etc/sing-box/config.json"]
+    depends_on:
+      masque-server-core:
+        condition: service_healthy
+    networks:
+      masque-public:
+
+  iperf-server:
+    image: masque-perf-lab:local
+    container_name: masque-perf-iperf-server
+    command: ["iperf3", "-s", "-p", "5201", "-B", "172.30.99.2"]
+    networks:
+      masque-backend:
+        ipv4_address: 172.30.99.2
+
+networks:
+  masque-public:
+    driver: bridge
+  masque-backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.99.0/24

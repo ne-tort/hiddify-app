@@ -1,98 +1,76 @@
 <template>
   <v-card :subtitle="$t('masque.warpMasqueTitle')">
-    <v-alert type="info" variant="tonal" density="compact" class="mb-2">
-      {{ $t('masque.warpMasqueAutoRegister') }}
-    </v-alert>
-    <v-row>
+    <v-card-text class="text-body-2 text-medium-emphasis pb-0">
+      {{ $t('masque.warpMasquePanelModel') }}
+    </v-card-text>
+    <v-row class="mt-2">
       <v-col cols="12" sm="6">
-        <v-text-field v-model="data.server" label="Server" hide-details />
-      </v-col>
-      <v-col cols="12" sm="6">
-        <v-text-field v-model.number="data.server_port" type="number" min="1" max="65535" :label="$t('in.port')" hide-details />
-      </v-col>
-    </v-row>
-    <v-row>
-      <v-col cols="12" sm="6">
-        <v-text-field v-model="data.transport_mode" :label="$t('masque.transportMode')" hide-details />
-      </v-col>
-      <v-col cols="12" sm="6">
-        <v-text-field v-model="data.tls_server_name" :label="$t('masque.tlsServerName')" hide-details />
-      </v-col>
-    </v-row>
-    <v-row>
-      <v-col cols="12" sm="6">
-        <GroupMultiSelect v-model="data.member_group_ids" :user-groups="userGroups" :label="$t('l3router.groups')" />
+        <v-select
+          v-model="transportMode"
+          :items="transportModeItems"
+          :label="$t('masque.transportMode')"
+          hide-details
+        />
       </v-col>
       <v-col cols="12" sm="6">
         <v-select
-          v-model="data.member_client_ids"
-          :items="clientItems"
-          item-title="title"
-          item-value="value"
-          multiple
-          chips
-          closable-chips
-          :label="$t('l3router.clients')"
-          density="compact"
+          v-model="httpLayer"
+          :items="httpLayerItems"
+          :label="$t('masque.httpLayer')"
+          hide-details
         />
-      </v-col>
-    </v-row>
-    <v-row>
-      <v-col cols="12">
-        <v-text-field v-model="profileCompatibility" :label="$t('masque.profileCompatibility')" hide-details />
-      </v-col>
-    </v-row>
-    <v-row>
-      <v-col cols="12">
-        <v-textarea v-model="extSecretsJson" :label="$t('masque.extHint')" rows="5" variant="outlined" hide-details spellcheck="false" />
       </v-col>
     </v-row>
   </v-card>
 </template>
 
 <script lang="ts">
-import GroupMultiSelect from '@/components/GroupMultiSelect.vue'
+const emptySelect = { title: '\u00a0', value: '' }
 
 export default {
-  components: { GroupMultiSelect },
   props: {
     data: { type: Object, required: true },
-    userGroups: { type: Array, default: () => [] },
-    clients: { type: Array, default: () => [] },
   },
   computed: {
-    clientItems() {
-      const cl = this.$props.clients ?? []
-      return (cl as any[]).map((c) => ({ title: c.name, value: c.id }))
+    transportModeItems() {
+      return [
+        emptySelect,
+        { title: 'auto', value: 'auto' },
+        { title: 'connect_udp', value: 'connect_udp' },
+        { title: 'connect_ip', value: 'connect_ip' },
+      ]
     },
-    profileCompatibility: {
+    httpLayerItems() {
+      return [
+        emptySelect,
+        { title: 'h3', value: 'h3' },
+        { title: 'h2', value: 'h2' },
+        { title: 'auto', value: 'auto' },
+      ]
+    },
+    transportMode: {
       get(): string {
-        const p = this.data.profile
-        if (!p || typeof p !== 'object') return 'consumer'
-        return String((p as any).compatibility ?? 'consumer')
+        return String((this.data as any).transport_mode ?? '')
       },
       set(v: string) {
-        if (!this.data.profile || typeof this.data.profile !== 'object') {
-          this.data.profile = {}
+        const d = this.data as any
+        if (!v || !String(v).trim()) {
+          delete d.transport_mode
+        } else {
+          d.transport_mode = v
         }
-        ;(this.data.profile as any).compatibility = v
       },
     },
-    extSecretsJson: {
+    httpLayer: {
       get(): string {
-        const ex = this.data.ext
-        if (!ex || typeof ex !== 'object') return '{\n}'
-        try {
-          return JSON.stringify(ex, null, 2)
-        } catch {
-          return '{}'
-        }
+        return String((this.data as any).http_layer ?? '')
       },
       set(v: string) {
-        try {
-          this.data.ext = JSON.parse(v && v.trim().length > 0 ? v : '{}')
-        } catch {
-          /* keep */
+        const d = this.data as any
+        if (!v || !String(v).trim()) {
+          delete d.http_layer
+        } else {
+          d.http_layer = v
         }
       },
     },

@@ -8,8 +8,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18610,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18610/s18610/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18610/s18610/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -24,8 +26,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18610,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18610/s18610/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18610/s18610/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -40,8 +44,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18610,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18610/s18610/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18610/s18610/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -57,8 +63,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18610,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18610/s18610/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -74,8 +82,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18610,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18610/s18610/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -91,8 +101,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18610,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18610/s18610/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -108,8 +120,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18611,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18611/s18611/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18611/s18611/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -123,8 +137,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18611,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18611/s18611/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18611/s18611/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -138,8 +154,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18611,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18611/s18611/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18611/s18611/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -154,8 +172,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18611,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18611/s18611/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18611-h3-ip-tcps",
@@ -170,8 +190,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18611,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18611/s18611/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18611-h2-ip-tcpi",
@@ -186,8 +208,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18612,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18612/s18612/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18612/s18612/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -201,8 +225,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18612,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18612/s18612/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18612/s18612/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -216,8 +242,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18612,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18612/s18612/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18612/s18612/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -232,8 +260,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18612,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18612/s18612/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18612-h3-ip-tcps",
@@ -248,8 +278,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18612,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18612/s18612/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18612-h2-ip-tcpi",
@@ -264,8 +296,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18612,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18612/s18612/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18612-h3-ip-mix",
@@ -280,8 +314,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18613,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18613/s18613/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18613/s18613/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -296,8 +332,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18613,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18613/s18613/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18613/s18613/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -312,8 +350,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18613,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18613/s18613/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18613/s18613/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -329,8 +369,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18613,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18613/s18613/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -346,8 +388,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18613,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18613/s18613/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -363,8 +407,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18614,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18614/s18614/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18614/s18614/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -378,8 +424,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18614,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18614/s18614/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18614/s18614/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -393,8 +441,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18614,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18614/s18614/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18614/s18614/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -409,8 +459,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18614,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18614/s18614/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18614-h3-ip-tcps",
@@ -425,8 +477,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18614,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18614/s18614/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18614-h2-ip-tcpi",
@@ -441,8 +495,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18614,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18614/s18614/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18614-h3-ip-mix",
@@ -457,8 +513,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18615,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18615/s18615/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18615/s18615/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -472,8 +530,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18615,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18615/s18615/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18615/s18615/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -487,8 +547,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18615,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18615/s18615/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18615/s18615/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -503,8 +565,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18615,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18615/s18615/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18615-h3-ip-tcps",
@@ -519,8 +583,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18615,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18615/s18615/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18615-h2-ip-tcpi",
@@ -535,8 +601,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18616,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18616/s18616/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18616/s18616/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -551,8 +619,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18616,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18616/s18616/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18616/s18616/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -567,8 +637,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18616,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18616/s18616/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18616/s18616/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -584,8 +656,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18616,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18616/s18616/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -601,8 +675,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18616,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18616/s18616/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -618,8 +694,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18616,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18616/s18616/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -635,8 +713,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18617,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18617/s18617/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18617/s18617/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -651,8 +731,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18617,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18617/s18617/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18617/s18617/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -667,8 +749,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18617,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18617/s18617/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18617/s18617/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -684,8 +768,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18617,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18617/s18617/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -701,8 +787,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18617,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18617/s18617/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -718,8 +806,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18618,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18618/s18618/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18618/s18618/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -733,8 +823,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18618,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18618/s18618/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18618/s18618/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -748,8 +840,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18618,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18618/s18618/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18618/s18618/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -764,8 +858,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18618,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18618/s18618/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18618-h3-ip-tcps",
@@ -780,8 +876,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18618,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18618/s18618/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18618-h2-ip-tcpi",
@@ -796,8 +894,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18618,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18618/s18618/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18618-h3-ip-mix",
@@ -812,8 +912,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18619,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18619/s18619/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18619/s18619/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -827,8 +929,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18619,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18619/s18619/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18619/s18619/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -842,8 +946,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18619,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18619/s18619/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18619/s18619/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -858,8 +964,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18619,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18619/s18619/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18619-h3-ip-tcps",
@@ -874,8 +982,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18619,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18619/s18619/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18619-h2-ip-tcpi",
@@ -890,8 +1000,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18620,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18620/s18620/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18620/s18620/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -905,8 +1017,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18620,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18620/s18620/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18620/s18620/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -920,8 +1034,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18620,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18620/s18620/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18620/s18620/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -936,8 +1052,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18620,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18620/s18620/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18620-h3-ip-tcps",
@@ -952,8 +1070,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18620,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18620/s18620/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18620-h2-ip-tcpi",
@@ -968,8 +1088,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18620,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18620/s18620/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18620-h3-ip-mix",
@@ -984,8 +1106,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18621,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18621/s18621/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18621/s18621/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1000,8 +1124,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18621,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18621/s18621/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18621/s18621/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1016,8 +1142,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18621,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18621/s18621/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18621/s18621/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1033,8 +1161,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18621,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18621/s18621/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -1050,8 +1180,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18621,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18621/s18621/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -1067,8 +1199,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18622,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18622/s18622/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18622/s18622/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1083,8 +1217,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18622,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18622/s18622/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18622/s18622/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1099,8 +1235,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18622,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18622/s18622/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18622/s18622/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1116,8 +1254,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18622,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18622/s18622/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -1133,8 +1273,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18622,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18622/s18622/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -1150,8 +1292,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18622,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18622/s18622/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -1167,8 +1311,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18623,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18623/s18623/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18623/s18623/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1182,8 +1328,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18623,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18623/s18623/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18623/s18623/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1197,8 +1345,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18623,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18623/s18623/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18623/s18623/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1213,8 +1363,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18623,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18623/s18623/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18623-h3-ip-tcps",
@@ -1229,8 +1381,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18623,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18623/s18623/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18623-h2-ip-tcpi",
@@ -1245,8 +1399,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18624,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18624/s18624/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18624/s18624/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1260,8 +1416,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18624,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18624/s18624/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18624/s18624/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1275,8 +1433,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18624,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18624/s18624/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18624/s18624/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1291,8 +1451,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18624,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18624/s18624/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18624-h3-ip-tcps",
@@ -1307,8 +1469,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18624,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18624/s18624/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18624-h2-ip-tcpi",
@@ -1323,8 +1487,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18624,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18624/s18624/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18624-h3-ip-mix",
@@ -1339,8 +1505,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18625,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18625/s18625/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18625/s18625/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1355,8 +1523,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18625,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18625/s18625/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18625/s18625/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1371,8 +1541,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18625,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18625/s18625/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18625/s18625/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1388,8 +1560,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18625,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18625/s18625/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -1405,8 +1579,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18625,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18625/s18625/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "server_token":  "vpsmulti9a2f7c1e8b4d6e0f3a5c7d9e1b4a6c8",
@@ -1422,8 +1598,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18626,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18626/s18626/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18626/s18626/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1437,8 +1615,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18626,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18626/s18626/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18626/s18626/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1452,8 +1632,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18626,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18626/s18626/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18626/s18626/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1468,8 +1650,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18626,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18626/s18626/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18626-h3-ip-tcps",
@@ -1484,8 +1668,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18626,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18626/s18626/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18626-h2-ip-tcpi",
@@ -1500,8 +1686,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18626,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18626/s18626/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18626-h3-ip-mix",
@@ -1516,8 +1704,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18627,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18627/s18627/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18627/s18627/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1531,8 +1721,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18627,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18627/s18627/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18627/s18627/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1546,8 +1738,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18627,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_udp":  "https://masque.ai-qwerty.ru:18627/s18627/udp/{target_host}/{target_port}",
                           "template_tcp":  "https://masque.ai-qwerty.ru:18627/s18627/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
@@ -1562,8 +1756,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18627,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18627/s18627/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_stream",
                           "tag":  "cl-18627-h3-ip-tcps",
@@ -1578,8 +1774,10 @@
                           "type":  "masque",
                           "server":  "masque.ai-qwerty.ru",
                           "server_port":  18627,
-                          "insecure":  false,
-                          "tls_server_name":  "masque.ai-qwerty.ru",
+                          "outbound_tls":  {
+                              "enabled":  true,
+                              "server_name":  "masque.ai-qwerty.ru"
+                          },
                           "template_tcp":  "https://masque.ai-qwerty.ru:18627/s18627/tcp/{target_host}/{target_port}",
                           "tcp_transport":  "connect_ip",
                           "tag":  "cl-18627-h2-ip-tcpi",

@@ -152,7 +152,7 @@ func (j *JsonService) GetJsonHapp(subId string, requestHost string) (*string, []
 	return &result, headers, nil
 }
 
-// GetJsonMasque returns JSON subscription with masque / warp_masque endpoints merged for the client.
+// GetJsonMasque returns JSON subscription with masque endpoints merged for the client (warp_masque is panel-only and not injected here).
 func (j *JsonService) GetJsonMasque(subId string, requestHost string) (*string, []string, error) {
 	jsonConfig, client, err := j.assembleJsonMap(subId)
 	if err != nil {
